@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
 use gst::prelude::*;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 use url::Url;
@@ -36,8 +38,15 @@ pub enum PlaybackState {
 pub struct PlaybackEngine {
     playbin: gst::Element,
     bus: gst::Bus,
+    gapless: Arc<Mutex<GaplessState>>,
     state: PlaybackState,
     current_item_id: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct GaplessState {
+    pending_next: Option<PlaybackRequest>,
+    transitions: VecDeque<PlaybackRequest>,
 }
 
 impl PlaybackEngine {
@@ -46,9 +55,39 @@ impl PlaybackEngine {
             .build()
             .map_err(|_| PlaybackError::PlaybinUnavailable)?;
         let bus = playbin.bus().ok_or(PlaybackError::PlaybinUnavailable)?;
+        let gapless = Arc::new(Mutex::new(GaplessState::default()));
+        let gapless_for_signal = gapless.clone();
+        playbin.connect("about-to-finish", false, move |values| {
+            let Some(playbin) = values
+                .first()
+                .and_then(|value| value.get::<gst::Element>().ok())
+            else {
+                return None;
+            };
+            let Some(request) = gapless_for_signal
+                .lock()
+                .ok()
+                .and_then(|mut gapless| gapless.pending_next.take())
+            else {
+                return None;
+            };
+
+            tracing::info!(
+                item_id = %request.item_id,
+                title = %request.title,
+                "queueing gapless Jellyfin stream"
+            );
+            playbin.set_property("uri", request.stream_url.as_str());
+            if let Ok(mut gapless) = gapless_for_signal.lock() {
+                gapless.transitions.push_back(request);
+            }
+            None
+        });
+
         Ok(Self {
             playbin,
             bus,
+            gapless,
             state: PlaybackState::Stopped,
             current_item_id: None,
         })
@@ -69,6 +108,7 @@ impl PlaybackEngine {
             "starting Jellyfin stream"
         );
         self.playbin.set_state(gst::State::Null)?;
+        self.clear_gapless_state();
         self.current_item_id = None;
         self.state = PlaybackState::Stopped;
         self.playbin
@@ -77,6 +117,23 @@ impl PlaybackEngine {
         self.current_item_id = Some(request.item_id);
         self.state = PlaybackState::Playing;
         Ok(())
+    }
+
+    pub fn set_next(&mut self, request: Option<PlaybackRequest>) {
+        if let Ok(mut gapless) = self.gapless.lock() {
+            gapless.pending_next = request;
+        }
+    }
+
+    pub fn take_gapless_transition(&mut self) -> Option<PlaybackRequest> {
+        let request = self
+            .gapless
+            .lock()
+            .ok()
+            .and_then(|mut gapless| gapless.transitions.pop_front())?;
+        self.current_item_id = Some(request.item_id.clone());
+        self.state = PlaybackState::Playing;
+        Some(request)
     }
 
     pub fn resume(&mut self) -> Result<(), PlaybackError> {
@@ -136,9 +193,17 @@ impl PlaybackEngine {
 
     pub fn stop(&mut self) -> Result<(), PlaybackError> {
         self.playbin.set_state(gst::State::Null)?;
+        self.clear_gapless_state();
         self.current_item_id = None;
         self.state = PlaybackState::Stopped;
         Ok(())
+    }
+
+    fn clear_gapless_state(&mut self) {
+        if let Ok(mut gapless) = self.gapless.lock() {
+            gapless.pending_next = None;
+            gapless.transitions.clear();
+        }
     }
 }
 

@@ -2632,6 +2632,7 @@ fn toggle_shuffle(state: &Rc<RefCell<UiState>>) {
         ui.shuffle_enabled = !ui.shuffle_enabled;
         let selected_index = ui.selected_index;
         rebuild_playback_order(&mut ui, selected_index);
+        arm_gapless_next(&mut ui);
         update_shuffle_button(&ui);
     }
     rebuild_queue_list(state);
@@ -2828,9 +2829,10 @@ fn play_selected_track(state: &Rc<RefCell<UiState>>) {
     match playback.play(request) {
         Ok(()) => {
             ui.now_playing_key = Some(track_key(&track));
+            arm_gapless_next(&mut ui);
+            update_now_playing_labels(&ui);
             ui.playback_status
                 .set_text(&format!("Playing | {}", track.quality));
-            update_now_playing_labels(&ui);
             update_mpris_metadata(&mut ui);
             update_mpris_status(&mut ui);
             refresh_now_playing = true;
@@ -2847,6 +2849,26 @@ fn play_selected_track(state: &Rc<RefCell<UiState>>) {
     update_list_indicators(state);
     if refresh_now_playing {
         load_selected_cover_art(state);
+    }
+}
+
+fn playback_request_for_track(track: &UiTrack) -> Option<PlaybackRequest> {
+    Some(PlaybackRequest {
+        item_id: track.item_id.clone().unwrap_or_default(),
+        stream_url: track.stream_url.as_deref()?.parse().ok()?,
+        title: track.title.clone(),
+    })
+}
+
+fn next_gapless_request(ui: &UiState) -> Option<PlaybackRequest> {
+    let next_index = next_playback_index(ui)?;
+    playback_request_for_track(ui.tracks.get(next_index)?)
+}
+
+fn arm_gapless_next(ui: &mut UiState) {
+    let request = next_gapless_request(ui);
+    if let Some(playback) = ui.playback.as_mut() {
+        playback.set_next(request);
     }
 }
 
@@ -3603,6 +3625,10 @@ fn start_playback_timer(state: &Rc<RefCell<UiState>>) {
 }
 
 fn update_playback_position(state: &Rc<RefCell<UiState>>) {
+    if apply_gapless_transition(state) {
+        return;
+    }
+
     if playback_reached_end(state) {
         advance_after_track_end(state);
         return;
@@ -3653,6 +3679,54 @@ fn playback_reached_end(state: &Rc<RefCell<UiState>>) -> bool {
         .as_mut()
         .map(PlaybackEngine::take_end_of_stream)
         .unwrap_or(false)
+}
+
+fn apply_gapless_transition(state: &Rc<RefCell<UiState>>) -> bool {
+    let transition = {
+        let mut ui = state.borrow_mut();
+        ui.playback
+            .as_mut()
+            .and_then(PlaybackEngine::take_gapless_transition)
+    };
+    let Some(transition) = transition else {
+        return false;
+    };
+
+    {
+        let mut ui = state.borrow_mut();
+        let transition_index = ui
+            .tracks
+            .iter()
+            .position(|track| track.item_id.as_deref() == Some(transition.item_id.as_str()))
+            .or_else(|| next_playback_index(&ui));
+
+        if let Some(index) = transition_index {
+            ui.selected_index = index;
+        }
+
+        if let Some(track) = ui.tracks.get(ui.selected_index).cloned() {
+            let quality = track.quality.clone();
+            ui.now_playing_key = Some(track_key(&track));
+            update_now_playing_labels(&ui);
+            ui.playback_status.set_text(&format!("Playing | {quality}"));
+        } else {
+            ui.now_playing_key = None;
+            ui.playback_status.set_text("Playing next stream");
+        }
+
+        arm_gapless_next(&mut ui);
+        update_play_button(&ui);
+        update_mpris_metadata(&mut ui);
+        update_mpris_status(&mut ui);
+    }
+
+    let selected_index = state.borrow().selected_index;
+    select_track_model_row(state, selected_index);
+    rebuild_queue_list(state);
+    update_list_indicators(state);
+    load_selected_cover_art(state);
+    load_selected_waveform(state);
+    true
 }
 
 fn advance_after_track_end(state: &Rc<RefCell<UiState>>) {
