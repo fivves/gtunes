@@ -129,6 +129,7 @@ struct UiState {
     detail_header: Option<gtk::Box>,
     detail_title_label: Option<gtk::Label>,
     detail_subtitle_label: Option<gtk::Label>,
+    nav_list: Option<gtk::ListBox>,
     nav_track_count: Option<gtk::Label>,
     nav_album_count: Option<gtk::Label>,
     nav_artist_count: Option<gtk::Label>,
@@ -136,6 +137,7 @@ struct UiState {
     track_selection: Option<gtk::SingleSelection>,
     track_stack: Option<gtk::Stack>,
     track_empty: Option<gtk::Label>,
+    track_empty_detail: Option<gtk::Label>,
     now_title: gtk::Label,
     now_meta: gtk::Label,
     playback_status: gtk::Label,
@@ -190,6 +192,8 @@ const LEFT_SIDEBAR_CONTENT_WIDTH: i32 = 220;
 const LEFT_SIDEBAR_WIDTH: i32 = LEFT_SIDEBAR_CONTENT_WIDTH + 20;
 const ACTION_PANEL_WIDTH: i32 = 130;
 const ALBUM_ART_SIZE: i32 = 168;
+const COLLECTION_TILE_WIDTH: i32 = 184;
+const ARTIST_ART_SIZE: i32 = 148;
 static CONNECTION_GENERATION: AtomicU64 = AtomicU64::new(0);
 static CACHE_RESET_LOCK: Mutex<()> = Mutex::new(());
 
@@ -378,6 +382,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         detail_header: None,
         detail_title_label: None,
         detail_subtitle_label: None,
+        nav_list: None,
         nav_track_count: None,
         nav_album_count: None,
         nav_artist_count: None,
@@ -385,6 +390,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         track_selection: None,
         track_stack: None,
         track_empty: None,
+        track_empty_detail: None,
         now_title: label("No track selected", "now-title"),
         now_meta: label("Connect to Jellyfin to load music", "meta"),
         playback_status: label("Jellyfin stream | Not playing", "meta"),
@@ -422,10 +428,36 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
     root.append(&build_player_bar(state.clone(), context_toggle.clone()));
     root.append(&build_body(state.clone(), context_revealer, context_toggle));
     root.append(&build_bottom_bar(state.clone()));
+    connect_app_shortcuts(&root, state.clone());
     load_selected_waveform(&state);
     start_playback_timer(&state);
 
     window
+}
+
+fn connect_app_shortcuts(root: &gtk::Box, state: Rc<RefCell<UiState>>) {
+    let controller = gtk::EventControllerKey::new();
+    controller.set_propagation_phase(gtk::PropagationPhase::Capture);
+    controller.connect_key_pressed(move |_, key, _, modifiers| {
+        if !modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+            return gtk::glib::Propagation::Proceed;
+        }
+
+        match key {
+            gtk::gdk::Key::_1 => set_library_page(&state, LibraryPage::Tracks),
+            gtk::gdk::Key::_2 => set_library_page(&state, LibraryPage::Albums),
+            gtk::gdk::Key::_3 => set_library_page(&state, LibraryPage::Artists),
+            gtk::gdk::Key::f | gtk::gdk::Key::F => {
+                if let Some(search) = state.borrow().search_entry.as_ref() {
+                    search.grab_focus();
+                }
+            }
+            _ => return gtk::glib::Propagation::Proceed,
+        }
+
+        gtk::glib::Propagation::Stop
+    });
+    root.add_controller(controller);
 }
 
 fn setup_mpris(state: Rc<RefCell<UiState>>) {
@@ -743,8 +775,26 @@ fn build_player_bar(state: Rc<RefCell<UiState>>, context_toggle: gtk::Button) ->
     actions.add_overlay(&utility_row);
 
     player.append(&actions);
+    connect_player_bar_responsive_layout(&player, &actions, &state.borrow().playback_status);
 
     player
+}
+
+fn connect_player_bar_responsive_layout(
+    player: &gtk::Box,
+    actions: &gtk::Overlay,
+    playback_status: &gtk::Label,
+) {
+    let actions = actions.clone();
+    let playback_status = playback_status.clone();
+    player.add_tick_callback(move |player, _| {
+        let width = player.allocated_width();
+        if width > 0 {
+            actions.set_visible(width >= 560);
+            playback_status.set_visible(width >= 720);
+        }
+        gtk::glib::ControlFlow::Continue
+    });
 }
 
 #[allow(deprecated)]
@@ -1399,8 +1449,8 @@ fn album_grid_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
     flow.set_selection_mode(gtk::SelectionMode::None);
     flow.set_min_children_per_line(1);
     flow.set_max_children_per_line(8);
-    flow.set_row_spacing(16);
-    flow.set_column_spacing(16);
+    flow.set_row_spacing(18);
+    flow.set_column_spacing(18);
     flow.set_homogeneous(false);
     flow.set_valign(Align::Start);
     scroll.set_child(Some(&flow));
@@ -1419,11 +1469,12 @@ fn artist_grid_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
 
     let flow = gtk::FlowBox::new();
     flow.add_css_class("collection-grid");
+    flow.add_css_class("artist-grid");
     flow.set_selection_mode(gtk::SelectionMode::None);
     flow.set_min_children_per_line(1);
     flow.set_max_children_per_line(8);
-    flow.set_row_spacing(16);
-    flow.set_column_spacing(16);
+    flow.set_row_spacing(18);
+    flow.set_column_spacing(18);
     flow.set_homogeneous(true);
     flow.set_valign(Align::Start);
     scroll.set_child(Some(&flow));
@@ -1517,14 +1568,18 @@ fn collection_empty_state(text: &str) -> gtk::Box {
 fn album_tile(album: AlbumSummary, state: Rc<RefCell<UiState>>) -> gtk::Button {
     let button = collection_tile_button(&album.name);
     button.add_css_class("album-tile");
-    button.set_halign(Align::Start);
+    button.set_halign(Align::Fill);
     button.set_hexpand(false);
-    button.set_size_request(ALBUM_ART_SIZE, ALBUM_ART_SIZE);
+    button.set_size_request(COLLECTION_TILE_WIDTH, -1);
+
+    let layout = gtk::Box::new(Orientation::Vertical, 8);
+    layout.set_halign(Align::Fill);
+    layout.set_hexpand(true);
 
     let frame = gtk::Box::new(Orientation::Vertical, 0);
     frame.add_css_class("album-art-frame");
     frame.set_size_request(ALBUM_ART_SIZE, ALBUM_ART_SIZE);
-    frame.set_halign(Align::Start);
+    frame.set_halign(Align::Center);
     frame.set_valign(Align::Fill);
     frame.set_overflow(gtk::Overflow::Hidden);
 
@@ -1539,7 +1594,17 @@ fn album_tile(album: AlbumSummary, state: Rc<RefCell<UiState>>) -> gtk::Button {
         load_queue_art(Some(url), art.clone(), current_url);
     }
     frame.append(&art);
-    button.set_child(Some(&frame));
+    layout.append(&frame);
+    layout.append(&collection_tile_label(&album.name, "collection-title"));
+    layout.append(&collection_tile_label(
+        &format!(
+            "{} | {}",
+            album.artist,
+            count_text(album.song_count, "song", "songs")
+        ),
+        "collection-subtitle",
+    ));
+    button.set_child(Some(&layout));
 
     button.connect_clicked(move |_| {
         show_album_tracks(&state, &album);
@@ -1549,15 +1614,19 @@ fn album_tile(album: AlbumSummary, state: Rc<RefCell<UiState>>) -> gtk::Button {
 
 fn artist_tile(artist: ArtistSummary, state: Rc<RefCell<UiState>>) -> gtk::Button {
     let button = collection_tile_button(&artist.name);
-    let layout = gtk::Box::new(Orientation::Vertical, 7);
-    layout.set_halign(Align::Fill);
+    button.add_css_class("artist-tile");
 
-    let avatar = gtk::Picture::new();
+    let layout = gtk::Box::new(Orientation::Vertical, 8);
+    layout.set_halign(Align::Fill);
+    layout.set_hexpand(true);
+
+    let avatar = gtk::Image::from_icon_name("avatar-default-symbolic");
     avatar.add_css_class("artist-art");
-    avatar.set_size_request(148, 148);
-    avatar.set_content_fit(gtk::ContentFit::Cover);
-    avatar.set_can_shrink(false);
+    avatar.add_css_class("artist-placeholder");
+    avatar.set_size_request(ARTIST_ART_SIZE, ARTIST_ART_SIZE);
+    avatar.set_halign(Align::Center);
     avatar.set_overflow(gtk::Overflow::Hidden);
+    avatar.set_pixel_size(56);
     if let Some(url) = artist.image_url.clone() {
         load_picture_art(url, avatar.clone());
     }
@@ -1578,9 +1647,9 @@ fn artist_tile(artist: ArtistSummary, state: Rc<RefCell<UiState>>) -> gtk::Butto
 fn collection_tile_button(title: &str) -> gtk::Button {
     let button = gtk::Button::new();
     button.add_css_class("collection-tile");
-    button.add_css_class("flat");
     button.set_halign(Align::Fill);
     button.set_valign(Align::Start);
+    button.set_size_request(COLLECTION_TILE_WIDTH, -1);
     button.set_tooltip_text(Some(title));
     button.set_cursor_from_name(Some("pointer"));
     button
@@ -1588,9 +1657,14 @@ fn collection_tile_button(title: &str) -> gtk::Button {
 
 fn collection_tile_label(text: &str, class_name: &str) -> gtk::Label {
     let title = label(text, class_name);
+    title.set_xalign(0.5);
+    title.set_justify(gtk::Justification::Center);
     title.set_single_line_mode(true);
     title.set_lines(1);
     title.set_halign(Align::Fill);
+    title.set_hexpand(true);
+    title.set_width_chars(1);
+    title.set_max_width_chars(24);
     title
 }
 
@@ -1729,10 +1803,7 @@ fn artist_summaries(tracks: &[UiTrack], query: &str) -> Vec<ArtistSummary> {
 }
 
 fn artist_summary_image_url(album: &AlbumSummary) -> Option<String> {
-    album
-        .artist_image_url
-        .clone()
-        .or_else(|| album.artwork_url.clone())
+    album.artist_image_url.clone()
 }
 
 fn artist_count_text(album_count: usize, song_count: usize) -> String {
@@ -1943,12 +2014,21 @@ fn track_table(state: Rc<RefCell<UiState>>) -> gtk::Box {
     scroll.set_child(Some(&list));
     stack.add_named(&scroll, Some("list"));
 
-    let empty = label("Connect to Jellyfin to load your music", "meta");
-    empty.set_margin_top(18);
-    empty.set_margin_start(12);
-    empty.set_margin_end(12);
-    empty.set_valign(Align::Start);
-    stack.add_named(&empty, Some("empty"));
+    let empty_state = gtk::Box::new(Orientation::Vertical, 8);
+    empty_state.add_css_class("track-empty-state");
+    empty_state.set_valign(Align::Start);
+    let empty_icon = gtk::Image::from_icon_name("folder-music-symbolic");
+    empty_icon.add_css_class("placeholder-icon");
+    empty_icon.set_pixel_size(28);
+    empty_icon.set_halign(Align::Start);
+    let empty = label("Connect to Jellyfin to load your music", "rail-title");
+    let empty_detail = label("Your Jellyfin tracks will appear here after sync.", "meta");
+    empty_detail.set_wrap(true);
+    empty_detail.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    empty_state.append(&empty_icon);
+    empty_state.append(&empty);
+    empty_state.append(&empty_detail);
+    stack.add_named(&empty_state, Some("empty"));
     stack.set_visible_child_name("empty");
 
     {
@@ -1956,6 +2036,7 @@ fn track_table(state: Rc<RefCell<UiState>>) -> gtk::Box {
         ui.track_selection = Some(selection);
         ui.track_stack = Some(stack.clone());
         ui.track_empty = Some(empty);
+        ui.track_empty_detail = Some(empty_detail);
     }
     refresh_track_model(&state);
 
@@ -2118,21 +2199,39 @@ fn refresh_track_model(state: &Rc<RefCell<UiState>>) {
         let mut ui = state.borrow_mut();
         ui.track_indicators.clear();
     }
-    let (model, selection, stack, empty, track_count, selected_index, empty_text) = {
+    let (
+        model,
+        selection,
+        stack,
+        empty,
+        empty_detail,
+        track_count,
+        selected_index,
+        empty_text,
+        empty_detail_text,
+    ) = {
         let ui = state.borrow();
-        let empty_text = if ui.search_query.is_empty() {
-            "Connect to Jellyfin to load your music".to_string()
+        let (empty_text, empty_detail_text) = if ui.search_query.is_empty() {
+            (
+                "Connect to Jellyfin to load your music".to_string(),
+                "Your Jellyfin tracks will appear here after sync.".to_string(),
+            )
         } else {
-            format!("No tracks match \"{}\"", ui.search_query)
+            (
+                format!("No tracks match \"{}\"", ui.search_query),
+                "Try a different search or clear the search field.".to_string(),
+            )
         };
         (
             ui.track_model.clone(),
             ui.track_selection.clone(),
             ui.track_stack.clone(),
             ui.track_empty.clone(),
+            ui.track_empty_detail.clone(),
             ui.tracks.len(),
             ui.selected_index,
             empty_text,
+            empty_detail_text,
         )
     };
 
@@ -2149,6 +2248,9 @@ fn refresh_track_model(state: &Rc<RefCell<UiState>>) {
 
     if let Some(empty) = empty.as_ref() {
         empty.set_text(&empty_text);
+    }
+    if let Some(empty_detail) = empty_detail.as_ref() {
+        empty_detail.set_text(&empty_detail_text);
     }
     if let Some(stack) = stack.as_ref() {
         stack.set_visible_child_name(if track_count == 0 { "empty" } else { "list" });
@@ -2333,7 +2435,9 @@ fn set_library_page(state: &Rc<RefCell<UiState>>, page: LibraryPage) {
     }
     refresh_track_model(state);
     refresh_collection_grids(state);
+    update_nav_selection(state);
     update_content_view(state);
+    focus_active_collection_grid(state);
     load_selected_cover_art(state);
     load_selected_waveform(state);
 }
@@ -2389,8 +2493,44 @@ fn show_artist_albums(state: &Rc<RefCell<UiState>>, artist: &ArtistSummary) {
     refresh_track_model(state);
     refresh_collection_grids(state);
     update_content_view(state);
+    focus_active_collection_grid(state);
     load_selected_cover_art(state);
     load_selected_waveform(state);
+}
+
+fn focus_active_collection_grid(state: &Rc<RefCell<UiState>>) {
+    let (active_page, album_filter, artist_filter, album_grid, artist_grid) = {
+        let ui = state.borrow();
+        (
+            ui.active_page,
+            ui.album_filter.clone(),
+            ui.artist_filter.clone(),
+            ui.album_grid.clone(),
+            ui.artist_grid.clone(),
+        )
+    };
+
+    let grid = match active_page {
+        LibraryPage::Albums if album_filter.is_none() => album_grid,
+        LibraryPage::Artists if artist_filter.is_none() => artist_grid,
+        LibraryPage::Artists if album_filter.is_none() => album_grid,
+        _ => None,
+    };
+
+    let Some(grid) = grid else {
+        return;
+    };
+    let Some(child) = grid.first_child() else {
+        return;
+    };
+    if let Some(button) = child
+        .first_child()
+        .and_then(|widget| widget.downcast::<gtk::Button>().ok())
+    {
+        button.grab_focus();
+    } else {
+        child.grab_focus();
+    }
 }
 
 fn return_to_collection_grid(state: &Rc<RefCell<UiState>>) {
@@ -2529,6 +2669,28 @@ fn update_nav_counts(state: &Rc<RefCell<UiState>>) {
     }
     if let Some(label) = artist_label.as_ref() {
         label.set_text(&artists.to_string());
+    }
+}
+
+fn update_nav_selection(state: &Rc<RefCell<UiState>>) {
+    let (list, active_page) = {
+        let ui = state.borrow();
+        (ui.nav_list.clone(), ui.active_page)
+    };
+    let Some(list) = list else {
+        return;
+    };
+
+    let row_index = match active_page {
+        LibraryPage::Tracks => 0,
+        LibraryPage::Albums => 1,
+        LibraryPage::Artists => 2,
+    };
+    if list.selected_row().as_ref().map(gtk::ListBoxRow::index) == Some(row_index) {
+        return;
+    }
+    if let Some(row) = list.row_at_index(row_index) {
+        list.select_row(Some(&row));
     }
 }
 
@@ -3519,11 +3681,13 @@ fn queue_card(state: Rc<RefCell<UiState>>) -> gtk::Box {
 
         let row = gtk::Box::new(Orientation::Horizontal, 7);
         row.set_halign(Align::Fill);
+        row.set_valign(Align::Center);
         row.set_hexpand(true);
         row.set_size_request(0, -1);
 
         let art = cover_art(28);
         art.set_icon_name(Some("audio-x-generic-symbolic"));
+        art.set_valign(Align::Center);
         row.append(&art);
 
         let title = label("", "queue-title");
@@ -3542,6 +3706,7 @@ fn queue_card(state: Rc<RefCell<UiState>>) -> gtk::Box {
         artist.set_hexpand(true);
         let text = gtk::Box::new(Orientation::Vertical, 1);
         text.set_halign(Align::Fill);
+        text.set_valign(Align::Center);
         text.set_hexpand(true);
         text.set_size_request(0, -1);
         text.append(&title);
@@ -3660,7 +3825,7 @@ fn load_queue_art(
     });
 }
 
-fn load_picture_art(url: String, picture: gtk::Picture) {
+fn load_picture_art(url: String, image: gtk::Image) {
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
         let result = fetch_cached_image_file(&url);
@@ -3672,7 +3837,11 @@ fn load_picture_art(url: String, picture: gtk::Picture) {
             Ok(Ok(path)) => {
                 let file = gtk::gio::File::for_path(path);
                 match gtk::gdk::Texture::from_file(&file) {
-                    Ok(texture) => picture.set_paintable(Some(&texture)),
+                    Ok(texture) => {
+                        image.remove_css_class("artist-placeholder");
+                        image.set_pixel_size(ARTIST_ART_SIZE);
+                        image.set_paintable(Some(&texture));
+                    }
                     Err(error) => tracing::warn!(%error, "failed to decode artist artwork"),
                 }
                 gtk::glib::ControlFlow::Break
@@ -3954,6 +4123,7 @@ fn nav_list(state: Rc<RefCell<UiState>>) -> gtk::ListBox {
     let list = gtk::ListBox::new();
     list.add_css_class("nav-list");
     list.set_selection_mode(gtk::SelectionMode::Single);
+    state.borrow_mut().nav_list = Some(list.clone());
     let rows = [
         (
             "audio-x-generic-symbolic",

@@ -9,7 +9,7 @@ window {
 }
 
 .player-bar {
-  padding: 12px;
+  padding: 14px 16px;
   border-bottom: 1px solid @borders;
   background: @headerbar_bg_color;
 }
@@ -20,9 +20,10 @@ window {
 }
 
 .sidebar-cover-frame {
-  margin-top: 10px;
+  margin-top: 12px;
   border-radius: 8px;
   background: @card_bg_color;
+  box-shadow: 0 1px 2px alpha(@window_fg_color, .10);
 }
 
 .sidebar-cover {
@@ -41,10 +42,11 @@ window {
 }
 
 .transport {
-  padding: 3px;
+  padding: 4px;
   border: 1px solid @borders;
   border-radius: 999px;
   background: @card_bg_color;
+  box-shadow: 0 1px 2px alpha(@window_fg_color, .06);
 }
 
 .icon-button {
@@ -55,10 +57,15 @@ window {
   border-radius: 999px;
   background: transparent;
   color: @window_fg_color;
+  transition: background-color 140ms ease-out, color 140ms ease-out, box-shadow 140ms ease-out;
 }
 
 .icon-button:hover {
   background: alpha(@window_fg_color, .08);
+}
+
+.icon-button:active {
+  background: alpha(@window_fg_color, .13);
 }
 
 .toolbar-button {
@@ -84,15 +91,20 @@ window {
   min-height: 42px;
   color: @accent_fg_color;
   background: @accent_bg_color;
+  box-shadow: 0 1px 2px alpha(@window_fg_color, .14);
+}
+
+.play-button:hover {
+  box-shadow: 0 2px 6px alpha(@window_fg_color, .16);
 }
 
 .wave-card {
   min-height: 116px;
-  padding: 10px 14px 8px;
+  padding: 12px 16px 10px;
   border: 1px solid @borders;
   border-radius: 8px;
   background: @card_bg_color;
-  box-shadow: 0 1px 2px alpha(@window_fg_color, .06);
+  box-shadow: 0 1px 2px alpha(@window_fg_color, .08);
 }
 
 .wave-marker {
@@ -122,13 +134,13 @@ window {
 
 .sidebar {
   min-width: 184px;
-  padding: 12px 10px;
+  padding: 14px 10px;
   border-right: 1px solid @borders;
   background: @sidebar_bg_color;
 }
 
 .section-title {
-  margin: 5px 8px 7px;
+  margin: 4px 8px 8px;
   color: alpha(@window_fg_color, .72);
   font-size: 11px;
   font-weight: 900;
@@ -146,9 +158,14 @@ window {
 }
 
 .nav-list row {
-  min-height: 36px;
+  min-height: 38px;
   padding: 0 8px;
   border-radius: 7px;
+  transition: background-color 140ms ease-out, color 140ms ease-out;
+}
+
+.nav-list row:hover {
+  background: alpha(@window_fg_color, .06);
 }
 
 .nav-list row:selected {
@@ -183,23 +200,24 @@ window {
 
 .content-header {
   min-height: 64px;
-  padding: 12px 14px;
+  padding: 12px 16px;
   border-bottom: 1px solid @borders;
   background: @window_bg_color;
 }
 
 .page-title {
   color: @window_fg_color;
-  font-size: 25px;
+  font-size: 21px;
   font-weight: 900;
 }
 
 .connection-card {
-  margin: 12px 14px;
-  padding: 12px;
+  margin: 14px 16px 12px;
+  padding: 14px;
   border: 1px solid @borders;
   border-radius: 8px;
   background: @card_bg_color;
+  box-shadow: 0 1px 2px alpha(@window_fg_color, .06);
 }
 
 .connection-card entry {
@@ -215,7 +233,7 @@ window {
 
 .detail-header {
   min-height: 64px;
-  padding: 10px 14px;
+  padding: 10px 16px;
   border-bottom: 1px solid @borders;
   background: @window_bg_color;
 }
@@ -225,7 +243,7 @@ window {
 }
 
 .collection-grid {
-  padding: 16px;
+  padding: 18px;
   background: @view_bg_color;
 }
 
@@ -234,7 +252,13 @@ window {
 .album-grid flowboxchild:active,
 .album-grid flowboxchild:selected,
 .album-grid flowboxchild:focus,
-.album-grid flowboxchild:focus-visible {
+.album-grid flowboxchild:focus-visible,
+.artist-grid flowboxchild,
+.artist-grid flowboxchild:hover,
+.artist-grid flowboxchild:active,
+.artist-grid flowboxchild:selected,
+.artist-grid flowboxchild:focus,
+.artist-grid flowboxchild:focus-visible {
   padding: 0;
   border: 0;
   border-radius: 0;
@@ -243,43 +267,43 @@ window {
 }
 
 .collection-tile {
-  min-width: 156px;
-  min-height: 228px;
+  min-width: 184px;
+  min-height: 238px;
   padding: 8px;
+  border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
+  transition: background-color 140ms ease-out, border-color 140ms ease-out, box-shadow 140ms ease-out;
 }
 
 .album-tile {
-  min-width: 168px;
-  min-height: 168px;
-  padding: 0;
-  border: 0;
-  box-shadow: none;
-  background: transparent;
+  min-width: 184px;
 }
 
 .collection-tile:hover {
-  background: alpha(@accent_bg_color, .10);
+  border-color: alpha(@borders, .72);
+  background: @card_bg_color;
+  box-shadow: 0 1px 3px alpha(@window_fg_color, .08);
+}
+
+.collection-tile:focus-visible {
+  border-color: alpha(@accent_bg_color, .58);
+  outline: 2px solid alpha(@accent_bg_color, .36);
+  outline-offset: -2px;
+  background: @card_bg_color;
 }
 
 .album-tile,
 .album-tile:hover,
 .album-tile:active,
 .album-tile:focus,
-.album-tile:focus-visible,
-button.album-tile.flat,
-button.album-tile.flat:hover,
-button.album-tile.flat:active,
-button.album-tile.flat:focus,
-button.album-tile.flat:focus-visible {
-  border: 0;
-  box-shadow: none;
-  background: transparent;
+.album-tile:focus-visible {
+  background-clip: padding-box;
 }
 
 .collection-tile:active {
-  background: alpha(@accent_bg_color, .18);
+  border-color: alpha(@accent_bg_color, .42);
+  background: alpha(@accent_bg_color, .12);
 }
 
 .collection-art {
@@ -292,6 +316,7 @@ button.album-tile.flat:focus-visible {
   min-height: 168px;
   border-radius: 8px;
   background: @card_bg_color;
+  box-shadow: inset 0 0 0 1px alpha(@borders, .72);
   transition: box-shadow 140ms ease-out;
 }
 
@@ -299,14 +324,14 @@ button.album-tile.flat:focus-visible {
 .album-tile:focus .album-art-frame,
 .album-tile:focus-visible .album-art-frame {
   box-shadow:
-    0 0 0 1px alpha(@accent_bg_color, .68),
-    0 0 18px alpha(@accent_bg_color, .36);
+    inset 0 0 0 1px alpha(@accent_bg_color, .58),
+    0 2px 8px alpha(@window_fg_color, .14);
 }
 
 .album-tile:active .album-art-frame {
   box-shadow:
-    0 0 0 1px alpha(@accent_bg_color, .82),
-    0 0 12px alpha(@accent_bg_color, .30);
+    inset 0 0 0 1px alpha(@accent_bg_color, .72),
+    0 1px 4px alpha(@window_fg_color, .12);
 }
 
 .album-art {
@@ -319,6 +344,16 @@ button.album-tile.flat:focus-visible {
   min-width: 148px;
   min-height: 148px;
   border-radius: 8px;
+  box-shadow: inset 0 0 0 1px alpha(@borders, .72);
+  transition: box-shadow 140ms ease-out;
+}
+
+.artist-tile:hover .artist-art,
+.artist-tile:focus .artist-art,
+.artist-tile:focus-visible .artist-art {
+  box-shadow:
+    inset 0 0 0 1px alpha(@accent_bg_color, .50),
+    0 2px 8px alpha(@window_fg_color, .12);
 }
 
 .artist-placeholder {
@@ -341,22 +376,31 @@ button.album-tile.flat:focus-visible {
   padding: 18px;
 }
 
+.track-empty-state {
+  margin: 18px;
+  padding: 16px;
+  border: 1px dashed @borders;
+  border-radius: 8px;
+  background: alpha(@card_bg_color, .72);
+}
+
 .track-list {
   background: @view_bg_color;
 }
 
 .track-list header button {
   min-height: 32px;
-  padding: 0 10px;
+  padding: 0 12px;
   color: alpha(@window_fg_color, .66);
   font-size: 10px;
   font-weight: 700;
-  background: alpha(@window_fg_color, .06);
+  background: @window_bg_color;
   border-bottom: 1px solid @borders;
 }
 
 .track-list row {
-  min-height: 44px;
+  min-height: 46px;
+  transition: background-color 120ms ease-out;
 }
 
 .track-list row:hover {
@@ -367,8 +411,13 @@ button.album-tile.flat:focus-visible {
   background: alpha(@accent_bg_color, .14);
 }
 
+.track-list row:focus-visible {
+  outline: 2px solid alpha(@accent_bg_color, .32);
+  outline-offset: -2px;
+}
+
 .track-cell {
-  padding: 8px 10px 6px;
+  padding: 9px 12px 7px;
   color: @window_fg_color;
   font-size: 12px;
   font-weight: 400;
@@ -380,7 +429,7 @@ button.album-tile.flat:focus-visible {
 }
 
 .track-title-cell {
-  padding-left: 14px;
+  padding-left: 16px;
 }
 
 .track-title {
@@ -389,6 +438,7 @@ button.album-tile.flat:focus-visible {
 
 .now-playing-indicator {
   color: @accent_bg_color;
+  transition: opacity 160ms ease-out;
 }
 
 .quality {
@@ -406,7 +456,7 @@ button.album-tile.flat:focus-visible {
 }
 
 .rail-header {
-  padding: 13px 14px 12px;
+  padding: 14px 16px 13px;
   border-bottom: 1px solid @borders;
 }
 
@@ -417,8 +467,8 @@ button.album-tile.flat:focus-visible {
 }
 
 .placeholder {
-  margin: 14px;
-  padding: 15px;
+  margin: 16px;
+  padding: 16px;
   border: 1px dashed @borders;
   border-radius: 8px;
   background: alpha(@card_bg_color, .72);
@@ -429,8 +479,8 @@ button.album-tile.flat:focus-visible {
 }
 
 .queue-card {
-  margin: 10px 0 0;
-  padding: 8px;
+  margin: 12px 0 0;
+  padding: 10px;
   border: 1px solid @borders;
   border-radius: 8px;
   background: @card_bg_color;
@@ -442,12 +492,13 @@ button.album-tile.flat:focus-visible {
 }
 
 .queue-row {
-  min-height: 34px;
+  min-height: 38px;
   min-width: 0;
-  padding: 3px 5px;
+  padding: 4px 6px;
   border-radius: 6px;
   border-bottom: 1px solid alpha(@borders, .75);
   background: transparent;
+  transition: background-color 120ms ease-out, box-shadow 120ms ease-out;
 }
 
 .queue-title {
@@ -479,8 +530,8 @@ button.album-tile.flat:focus-visible {
 }
 
 .bottom-bar {
-  min-height: 40px;
-  padding: 0 14px;
+  min-height: 42px;
+  padding: 0 16px;
   border-top: 1px solid @borders;
   background: @headerbar_bg_color;
 }
