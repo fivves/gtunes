@@ -3,6 +3,10 @@
 gTunes is in MVP-stage development. Keep changes focused and verify the desktop
 app still builds before opening a pull request.
 
+Read [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) before larger changes. It covers
+local dependencies, architecture, data storage, troubleshooting, and the expected
+verification path.
+
 ## Development Flow
 
 1. Branch from `dev`.
@@ -23,7 +27,7 @@ cargo test
 For changes touching shared behavior, also run:
 
 ```sh
-cargo clippy --all-targets --all-features
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
 ## Code Guidelines

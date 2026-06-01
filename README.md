@@ -48,6 +48,9 @@ Known V1 work:
 See [docs/TECHNICAL_DESIGN.md](docs/TECHNICAL_DESIGN.md) for the architecture
 and V1 boundary.
 
+Developer onboarding lives in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). The
+current product plan lives in [docs/ROADMAP.md](docs/ROADMAP.md).
+
 ## Requirements
 
 - Linux desktop environment with GTK4 support.
@@ -143,7 +146,7 @@ cargo test
 Run Clippy:
 
 ```sh
-cargo clippy --all-targets --all-features
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
 ## Repository Layout
@@ -191,10 +194,13 @@ when packaging and versioned distribution are ready.
 ## Contributing
 
 1. Start from the `dev` branch.
-2. Run `cargo fmt -- --check`.
-3. Run `cargo check`.
-4. Run `cargo test`.
-5. Open a pull request with a concise summary and verification notes.
+2. Read [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+3. Run `cargo fmt -- --check`.
+4. Run `cargo check`.
+5. Run `cargo test`.
+6. Open a pull request with a concise summary and verification notes.
+
+For vulnerability handling and secret hygiene, see [SECURITY.md](SECURITY.md).
 
 ## License
 
