@@ -9,7 +9,8 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Mutex, mpsc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::cache::{CacheDatabase, JellyfinSession};
@@ -78,6 +79,7 @@ struct UiState {
     collection_detail_subtitle: Option<String>,
     selected_index: usize,
     search_query: String,
+    connection_generation: u64,
     sort_column: SortColumn,
     sort_ascending: bool,
     shuffle_enabled: bool,
@@ -105,6 +107,11 @@ struct UiState {
     connection_detail: gtk::Label,
     sync_spinner: Option<gtk::Spinner>,
     connection_card: Option<gtk::Box>,
+    connection_form_status: Option<gtk::Label>,
+    connection_server_entry: Option<gtk::Entry>,
+    connection_username_entry: Option<gtk::Entry>,
+    connection_password_entry: Option<gtk::PasswordEntry>,
+    search_entry: Option<gtk::SearchEntry>,
     cover_art: Option<gtk::Image>,
     play_button: Option<gtk::Button>,
     shuffle_button: Option<gtk::Button>,
@@ -143,6 +150,8 @@ const LEFT_SIDEBAR_CONTENT_WIDTH: i32 = 220;
 const LEFT_SIDEBAR_WIDTH: i32 = LEFT_SIDEBAR_CONTENT_WIDTH + 20;
 const ACTION_PANEL_WIDTH: i32 = 220;
 const ALBUM_ART_SIZE: i32 = 168;
+static CONNECTION_GENERATION: AtomicU64 = AtomicU64::new(0);
+static CACHE_RESET_LOCK: Mutex<()> = Mutex::new(());
 
 struct QueueView {
     empty: gtk::Label,
@@ -265,6 +274,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         collection_detail_subtitle: None,
         selected_index: 0,
         search_query: String::new(),
+        connection_generation: CONNECTION_GENERATION.load(AtomicOrdering::SeqCst),
         sort_column: view_settings.sort_column,
         sort_ascending: view_settings.sort_ascending,
         shuffle_enabled: false,
@@ -292,6 +302,11 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         connection_detail: label("Connect to Jellyfin to sync tracks", "meta"),
         sync_spinner: None,
         connection_card: None,
+        connection_form_status: None,
+        connection_server_entry: None,
+        connection_username_entry: None,
+        connection_password_entry: None,
+        search_entry: None,
         cover_art: None,
         play_button: None,
         shuffle_button: None,
@@ -572,6 +587,7 @@ fn build_player_bar(state: Rc<RefCell<UiState>>, context_toggle: gtk::Button) ->
             set_search_query(&state, entry.text().trim());
         });
     }
+    state.borrow_mut().search_entry = Some(search.clone());
     actions.append(&search);
 
     let action_row = gtk::Box::new(Orientation::Horizontal, 8);
@@ -611,13 +627,222 @@ fn build_player_bar(state: Rc<RefCell<UiState>>, context_toggle: gtk::Button) ->
 
     let settings = icon_button("emblem-system-symbolic", "Settings");
     settings.add_css_class("toolbar-button");
-    settings.set_sensitive(false);
-    settings.set_tooltip_text(Some("Settings coming soon"));
+    settings.set_tooltip_text(Some("Reset database and cache"));
+    {
+        let state = state.clone();
+        settings.connect_clicked(move |button| {
+            if let Some(window) = button
+                .root()
+                .and_then(|root| root.downcast::<gtk::Window>().ok())
+            {
+                confirm_database_reset(&window, state.clone());
+            }
+        });
+    }
     action_row.append(&settings);
     actions.append(&action_row);
     player.append(&actions);
 
     player
+}
+
+#[allow(deprecated)]
+fn confirm_database_reset(parent: &gtk::Window, state: Rc<RefCell<UiState>>) {
+    let dialog = gtk::MessageDialog::builder()
+        .transient_for(parent)
+        .modal(true)
+        .message_type(gtk::MessageType::Warning)
+        .buttons(gtk::ButtonsType::None)
+        .text("Reset database and cache?")
+        .secondary_text(
+            "This clears saved Jellyfin login, cached library data, artwork, and waveforms. gTunes will return to first-time setup.",
+        )
+        .build();
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button("Reset", gtk::ResponseType::Accept);
+    dialog.set_default_response(gtk::ResponseType::Cancel);
+    if let Some(button) = dialog
+        .widget_for_response(gtk::ResponseType::Accept)
+        .and_then(|widget| widget.downcast::<gtk::Button>().ok())
+    {
+        button.add_css_class("destructive-action");
+    }
+
+    dialog.connect_response(move |dialog, response| {
+        if response == gtk::ResponseType::Accept {
+            reset_database_and_cache(state.clone());
+        }
+        dialog.close();
+    });
+    dialog.present();
+}
+
+fn reset_database_and_cache(state: Rc<RefCell<UiState>>) {
+    {
+        let mut ui = state.borrow_mut();
+        ui.connection_generation = CONNECTION_GENERATION
+            .fetch_add(1, AtomicOrdering::SeqCst)
+            .wrapping_add(1);
+        stop_playback(&mut ui);
+        ui.connection_status.set_text("Resetting database");
+        ui.connection_detail
+            .set_text("Clearing saved login, library cache, artwork, and waveforms");
+        ui.page_summary.set_text("Resetting database and cache");
+        ui.playback_status.set_text("Jellyfin stream | Not playing");
+        if let Some(status) = ui.connection_form_status.as_ref() {
+            status.set_text("Resetting...");
+        }
+        if let Some(spinner) = ui.sync_spinner.as_ref() {
+            spinner.set_visible(true);
+            spinner.start();
+        }
+    }
+
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = CACHE_RESET_LOCK
+            .lock()
+            .map_err(|_| "cache reset lock is poisoned".to_string())
+            .and_then(|_guard| {
+                CacheDatabase::reset_default_cache().map_err(|error| error.to_string())
+            });
+        let _ = sender.send(result);
+    });
+
+    gtk::glib::timeout_add_local(Duration::from_millis(100), move || {
+        match receiver.try_recv() {
+            Ok(Ok(())) => {
+                apply_first_time_setup_state(&state);
+                gtk::glib::ControlFlow::Break
+            }
+            Ok(Err(error)) => {
+                set_library_loaded(&state);
+                let ui = state.borrow();
+                ui.connection_status.set_text("Reset failed");
+                ui.connection_detail.set_text(&error);
+                ui.page_summary.set_text("Database reset failed");
+                if let Some(status) = ui.connection_form_status.as_ref() {
+                    status.set_text("Reset failed");
+                }
+                gtk::glib::ControlFlow::Break
+            }
+            Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                set_library_loaded(&state);
+                let ui = state.borrow();
+                ui.connection_status.set_text("Reset failed");
+                ui.connection_detail
+                    .set_text("Database reset worker stopped unexpectedly");
+                ui.page_summary.set_text("Database reset failed");
+                if let Some(status) = ui.connection_form_status.as_ref() {
+                    status.set_text("Reset failed");
+                }
+                gtk::glib::ControlFlow::Break
+            }
+        }
+    });
+}
+
+fn apply_first_time_setup_state(state: &Rc<RefCell<UiState>>) {
+    let (
+        search_entry,
+        server_entry,
+        username_entry,
+        password_entry,
+        form_status,
+        connection_card,
+        cover,
+        wave_area,
+        spinner,
+    ) = {
+        let ui = state.borrow();
+        (
+            ui.search_entry.clone(),
+            ui.connection_server_entry.clone(),
+            ui.connection_username_entry.clone(),
+            ui.connection_password_entry.clone(),
+            ui.connection_form_status.clone(),
+            ui.connection_card.clone(),
+            ui.cover_art.clone(),
+            ui.wave_area.clone(),
+            ui.sync_spinner.clone(),
+        )
+    };
+
+    {
+        let mut ui = state.borrow_mut();
+        ui.all_tracks.clear();
+        ui.tracks.clear();
+        ui.active_page = LibraryPage::Tracks;
+        ui.album_filter = None;
+        ui.artist_filter = None;
+        ui.collection_detail_title = None;
+        ui.collection_detail_subtitle = None;
+        ui.selected_index = 0;
+        ui.search_query.clear();
+        ui.sort_column = LibraryViewSettings::default().sort_column;
+        ui.sort_ascending = LibraryViewSettings::default().sort_ascending;
+        ui.shuffle_enabled = false;
+        ui.now_playing_key = None;
+        ui.track_indicators.clear();
+        ui.playback_order.clear();
+        {
+            let mut waveform = ui.waveform.borrow_mut();
+            waveform.peaks.clear();
+            waveform.progress = 0.0;
+            waveform.loaded_key = None;
+            waveform.loading_key = None;
+        }
+
+        ui.now_title.set_text("No track selected");
+        ui.now_meta.set_text("Connect to Jellyfin to load music");
+        ui.playback_status.set_text("Jellyfin stream | Not playing");
+        ui.page_summary
+            .set_text("Jellyfin music library | Not connected");
+        ui.connection_status.set_text("Not connected");
+        ui.connection_detail
+            .set_text("Connect to Jellyfin to sync tracks");
+        ui.elapsed_label.set_text("0:00");
+        ui.remaining_label.set_text("--:--");
+        ui.waveform_status.set_text("Select a Jellyfin track");
+        update_play_button(&ui);
+        update_shuffle_button(&ui);
+        update_mpris_status(&mut ui);
+    }
+
+    if let Some(entry) = search_entry.as_ref() {
+        entry.set_text("");
+    }
+    if let Some(entry) = server_entry.as_ref() {
+        entry.set_text("");
+    }
+    if let Some(entry) = username_entry.as_ref() {
+        entry.set_text("");
+    }
+    if let Some(entry) = password_entry.as_ref() {
+        entry.set_text("");
+    }
+    if let Some(status) = form_status.as_ref() {
+        status.set_text("Ready");
+    }
+    if let Some(card) = connection_card.as_ref() {
+        card.set_visible(true);
+    }
+    if let Some(cover) = cover.as_ref() {
+        cover.set_paintable(Option::<&gtk::gdk::Paintable>::None);
+        cover.set_icon_name(Some("audio-x-generic-symbolic"));
+    }
+    if let Some(area) = wave_area.as_ref() {
+        area.queue_draw();
+    }
+    if let Some(spinner) = spinner.as_ref() {
+        spinner.stop();
+        spinner.set_visible(false);
+    }
+
+    refresh_track_model(state);
+    refresh_collection_grids(state);
+    update_content_view(state);
 }
 
 fn build_body(
@@ -788,9 +1013,18 @@ fn connection_card(state: Rc<RefCell<UiState>>) -> gtk::Box {
     connect.add_css_class("connection-button");
     connect.add_css_class("suggested-action");
 
+    {
+        let mut ui = state.borrow_mut();
+        ui.connection_form_status = Some(status.clone());
+        ui.connection_server_entry = Some(server.clone());
+        ui.connection_username_entry = Some(username.clone());
+        ui.connection_password_entry = Some(password.clone());
+    }
+
     if let Ok(Some(session)) =
         CacheDatabase::open_default().and_then(|db| db.load_jellyfin_session())
     {
+        let generation = CONNECTION_GENERATION.load(AtomicOrdering::SeqCst);
         server.set_text(&session.server_url);
         username.set_text(&session.username);
         status.set_text("Loading saved library...");
@@ -799,9 +1033,9 @@ fn connection_card(state: Rc<RefCell<UiState>>) -> gtk::Box {
 
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
-            fetch_saved_session(session, sender);
+            fetch_saved_session(session, sender, generation);
         });
-        poll_connection_result(receiver, state.clone(), status.clone(), None);
+        poll_connection_result(receiver, state.clone(), status.clone(), None, generation);
     }
 
     form.append(&username);
@@ -822,10 +1056,17 @@ fn connection_card(state: Rc<RefCell<UiState>>) -> gtk::Box {
         button.set_sensitive(false);
         status.set_text("Connecting...");
         set_library_loading(&state, "Authenticating with Jellyfin");
+        let generation = CONNECTION_GENERATION.load(AtomicOrdering::SeqCst);
 
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
-            connect_and_fetch(&server_url, &username_text, &password_text, sender);
+            connect_and_fetch(
+                &server_url,
+                &username_text,
+                &password_text,
+                sender,
+                generation,
+            );
         });
 
         poll_connection_result(
@@ -833,6 +1074,7 @@ fn connection_card(state: Rc<RefCell<UiState>>) -> gtk::Box {
             state.clone(),
             status.clone(),
             Some(button.clone()),
+            generation,
         );
     });
 
@@ -844,8 +1086,17 @@ fn poll_connection_result(
     state: Rc<RefCell<UiState>>,
     status: gtk::Label,
     button: Option<gtk::Button>,
+    generation: u64,
 ) {
     gtk::glib::timeout_add_local(Duration::from_millis(100), move || {
+        if state.borrow().connection_generation != generation {
+            if let Some(button) = button.as_ref() {
+                button.set_sensitive(true);
+            }
+            set_library_loaded(&state);
+            return gtk::glib::ControlFlow::Break;
+        }
+
         match receiver.try_recv() {
             Ok(ConnectionMessage::Progress { loaded, total }) => {
                 let progress = library_progress_text(loaded, total);
@@ -2763,8 +3014,15 @@ fn connect_and_fetch(
     username: &str,
     password: &str,
     sender: mpsc::Sender<ConnectionMessage>,
+    generation: u64,
 ) {
-    let result = connect_and_fetch_payload(server_url, username, password, Some(sender.clone()));
+    let result = connect_and_fetch_payload(
+        server_url,
+        username,
+        password,
+        Some(sender.clone()),
+        generation,
+    );
     let _ = sender.send(ConnectionMessage::Finished(result));
 }
 
@@ -2773,6 +3031,7 @@ fn connect_and_fetch_payload(
     username: &str,
     password: &str,
     sender: Option<mpsc::Sender<ConnectionMessage>>,
+    generation: u64,
 ) -> Result<ConnectionPayload, String> {
     let (client, auth) = JellyfinClient::authenticate(server_url, username, password)
         .map_err(|error| error.to_string())?;
@@ -2785,25 +3044,36 @@ fn connect_and_fetch_payload(
     };
 
     let payload = fetch_library_for_session(client, session, sender)?;
-    let cache = CacheDatabase::open_default().map_err(|error| error.to_string())?;
-    cache
-        .save_jellyfin_session(&payload.session)
-        .map_err(|error| error.to_string())?;
-    if let Err(error) = save_library_cache(&cache, &payload.session, &payload.tracks) {
-        tracing::warn!(%error, "failed to cache Jellyfin library");
+    {
+        let _guard = CACHE_RESET_LOCK
+            .lock()
+            .map_err(|_| "cache reset lock is poisoned".to_string())?;
+        ensure_connection_generation_current(generation)?;
+        let cache = CacheDatabase::open_default().map_err(|error| error.to_string())?;
+        cache
+            .save_jellyfin_session(&payload.session)
+            .map_err(|error| error.to_string())?;
+        if let Err(error) = save_library_cache(&cache, &payload.session, &payload.tracks) {
+            tracing::warn!(%error, "failed to cache Jellyfin library");
+        }
     }
 
     Ok(payload)
 }
 
-fn fetch_saved_session(session: JellyfinSession, sender: mpsc::Sender<ConnectionMessage>) {
-    let result = fetch_saved_session_payload(session, Some(sender.clone()));
+fn fetch_saved_session(
+    session: JellyfinSession,
+    sender: mpsc::Sender<ConnectionMessage>,
+    generation: u64,
+) {
+    let result = fetch_saved_session_payload(session, Some(sender.clone()), generation);
     let _ = sender.send(ConnectionMessage::Finished(result));
 }
 
 fn fetch_saved_session_payload(
     session: JellyfinSession,
     sender: Option<mpsc::Sender<ConnectionMessage>>,
+    generation: u64,
 ) -> Result<ConnectionPayload, String> {
     let cache = CacheDatabase::open_default().map_err(|error| error.to_string())?;
     match load_library_cache(&cache, &session) {
@@ -2817,10 +3087,24 @@ fn fetch_saved_session_payload(
 
     let payload = fetch_library_for_session(client, session, sender)
         .map_err(|error| format!("{error}; enter your password to refresh the session"))?;
-    if let Err(error) = save_library_cache(&cache, &payload.session, &payload.tracks) {
-        tracing::warn!(%error, "failed to cache Jellyfin library");
+    {
+        let _guard = CACHE_RESET_LOCK
+            .lock()
+            .map_err(|_| "cache reset lock is poisoned".to_string())?;
+        ensure_connection_generation_current(generation)?;
+        if let Err(error) = save_library_cache(&cache, &payload.session, &payload.tracks) {
+            tracing::warn!(%error, "failed to cache Jellyfin library");
+        }
     }
     Ok(payload)
+}
+
+fn ensure_connection_generation_current(generation: u64) -> Result<(), String> {
+    if CONNECTION_GENERATION.load(AtomicOrdering::SeqCst) == generation {
+        Ok(())
+    } else {
+        Err("Connection was reset".to_string())
+    }
 }
 
 fn fetch_library_for_session(

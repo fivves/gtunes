@@ -35,6 +35,15 @@ pub struct JellyfinSession {
 }
 
 impl CacheDatabase {
+    pub fn reset_default_cache() -> Result<(), CacheError> {
+        let project_dirs = ProjectDirs::from("dev", config::DEVELOPER_NAME, config::APP_NAME)
+            .ok_or(CacheError::ProjectDirectoryUnavailable)?;
+        remove_dir_if_exists(project_dirs.data_dir())?;
+        remove_dir_if_exists(project_dirs.cache_dir())?;
+        remove_temp_artwork_cache()?;
+        Ok(())
+    }
+
     pub fn open_default() -> Result<Self, CacheError> {
         let project_dirs = ProjectDirs::from("dev", config::DEVELOPER_NAME, config::APP_NAME)
             .ok_or(CacheError::ProjectDirectoryUnavailable)?;
@@ -148,4 +157,27 @@ impl CacheDatabase {
             Ok(None)
         }
     }
+}
+
+fn remove_dir_if_exists(path: &Path) -> Result<(), CacheError> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(CacheError::Io(error)),
+    }
+}
+
+fn remove_temp_artwork_cache() -> Result<(), CacheError> {
+    for entry in std::fs::read_dir(std::env::temp_dir())? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with("gtunes-artwork-") {
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(CacheError::Io(error)),
+            }
+        }
+    }
+    Ok(())
 }
