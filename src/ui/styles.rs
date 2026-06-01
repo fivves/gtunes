@@ -259,8 +259,6 @@ window {
 .album-tile {
   min-width: 168px;
   min-height: 168px;
-  max-width: 168px;
-  max-height: 168px;
   padding: 0;
   border: 0;
   box-shadow: none;
@@ -291,8 +289,6 @@ window {
 .album-art-frame {
   min-width: 168px;
   min-height: 168px;
-  max-width: 168px;
-  max-height: 168px;
   border-radius: 8px;
   background: @card_bg_color;
 }
@@ -300,8 +296,6 @@ window {
 .album-art {
   min-width: 168px;
   min-height: 168px;
-  max-width: 168px;
-  max-height: 168px;
   border-radius: 8px;
 }
 

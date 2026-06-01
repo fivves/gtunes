@@ -4,8 +4,8 @@ use gtk::{Align, Orientation};
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, PlatformConfig};
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -974,7 +974,24 @@ struct AlbumSummary {
 struct ArtistSummary {
     key: String,
     name: String,
+    album_count: usize,
     song_count: usize,
+}
+
+struct AlbumAccumulator {
+    key: String,
+    name: String,
+    artwork_url: Option<String>,
+    song_count: usize,
+    explicit_artist_votes: Vec<ArtistVote>,
+    fallback_artist_votes: Vec<ArtistVote>,
+}
+
+struct ArtistVote {
+    key: String,
+    name: String,
+    count: usize,
+    first_seen: usize,
 }
 
 fn album_grid_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
@@ -1150,7 +1167,7 @@ fn artist_tile(artist: ArtistSummary, state: Rc<RefCell<UiState>>) -> gtk::Butto
     layout.append(&avatar);
     layout.append(&collection_tile_label(&artist.name, "collection-title"));
     layout.append(&collection_tile_label(
-        &format!("{} songs", artist.song_count),
+        &artist_count_text(artist.album_count, artist.song_count),
         "meta",
     ));
     button.set_child(Some(&layout));
@@ -1181,25 +1198,61 @@ fn collection_tile_label(text: &str, class_name: &str) -> gtk::Label {
 }
 
 fn album_summaries(tracks: &[UiTrack], query: &str) -> Vec<AlbumSummary> {
-    let mut albums = Vec::<AlbumSummary>::new();
-    for track in tracks {
+    let mut albums = Vec::<AlbumAccumulator>::new();
+    for (track_index, track) in tracks.iter().enumerate() {
         let key = album_key(track);
         if let Some(album) = albums.iter_mut().find(|album| album.key == key) {
             album.song_count += 1;
             if album.artwork_url.is_none() {
                 album.artwork_url = track.thumbnail_artwork_url.clone();
             }
+            add_artist_vote(
+                &mut album.explicit_artist_votes,
+                track.album_artist.as_deref(),
+                track_index,
+            );
+            add_artist_vote(
+                &mut album.fallback_artist_votes,
+                Some(&track.artist),
+                track_index,
+            );
             continue;
         }
 
-        albums.push(AlbumSummary {
+        let mut album = AlbumAccumulator {
             key,
             name: track.album.clone(),
-            artist: album_artist_name(track).to_string(),
             artwork_url: track.thumbnail_artwork_url.clone(),
             song_count: 1,
-        });
+            explicit_artist_votes: Vec::new(),
+            fallback_artist_votes: Vec::new(),
+        };
+        add_artist_vote(
+            &mut album.explicit_artist_votes,
+            track.album_artist.as_deref(),
+            track_index,
+        );
+        add_artist_vote(
+            &mut album.fallback_artist_votes,
+            Some(&track.artist),
+            track_index,
+        );
+        albums.push(album);
     }
+
+    let mut albums = albums
+        .into_iter()
+        .map(|album| AlbumSummary {
+            key: album.key,
+            name: album.name,
+            artist: preferred_album_artist(
+                &album.explicit_artist_votes,
+                &album.fallback_artist_votes,
+            ),
+            artwork_url: album.artwork_url,
+            song_count: album.song_count,
+        })
+        .collect::<Vec<_>>();
 
     let query = query.trim().to_lowercase();
     if !query.is_empty() {
@@ -1221,31 +1274,34 @@ fn album_summaries_for_artist(
     selected_artist_key: &str,
     query: &str,
 ) -> Vec<AlbumSummary> {
-    let artist_tracks = tracks
-        .iter()
-        .filter(|track| album_artist_key(track) == selected_artist_key)
-        .cloned()
-        .collect::<Vec<_>>();
-    album_summaries(&artist_tracks, query)
+    album_summaries(tracks, query)
+        .into_iter()
+        .filter(|album| artist_key(&album.artist) == selected_artist_key)
+        .collect()
 }
 
 fn artist_album_count(tracks: &[UiTrack], selected_artist_key: &str) -> usize {
-    album_summaries_for_artist(tracks, selected_artist_key, "").len()
+    album_summaries(tracks, "")
+        .into_iter()
+        .filter(|album| artist_key(&album.artist) == selected_artist_key)
+        .count()
 }
 
 fn artist_summaries(tracks: &[UiTrack], query: &str) -> Vec<ArtistSummary> {
     let mut artists = Vec::<ArtistSummary>::new();
-    for track in tracks {
-        let key = album_artist_key(track);
+    for album in album_summaries(tracks, "") {
+        let key = artist_key(&album.artist);
         if let Some(artist) = artists.iter_mut().find(|artist| artist.key == key) {
-            artist.song_count += 1;
+            artist.album_count += 1;
+            artist.song_count += album.song_count;
             continue;
         }
 
         artists.push(ArtistSummary {
             key,
-            name: album_artist_name(track).to_string(),
-            song_count: 1,
+            name: album.artist,
+            album_count: 1,
+            song_count: album.song_count,
         });
     }
 
@@ -1256,6 +1312,19 @@ fn artist_summaries(tracks: &[UiTrack], query: &str) -> Vec<ArtistSummary> {
 
     artists.sort_by(|left, right| compare_text(&left.name, &right.name));
     artists
+}
+
+fn artist_count_text(album_count: usize, song_count: usize) -> String {
+    format!(
+        "{} | {}",
+        count_text(album_count, "album", "albums"),
+        count_text(song_count, "song", "songs")
+    )
+}
+
+fn count_text(count: usize, singular: &str, plural: &str) -> String {
+    let noun = if count == 1 { singular } else { plural };
+    format!("{count} {noun}")
 }
 
 fn album_key(track: &UiTrack) -> String {
@@ -1269,20 +1338,41 @@ fn artist_key(artist: &str) -> String {
     normalized_key(artist)
 }
 
-fn album_artist_key(track: &UiTrack) -> String {
-    artist_key(album_artist_name(track))
-}
-
-fn album_artist_name(track: &UiTrack) -> &str {
-    track
-        .album_artist
-        .as_deref()
-        .filter(|artist| !artist.trim().is_empty())
-        .unwrap_or(&track.artist)
-}
-
 fn normalized_key(value: &str) -> String {
     value.trim().to_lowercase()
+}
+
+fn add_artist_vote(votes: &mut Vec<ArtistVote>, artist: Option<&str>, first_seen: usize) {
+    let Some(artist) = artist.map(str::trim).filter(|artist| !artist.is_empty()) else {
+        return;
+    };
+    let key = artist_key(artist);
+    if let Some(vote) = votes.iter_mut().find(|vote| vote.key == key) {
+        vote.count += 1;
+        return;
+    }
+
+    votes.push(ArtistVote {
+        key,
+        name: artist.to_string(),
+        count: 1,
+        first_seen,
+    });
+}
+
+fn preferred_album_artist(explicit_votes: &[ArtistVote], fallback_votes: &[ArtistVote]) -> String {
+    preferred_artist_vote(explicit_votes)
+        .or_else(|| preferred_artist_vote(fallback_votes))
+        .map(|vote| vote.name.clone())
+        .unwrap_or_else(|| "Unknown Artist".to_string())
+}
+
+fn preferred_artist_vote(votes: &[ArtistVote]) -> Option<&ArtistVote> {
+    votes.iter().max_by(|left, right| {
+        left.count
+            .cmp(&right.count)
+            .then_with(|| right.first_seen.cmp(&left.first_seen))
+    })
 }
 
 const TITLE_WIDTH: i32 = 260;
@@ -1820,8 +1910,11 @@ fn show_album_tracks(state: &Rc<RefCell<UiState>>, album: &AlbumSummary) {
         ui.album_filter = Some(album.key.clone());
         ui.artist_filter = selected_artist;
         ui.collection_detail_title = Some(album.name.clone());
-        ui.collection_detail_subtitle =
-            Some(format!("{} | {} songs", album.artist, album.song_count));
+        ui.collection_detail_subtitle = Some(format!(
+            "{} | {}",
+            album.artist,
+            count_text(album.song_count, "song", "songs")
+        ));
         ui.selected_index = 0;
         apply_track_filter(&mut ui, None);
         update_now_playing_labels(&ui);
@@ -1841,11 +1934,8 @@ fn show_artist_albums(state: &Rc<RefCell<UiState>>, artist: &ArtistSummary) {
         ui.album_filter = None;
         ui.artist_filter = Some(artist.key.clone());
         ui.collection_detail_title = Some(artist.name.clone());
-        let album_count = artist_album_count(&ui.all_tracks, &artist.key);
-        ui.collection_detail_subtitle = Some(format!(
-            "{album_count} albums | {} songs",
-            artist.song_count
-        ));
+        ui.collection_detail_subtitle =
+            Some(artist_count_text(artist.album_count, artist.song_count));
         ui.selected_index = 0;
         apply_track_filter(&mut ui, None);
         update_now_playing_labels(&ui);
@@ -1869,12 +1959,9 @@ fn return_to_collection_grid(state: &Rc<RefCell<UiState>>) {
                     .into_iter()
                     .find(|artist| artist.key == artist_key_value)
             {
-                let album_count = artist_album_count(&ui.all_tracks, &artist.key);
                 ui.collection_detail_title = Some(artist.name);
-                ui.collection_detail_subtitle = Some(format!(
-                    "{album_count} albums | {} songs",
-                    artist.song_count
-                ));
+                ui.collection_detail_subtitle =
+                    Some(artist_count_text(artist.album_count, artist.song_count));
             }
         } else {
             ui.album_filter = None;
@@ -1968,6 +2055,13 @@ fn update_nav_counts(state: &Rc<RefCell<UiState>>) {
 
 fn apply_track_filter(ui: &mut UiState, selected_key: Option<&str>) {
     let query = ui.search_query.to_lowercase();
+    let artist_album_keys = ui.artist_filter.as_deref().map(|selected_artist_key| {
+        album_summaries(&ui.all_tracks, "")
+            .into_iter()
+            .filter(|album| artist_key(&album.artist) == selected_artist_key)
+            .map(|album| album.key)
+            .collect::<HashSet<_>>()
+    });
     ui.tracks = ui
         .all_tracks
         .iter()
@@ -1980,7 +2074,11 @@ fn apply_track_filter(ui: &mut UiState, selected_key: Option<&str>) {
             let artist_matches = ui
                 .artist_filter
                 .as_deref()
-                .map(|key| album_artist_key(track) == key)
+                .map(|_| {
+                    artist_album_keys
+                        .as_ref()
+                        .is_some_and(|album_keys| album_keys.contains(&album_key(track)))
+                })
                 .unwrap_or(true);
             let search_matches = query.is_empty() || track_matches_query(track, &query);
             album_matches && artist_matches && search_matches
@@ -2007,8 +2105,10 @@ fn update_page_summary(ui: &UiState) {
                 .as_deref()
                 .map(|artist_key| artist_album_count(&ui.all_tracks, artist_key))
                 .unwrap_or(0);
-            ui.page_summary
-                .set_text(&format!("{title} | {album_count} albums"));
+            ui.page_summary.set_text(&format!(
+                "{title} | {}",
+                artist_count_text(album_count, ui.tracks.len())
+            ));
             return;
         }
         ui.page_summary
@@ -2755,18 +2855,57 @@ fn load_library_cache(
     cache: &CacheDatabase,
     session: &JellyfinSession,
 ) -> Result<Option<Vec<UiTrack>>, crate::cache::CacheError> {
+    if let Some(tracks) = load_cached_tracks(cache, &library_cache_key(session))? {
+        if !tracks.is_empty() {
+            return Ok(Some(tracks));
+        }
+        tracing::warn!("ignoring empty Jellyfin library cache");
+    }
+
+    if let Some(tracks) = load_cached_tracks(cache, &legacy_library_cache_key(session))? {
+        if !tracks.is_empty() {
+            if let Err(error) = save_library_cache(cache, session, &tracks) {
+                tracing::warn!(%error, "failed to migrate legacy Jellyfin library cache");
+            }
+            return Ok(Some(tracks));
+        }
+        tracing::warn!("ignoring empty legacy Jellyfin library cache");
+    }
+
+    Ok(None)
+}
+
+fn load_cached_tracks(
+    cache: &CacheDatabase,
+    key: &str,
+) -> Result<Option<Vec<UiTrack>>, crate::cache::CacheError> {
     cache
-        .get_setting(&library_cache_key(session))?
+        .get_setting(key)?
         .map(|json| serde_json::from_str(&json).map_err(crate::cache::CacheError::from))
         .transpose()
 }
 
 fn library_cache_key(session: &JellyfinSession) -> String {
-    let server_key = session
+    format!(
+        "jellyfin.library.v2.{}.{}",
+        library_cache_server_key(session),
+        session.user_id
+    )
+}
+
+fn legacy_library_cache_key(session: &JellyfinSession) -> String {
+    format!(
+        "jellyfin.library.{}.{}",
+        library_cache_server_key(session),
+        session.user_id
+    )
+}
+
+fn library_cache_server_key(session: &JellyfinSession) -> &str {
+    session
         .server_id
         .as_deref()
-        .unwrap_or(session.server_url.as_str());
-    format!("jellyfin.library.v2.{server_key}.{}", session.user_id)
+        .unwrap_or(session.server_url.as_str())
 }
 
 const QUEUE_PREVIEW_LIMIT: usize = 15;
