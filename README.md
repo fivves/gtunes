@@ -59,27 +59,29 @@ current product plan lives in [docs/ROADMAP.md](docs/ROADMAP.md).
 - Libadwaita development libraries.
 - GStreamer runtime and development libraries.
 - SQLite development libraries.
+- DBus development libraries for MPRIS media controls.
 - `pkg-config`.
 - A Jellyfin server with a music library.
 
 On Arch Linux:
 
 ```sh
-sudo pacman -S rust gtk4 libadwaita gstreamer gst-plugins-base sqlite pkgconf
+sudo pacman -S rust gtk4 libadwaita gstreamer gst-plugins-base sqlite dbus pkgconf
 ```
 
 On Ubuntu or Debian:
 
 ```sh
 sudo apt install build-essential pkg-config libgtk-4-dev libadwaita-1-dev \
-  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libsqlite3-dev
+  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libsqlite3-dev \
+  libdbus-1-dev
 ```
 
 On Fedora:
 
 ```sh
 sudo dnf install rust cargo gtk4-devel libadwaita-devel gstreamer1-devel \
-  gstreamer1-plugins-base-devel sqlite-devel pkgconf-pkg-config
+  gstreamer1-plugins-base-devel sqlite-devel dbus-devel pkgconf-pkg-config
 ```
 
 ## Getting Started

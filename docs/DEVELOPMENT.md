@@ -23,27 +23,28 @@ The architecture intent is documented in
 
 ## Prerequisites
 
-Install Rust and the native libraries needed by GTK, Libadwaita, GStreamer, and
-SQLite.
+Install Rust and the native libraries needed by GTK, Libadwaita, GStreamer,
+SQLite, and DBus.
 
 Arch Linux:
 
 ```sh
-sudo pacman -S rust gtk4 libadwaita gstreamer gst-plugins-base sqlite pkgconf
+sudo pacman -S rust gtk4 libadwaita gstreamer gst-plugins-base sqlite dbus pkgconf
 ```
 
 Ubuntu or Debian:
 
 ```sh
 sudo apt install build-essential pkg-config libgtk-4-dev libadwaita-1-dev \
-  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libsqlite3-dev
+  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libsqlite3-dev \
+  libdbus-1-dev
 ```
 
 Fedora:
 
 ```sh
 sudo dnf install rust cargo gtk4-devel libadwaita-devel gstreamer1-devel \
-  gstreamer1-plugins-base-devel sqlite-devel pkgconf-pkg-config
+  gstreamer1-plugins-base-devel sqlite-devel dbus-devel pkgconf-pkg-config
 ```
 
 ## First Run
@@ -155,8 +156,8 @@ When changing persisted data:
 
 ## Troubleshooting
 
-If GTK or Libadwaita fails to build, confirm the development packages and
-`pkg-config` are installed.
+If GTK, Libadwaita, DBus, or GStreamer fails to build, confirm the development
+packages and `pkg-config` are installed.
 
 If GStreamer playback fails, verify the base plugins are installed and test with
 a known playable Jellyfin audio item.
