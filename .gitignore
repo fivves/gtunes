@@ -1,0 +1,21 @@
+/target/
+
+# Rust
+*.pdb
+
+# Local editor and OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local runtime data
+*.sqlite
+*.sqlite3
+*.db
+*.log
+
+# Secrets and environment overrides
+.env
+.env.*

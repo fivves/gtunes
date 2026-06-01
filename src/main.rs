@@ -1,0 +1,22 @@
+mod app;
+mod cache;
+mod config;
+mod jellyfin;
+mod lyrics;
+mod playback;
+mod ui;
+mod waveform;
+
+fn main() -> gtk::glib::ExitCode {
+    tracing_subscriber::fmt()
+        .compact()
+        .with_target(false)
+        .init();
+
+    if let Err(error) = gst::init() {
+        tracing::error!(%error, "failed to initialize GStreamer");
+        return gtk::glib::ExitCode::FAILURE;
+    }
+
+    app::run()
+}

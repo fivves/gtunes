@@ -1,0 +1,27 @@
+[package]
+name = "gtunes"
+version = "0.1.0"
+edition = "2024"
+authors = ["Eddie Lucitt <fivvestv@gmail.com>"]
+description = "A GTK4/Libadwaita Jellyfin music streaming client for Linux."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/fivves/gtunes"
+keywords = ["jellyfin", "music", "gtk", "linux", "gstreamer"]
+categories = ["multimedia::audio"]
+
+[dependencies]
+adw = { version = "0.9.1", package = "libadwaita" }
+anyhow = "1.0.102"
+directories = "6.0.0"
+gst = { version = "0.25.2", package = "gstreamer" }
+gtk = { version = "0.11.3", package = "gtk4", features = ["v4_10"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "stream", "rustls"] }
+rusqlite = "0.40.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+souvlaki = "0.7.1"
+thiserror = "2.0.18"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+url = "2.5.8"
