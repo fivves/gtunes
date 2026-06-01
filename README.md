@@ -16,7 +16,7 @@ Jellyfin playback workflow and preparing the app for a reliable V1 release.
 - Browse tracks, albums, and artists in a GTK4/Libadwaita interface.
 - Search and sort tracks.
 - Play Jellyfin audio streams through GStreamer.
-- Control playback with previous, play/pause, next, shuffle, and queue actions.
+- Control playback with previous, play/pause, next, and queue actions.
 - Display Jellyfin album artwork where available.
 - Expose media controls through MPRIS with `souvlaki`.
 - Maintain SQLite-backed app settings, session state, library cache, and
@@ -105,6 +105,15 @@ Run the app:
 ```sh
 cargo run
 ```
+
+Build the current development build as an AppImage:
+
+```sh
+scripts/build-appimage.sh
+```
+
+The AppImage is written to `dist/`. If `appimagetool` is not installed, the
+script downloads a local copy under `target/appimage-tools/`.
 
 When the app opens, enter your Jellyfin server URL, username, and password in the
 connection panel. The server URL should include the scheme, for example:

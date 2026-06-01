@@ -182,7 +182,10 @@ impl JellyfinClient {
             .query_pairs_mut()
             .append_pair("Recursive", "true")
             .append_pair("IncludeItemTypes", "Audio")
-            .append_pair("Fields", "MediaSources,Genres,DateCreated")
+            .append_pair(
+                "Fields",
+                "MediaSources,Genres,DateCreated,ArtistItems,AlbumArtists",
+            )
             .append_pair("SortBy", "SortName")
             .append_pair("SortOrder", "Ascending")
             .append_pair("StartIndex", &start_index.to_string())

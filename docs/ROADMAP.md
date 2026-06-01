@@ -10,7 +10,7 @@ tracks the intended development direction for contributors.
 - Saved Jellyfin session loading.
 - Library sync for Jellyfin audio items.
 - Track, album, and artist views.
-- Search, sort, queue, and shuffle controls.
+- Search, sort, and queue controls.
 - Album artwork loading.
 - GStreamer-backed playback.
 - MPRIS media control integration.

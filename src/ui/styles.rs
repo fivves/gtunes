@@ -62,22 +62,8 @@ window {
 }
 
 .toolbar-button {
-  min-width: 36px;
-  min-height: 36px;
-}
-
-.action-strip {
-  padding: 3px;
-  border: 1px solid @borders;
-  border-radius: 999px;
-  background: alpha(@window_fg_color, .035);
-}
-
-.shuffle-toggle {
-  min-width: 36px;
-  padding: 0;
-  border: 0;
-  background: transparent;
+  min-width: 28px;
+  min-height: 28px;
 }
 
 .shuffle-toggle.shuffle-off {
@@ -91,11 +77,6 @@ window {
 
 .shuffle-toggle.shuffle-on:hover {
   background: mix(@accent_bg_color, @accent_fg_color, .12);
-}
-
-.shuffle-state-label {
-  font-size: 10px;
-  font-weight: 900;
 }
 
 .play-button {
@@ -130,7 +111,7 @@ window {
 }
 
 .search {
-  min-width: 220px;
+  min-width: 0;
   min-height: 35px;
   border-radius: 999px;
 }
@@ -299,6 +280,12 @@ window {
   border-radius: 8px;
 }
 
+.artist-art {
+  min-width: 148px;
+  min-height: 148px;
+  border-radius: 8px;
+}
+
 .artist-placeholder {
   color: alpha(@window_fg_color, .48);
   background: alpha(@window_fg_color, .08);
@@ -379,7 +366,6 @@ window {
 }
 
 .context-rail {
-  min-width: 300px;
   border-left: 1px solid @borders;
   background: @window_bg_color;
 }

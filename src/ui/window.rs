@@ -32,11 +32,20 @@ struct UiTrack {
     artist: String,
     #[serde(default)]
     album_artist: Option<String>,
+    #[serde(default)]
+    artist_images: Vec<UiArtistImage>,
     album: String,
     disc_number: Option<i32>,
     track_number: Option<i32>,
     duration: String,
     quality: String,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+struct UiArtistImage {
+    key: String,
+    name: String,
+    thumbnail_url: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -115,7 +124,6 @@ struct UiState {
     cover_art: Option<gtk::Image>,
     play_button: Option<gtk::Button>,
     shuffle_button: Option<gtk::Button>,
-    shuffle_status_label: Option<gtk::Label>,
     queue_view: Option<Rc<QueueView>>,
     wave_area: Option<gtk::DrawingArea>,
     elapsed_label: gtk::Label,
@@ -146,9 +154,13 @@ enum ConnectionMessage {
 }
 
 const CONTEXT_RAIL_EXPANDED_WIDTH: i32 = 320;
+const CONTEXT_RAIL_EDGE_INSET: i32 = 18;
+const COMPACT_BODY_BREAKPOINT: i32 = 680;
+const SIDEBAR_COVER_BREAKPOINT: i32 = 660;
+const SIDEBAR_QUEUE_BREAKPOINT: i32 = 500;
 const LEFT_SIDEBAR_CONTENT_WIDTH: i32 = 220;
 const LEFT_SIDEBAR_WIDTH: i32 = LEFT_SIDEBAR_CONTENT_WIDTH + 20;
-const ACTION_PANEL_WIDTH: i32 = 220;
+const ACTION_PANEL_WIDTH: i32 = 130;
 const ALBUM_ART_SIZE: i32 = 168;
 static CONNECTION_GENERATION: AtomicU64 = AtomicU64::new(0);
 static CACHE_RESET_LOCK: Mutex<()> = Mutex::new(());
@@ -169,19 +181,22 @@ struct QueueRow {
 
 impl UiTrack {
     fn from_jellyfin(track: JellyfinTrack, client: &JellyfinClient) -> Self {
+        let artist_items = track.artist_items.clone();
+        let album_artist_items = track.album_artists.clone();
         let artist = if !track.artists.is_empty() {
             track.artists.join(", ")
-        } else if !track.artist_items.is_empty() {
-            track
-                .artist_items
-                .into_iter()
-                .map(|artist| artist.name)
+        } else if !artist_items.is_empty() {
+            artist_items
+                .iter()
+                .map(|artist| artist.name.clone())
                 .collect::<Vec<_>>()
                 .join(", ")
         } else {
             "Unknown Artist".to_string()
         };
         let album_artist = track.album_artist.clone();
+        let artist_images =
+            artist_image_urls(album_artist_items.iter().chain(artist_items.iter()), client);
 
         let quality = track
             .container
@@ -226,6 +241,7 @@ impl UiTrack {
             title: track.name,
             artist,
             album_artist,
+            artist_images,
             album: track.album.unwrap_or_else(|| "Unknown Album".to_string()),
             disc_number: track.parent_index_number,
             track_number: track.index_number,
@@ -233,6 +249,46 @@ impl UiTrack {
             quality,
         }
     }
+
+    fn artist_thumbnail_url_for(&self, artist: &str) -> Option<String> {
+        let key = artist_key(artist);
+        self.artist_images
+            .iter()
+            .find(|image| image.key == key)
+            .or_else(|| {
+                if artist == self.artist && self.artist_images.len() == 1 {
+                    self.artist_images.first()
+                } else {
+                    None
+                }
+            })
+            .map(|image| image.thumbnail_url.clone())
+    }
+}
+
+fn artist_image_urls<'a>(
+    artists: impl Iterator<Item = &'a crate::jellyfin::JellyfinNameId>,
+    client: &JellyfinClient,
+) -> Vec<UiArtistImage> {
+    let mut images = Vec::new();
+    for artist in artists {
+        let key = artist_key(&artist.name);
+        if images.iter().any(|image: &UiArtistImage| image.key == key) {
+            continue;
+        }
+        if let Some(thumbnail_url) = client
+            .item_image_url_with_size(&artist.id, "Primary", Some(160))
+            .ok()
+            .map(|url| url.to_string())
+        {
+            images.push(UiArtistImage {
+                key,
+                name: artist.name.clone(),
+                thumbnail_url,
+            });
+        }
+    }
+    images
 }
 
 fn format_runtime(run_time_ticks: Option<i64>) -> String {
@@ -255,8 +311,8 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         ))
         .default_width(1240)
         .default_height(760)
-        .width_request(860)
-        .height_request(560)
+        .width_request(360)
+        .height_request(420)
         .build();
 
     let root = gtk::Box::new(Orientation::Vertical, 0);
@@ -310,7 +366,6 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         cover_art: None,
         play_button: None,
         shuffle_button: None,
-        shuffle_status_label: None,
         queue_view: None,
         wave_area: None,
         elapsed_label: label("0:00", "mono"),
@@ -570,16 +625,20 @@ fn build_player_bar(state: Rc<RefCell<UiState>>, context_toggle: gtk::Button) ->
     wave.append(&wave_footer);
     player.append(&wave);
 
-    let actions = gtk::Box::new(Orientation::Vertical, 8);
-    actions.set_valign(Align::Center);
+    let actions = gtk::Overlay::new();
+    actions.set_valign(Align::Fill);
     actions.set_halign(Align::End);
     actions.set_hexpand(false);
     actions.set_size_request(ACTION_PANEL_WIDTH, -1);
+
+    let search_centerer = gtk::Box::new(Orientation::Vertical, 0);
+    search_centerer.set_valign(Align::Center);
+
     let search = gtk::SearchEntry::new();
     search.add_css_class("search");
     search.set_hexpand(true);
     search.set_halign(Align::Fill);
-    search.set_size_request(ACTION_PANEL_WIDTH, -1);
+    search.set_size_request(0, -1);
     search.set_placeholder_text(Some("Search library"));
     {
         let state = state.clone();
@@ -588,14 +647,18 @@ fn build_player_bar(state: Rc<RefCell<UiState>>, context_toggle: gtk::Button) ->
         });
     }
     state.borrow_mut().search_entry = Some(search.clone());
-    actions.append(&search);
+    search_centerer.append(&search);
+    actions.set_child(Some(&search_centerer));
 
-    let action_row = gtk::Box::new(Orientation::Horizontal, 8);
-    action_row.add_css_class("action-strip");
-    action_row.set_halign(Align::Fill);
-    action_row.set_hexpand(true);
-    action_row.set_size_request(ACTION_PANEL_WIDTH, -1);
-    let (shuffle, shuffle_status) = shuffle_button();
+    let utility_row = gtk::Box::new(Orientation::Horizontal, 4);
+    utility_row.set_halign(Align::End);
+    utility_row.set_valign(Align::Start);
+    utility_row.set_margin_end(CONTEXT_RAIL_EDGE_INSET);
+
+    let shuffle = icon_button("media-playlist-shuffle-symbolic", "Shuffle");
+    shuffle.add_css_class("toolbar-button");
+    shuffle.add_css_class("shuffle-toggle");
+    shuffle.add_css_class("shuffle-off");
     {
         let state = state.clone();
         shuffle.connect_clicked(move |_| {
@@ -603,27 +666,7 @@ fn build_player_bar(state: Rc<RefCell<UiState>>, context_toggle: gtk::Button) ->
         });
     }
     state.borrow_mut().shuffle_button = Some(shuffle.clone());
-    state.borrow_mut().shuffle_status_label = Some(shuffle_status);
-    action_row.append(&shuffle);
-
-    let dice = icon_button("media-playback-start-symbolic", "Shuffle and play");
-    dice.add_css_class("toolbar-button");
-    {
-        let state = state.clone();
-        dice.connect_clicked(move |_| {
-            shuffle_and_play(&state);
-        });
-    }
-    action_row.append(&dice);
-
-    let queue = icon_button("view-list-symbolic", "Up Next");
-    queue.add_css_class("toolbar-button");
-    queue.set_sensitive(false);
-    queue.set_tooltip_text(Some("Up Next controls coming soon"));
-    action_row.append(&queue);
-
-    context_toggle.add_css_class("toolbar-button");
-    action_row.append(&context_toggle);
+    utility_row.append(&shuffle);
 
     let settings = icon_button("emblem-system-symbolic", "Settings");
     settings.add_css_class("toolbar-button");
@@ -639,8 +682,13 @@ fn build_player_bar(state: Rc<RefCell<UiState>>, context_toggle: gtk::Button) ->
             }
         });
     }
-    action_row.append(&settings);
-    actions.append(&action_row);
+    utility_row.append(&settings);
+
+    context_toggle.add_css_class("toolbar-button");
+    utility_row.append(&context_toggle);
+
+    actions.add_overlay(&utility_row);
+
     player.append(&actions);
 
     player
@@ -855,26 +903,47 @@ fn build_body(
     outer.set_hexpand(true);
     outer.set_vexpand(true);
 
-    let sidebar = build_sidebar(state.clone());
+    let (sidebar, sidebar_queue, sidebar_cover) = build_sidebar(state.clone());
     sidebar.set_size_request(LEFT_SIDEBAR_WIDTH, -1);
     sidebar.set_hexpand(false);
     outer.append(&sidebar);
 
-    let inner = gtk::Box::new(Orientation::Horizontal, 0);
+    let inner = gtk::Overlay::new();
     inner.set_hexpand(true);
     inner.set_vexpand(true);
-    inner.append(&build_content(state.clone()));
+    let content = build_content(state.clone());
+    inner.set_child(Some(&content));
     let context_rail = build_context_rail(state);
+    context_revealer.set_halign(Align::End);
+    context_revealer.set_valign(Align::Fill);
+    context_revealer.set_vexpand(true);
     context_revealer.set_child(Some(&context_rail));
     context_revealer.set_reveal_child(false);
-    inner.append(&context_revealer);
+    inner.add_overlay(&context_revealer);
 
     outer.append(&inner);
-    connect_context_rail_toggle(&context_toggle, &context_revealer, &context_rail);
+    connect_context_rail_toggle(
+        &context_toggle,
+        &context_revealer,
+        &context_rail,
+        &sidebar,
+        &sidebar_queue,
+        &sidebar_cover,
+        &outer,
+    );
+    connect_context_rail_shortcut(
+        &context_toggle,
+        &context_revealer,
+        &context_rail,
+        &sidebar,
+        &sidebar_queue,
+        &sidebar_cover,
+        &outer,
+    );
     outer
 }
 
-fn build_sidebar(state: Rc<RefCell<UiState>>) -> gtk::Box {
+fn build_sidebar(state: Rc<RefCell<UiState>>) -> (gtk::Box, gtk::Box, gtk::Box) {
     let sidebar = gtk::Box::new(Orientation::Vertical, 4);
     sidebar.add_css_class("sidebar");
 
@@ -885,10 +954,12 @@ fn build_sidebar(state: Rc<RefCell<UiState>>) -> gtk::Box {
     spacer.set_vexpand(true);
     sidebar.append(&spacer);
 
-    sidebar.append(&queue_card(state.clone()));
-    sidebar.append(&sidebar_cover_art(state));
+    let queue = queue_card(state.clone());
+    let cover = sidebar_cover_art(state);
+    sidebar.append(&queue);
+    sidebar.append(&cover);
 
-    sidebar
+    (sidebar, queue, cover)
 }
 
 fn sidebar_cover_art(state: Rc<RefCell<UiState>>) -> gtk::Box {
@@ -1174,7 +1245,7 @@ fn build_context_rail(_state: Rc<RefCell<UiState>>) -> gtk::Box {
     let rail = gtk::Box::new(Orientation::Vertical, 0);
     rail.add_css_class("context-rail");
     rail.set_hexpand(false);
-    rail.set_size_request(320, -1);
+    rail.set_size_request(0, -1);
 
     let header = gtk::Box::new(Orientation::Vertical, 8);
     header.add_css_class("rail-header");
@@ -1217,6 +1288,7 @@ struct AlbumSummary {
     key: String,
     name: String,
     artist: String,
+    artist_image_url: Option<String>,
     artwork_url: Option<String>,
     song_count: usize,
 }
@@ -1225,6 +1297,7 @@ struct AlbumSummary {
 struct ArtistSummary {
     key: String,
     name: String,
+    image_url: Option<String>,
     album_count: usize,
     song_count: usize,
 }
@@ -1241,6 +1314,7 @@ struct AlbumAccumulator {
 struct ArtistVote {
     key: String,
     name: String,
+    image_url: Option<String>,
     count: usize,
     first_seen: usize,
 }
@@ -1256,7 +1330,7 @@ fn album_grid_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
     let flow = gtk::FlowBox::new();
     flow.add_css_class("collection-grid");
     flow.set_selection_mode(gtk::SelectionMode::None);
-    flow.set_min_children_per_line(2);
+    flow.set_min_children_per_line(1);
     flow.set_max_children_per_line(8);
     flow.set_row_spacing(16);
     flow.set_column_spacing(16);
@@ -1279,7 +1353,7 @@ fn artist_grid_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
     let flow = gtk::FlowBox::new();
     flow.add_css_class("collection-grid");
     flow.set_selection_mode(gtk::SelectionMode::None);
-    flow.set_min_children_per_line(2);
+    flow.set_min_children_per_line(1);
     flow.set_max_children_per_line(8);
     flow.set_row_spacing(16);
     flow.set_column_spacing(16);
@@ -1411,10 +1485,15 @@ fn artist_tile(artist: ArtistSummary, state: Rc<RefCell<UiState>>) -> gtk::Butto
     let layout = gtk::Box::new(Orientation::Vertical, 7);
     layout.set_halign(Align::Fill);
 
-    let avatar = cover_art(148);
-    avatar.add_css_class("collection-art");
-    avatar.add_css_class("artist-placeholder");
-    avatar.set_icon_name(Some("avatar-default-symbolic"));
+    let avatar = gtk::Picture::new();
+    avatar.add_css_class("artist-art");
+    avatar.set_size_request(148, 148);
+    avatar.set_content_fit(gtk::ContentFit::Cover);
+    avatar.set_can_shrink(false);
+    avatar.set_overflow(gtk::Overflow::Hidden);
+    if let Some(url) = artist.image_url.clone() {
+        load_picture_art(url, avatar.clone());
+    }
     layout.append(&avatar);
     layout.append(&collection_tile_label(&artist.name, "collection-title"));
     layout.append(&collection_tile_label(
@@ -1460,11 +1539,16 @@ fn album_summaries(tracks: &[UiTrack], query: &str) -> Vec<AlbumSummary> {
             add_artist_vote(
                 &mut album.explicit_artist_votes,
                 track.album_artist.as_deref(),
+                track
+                    .album_artist
+                    .as_deref()
+                    .and_then(|artist| track.artist_thumbnail_url_for(artist)),
                 track_index,
             );
             add_artist_vote(
                 &mut album.fallback_artist_votes,
                 Some(&track.artist),
+                track.artist_thumbnail_url_for(&track.artist),
                 track_index,
             );
             continue;
@@ -1481,11 +1565,16 @@ fn album_summaries(tracks: &[UiTrack], query: &str) -> Vec<AlbumSummary> {
         add_artist_vote(
             &mut album.explicit_artist_votes,
             track.album_artist.as_deref(),
+            track
+                .album_artist
+                .as_deref()
+                .and_then(|artist| track.artist_thumbnail_url_for(artist)),
             track_index,
         );
         add_artist_vote(
             &mut album.fallback_artist_votes,
             Some(&track.artist),
+            track.artist_thumbnail_url_for(&track.artist),
             track_index,
         );
         albums.push(album);
@@ -1493,15 +1582,17 @@ fn album_summaries(tracks: &[UiTrack], query: &str) -> Vec<AlbumSummary> {
 
     let mut albums = albums
         .into_iter()
-        .map(|album| AlbumSummary {
-            key: album.key,
-            name: album.name,
-            artist: preferred_album_artist(
-                &album.explicit_artist_votes,
-                &album.fallback_artist_votes,
-            ),
-            artwork_url: album.artwork_url,
-            song_count: album.song_count,
+        .map(|album| {
+            let preferred_artist =
+                preferred_album_artist(&album.explicit_artist_votes, &album.fallback_artist_votes);
+            AlbumSummary {
+                key: album.key,
+                name: album.name,
+                artist: preferred_artist.name,
+                artist_image_url: preferred_artist.image_url,
+                artwork_url: album.artwork_url,
+                song_count: album.song_count,
+            }
         })
         .collect::<Vec<_>>();
 
@@ -1542,15 +1633,20 @@ fn artist_summaries(tracks: &[UiTrack], query: &str) -> Vec<ArtistSummary> {
     let mut artists = Vec::<ArtistSummary>::new();
     for album in album_summaries(tracks, "") {
         let key = artist_key(&album.artist);
+        let image_url = artist_summary_image_url(&album);
         if let Some(artist) = artists.iter_mut().find(|artist| artist.key == key) {
             artist.album_count += 1;
             artist.song_count += album.song_count;
+            if artist.image_url.is_none() {
+                artist.image_url = image_url;
+            }
             continue;
         }
 
         artists.push(ArtistSummary {
             key,
             name: album.artist,
+            image_url,
             album_count: 1,
             song_count: album.song_count,
         });
@@ -1563,6 +1659,13 @@ fn artist_summaries(tracks: &[UiTrack], query: &str) -> Vec<ArtistSummary> {
 
     artists.sort_by(|left, right| compare_text(&left.name, &right.name));
     artists
+}
+
+fn artist_summary_image_url(album: &AlbumSummary) -> Option<String> {
+    album
+        .artist_image_url
+        .clone()
+        .or_else(|| album.artwork_url.clone())
 }
 
 fn artist_count_text(album_count: usize, song_count: usize) -> String {
@@ -1593,29 +1696,52 @@ fn normalized_key(value: &str) -> String {
     value.trim().to_lowercase()
 }
 
-fn add_artist_vote(votes: &mut Vec<ArtistVote>, artist: Option<&str>, first_seen: usize) {
+fn add_artist_vote(
+    votes: &mut Vec<ArtistVote>,
+    artist: Option<&str>,
+    image_url: Option<String>,
+    first_seen: usize,
+) {
     let Some(artist) = artist.map(str::trim).filter(|artist| !artist.is_empty()) else {
         return;
     };
     let key = artist_key(artist);
     if let Some(vote) = votes.iter_mut().find(|vote| vote.key == key) {
         vote.count += 1;
+        if vote.image_url.is_none() {
+            vote.image_url = image_url;
+        }
         return;
     }
 
     votes.push(ArtistVote {
         key,
         name: artist.to_string(),
+        image_url,
         count: 1,
         first_seen,
     });
 }
 
-fn preferred_album_artist(explicit_votes: &[ArtistVote], fallback_votes: &[ArtistVote]) -> String {
+struct PreferredArtist {
+    name: String,
+    image_url: Option<String>,
+}
+
+fn preferred_album_artist(
+    explicit_votes: &[ArtistVote],
+    fallback_votes: &[ArtistVote],
+) -> PreferredArtist {
     preferred_artist_vote(explicit_votes)
         .or_else(|| preferred_artist_vote(fallback_votes))
-        .map(|vote| vote.name.clone())
-        .unwrap_or_else(|| "Unknown Artist".to_string())
+        .map(|vote| PreferredArtist {
+            name: vote.name.clone(),
+            image_url: vote.image_url.clone(),
+        })
+        .unwrap_or_else(|| PreferredArtist {
+            name: "Unknown Artist".to_string(),
+            image_url: None,
+        })
 }
 
 fn preferred_artist_vote(votes: &[ArtistVote]) -> Option<&ArtistVote> {
@@ -1687,7 +1813,7 @@ fn track_table(state: Rc<RefCell<UiState>>) -> gtk::Box {
 
     let scroll = gtk::ScrolledWindow::new();
     scroll.add_css_class("track-scroll");
-    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
     scroll.set_overlay_scrolling(true);
     scroll.set_hexpand(true);
     scroll.set_vexpand(true);
@@ -2612,17 +2738,11 @@ fn update_shuffle_button(state: &UiState) {
         button.add_css_class("shuffle-on");
         button.remove_css_class("shuffle-off");
         button.set_tooltip_text(Some("Shuffle on"));
-        if let Some(label) = state.shuffle_status_label.as_ref() {
-            label.set_text("On");
-        }
     } else {
         button.remove_css_class("suggested-action");
         button.remove_css_class("shuffle-on");
         button.add_css_class("shuffle-off");
         button.set_tooltip_text(Some("Shuffle"));
-        if let Some(label) = state.shuffle_status_label.as_ref() {
-            label.set_text("Off");
-        }
     }
 }
 
@@ -2636,26 +2756,6 @@ fn toggle_shuffle(state: &Rc<RefCell<UiState>>) {
         update_shuffle_button(&ui);
     }
     rebuild_queue_list(state);
-}
-
-fn shuffle_and_play(state: &Rc<RefCell<UiState>>) {
-    let first_index = {
-        let mut ui = state.borrow_mut();
-        if ui.tracks.is_empty() {
-            ui.playback_status.set_text("No tracks to shuffle");
-            return;
-        }
-
-        ui.shuffle_enabled = true;
-        let mut order = (0..ui.tracks.len()).collect::<Vec<_>>();
-        shuffle_indices(&mut order);
-        let first_index = order.first().copied().unwrap_or(0);
-        ui.playback_order = order;
-        update_shuffle_button(&ui);
-        first_index
-    };
-
-    play_track_at(state, first_index);
 }
 
 fn pause_playback(state: &Rc<RefCell<UiState>>) {
@@ -3193,7 +3293,7 @@ fn load_cached_tracks(
 
 fn library_cache_key(session: &JellyfinSession) -> String {
     format!(
-        "jellyfin.library.v2.{}.{}",
+        "jellyfin.library.v3.{}.{}",
         library_cache_server_key(session),
         session.user_id
     )
@@ -3391,6 +3491,33 @@ fn load_queue_art(
     });
 }
 
+fn load_picture_art(url: String, picture: gtk::Picture) {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = fetch_cached_image_file(&url);
+        let _ = sender.send(result);
+    });
+
+    gtk::glib::timeout_add_local(Duration::from_millis(100), move || {
+        match receiver.try_recv() {
+            Ok(Ok(path)) => {
+                let file = gtk::gio::File::for_path(path);
+                match gtk::gdk::Texture::from_file(&file) {
+                    Ok(texture) => picture.set_paintable(Some(&texture)),
+                    Err(error) => tracing::warn!(%error, "failed to decode artist artwork"),
+                }
+                gtk::glib::ControlFlow::Break
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "failed to fetch artist artwork");
+                gtk::glib::ControlFlow::Break
+            }
+            Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
+            Err(mpsc::TryRecvError::Disconnected) => gtk::glib::ControlFlow::Break,
+        }
+    });
+}
+
 fn scroll_to_now_playing(state: &Rc<RefCell<UiState>>) {
     let (idx, stack) = {
         let ui = state.borrow();
@@ -3445,7 +3572,7 @@ fn build_bottom_bar(state: Rc<RefCell<UiState>>) -> gtk::Box {
 }
 
 fn context_rail_toggle_button() -> (gtk::Button, gtk::Revealer) {
-    let button = icon_button("go-previous-symbolic", "Show lyrics panel");
+    let button = icon_button("audio-input-microphone-symbolic", "Show lyrics");
     let revealer = gtk::Revealer::builder()
         .transition_type(gtk::RevealerTransitionType::SlideLeft)
         .transition_duration(180)
@@ -3453,28 +3580,185 @@ fn context_rail_toggle_button() -> (gtk::Button, gtk::Revealer) {
     (button, revealer)
 }
 
-fn connect_context_rail_toggle(button: &gtk::Button, revealer: &gtk::Revealer, rail: &gtk::Box) {
+fn connect_context_rail_toggle(
+    button: &gtk::Button,
+    revealer: &gtk::Revealer,
+    rail: &gtk::Box,
+    sidebar: &gtk::Box,
+    sidebar_queue: &gtk::Box,
+    sidebar_cover: &gtk::Box,
+    layout_root: &gtk::Box,
+) {
     let button = button.clone();
     let closure_button = button.clone();
     let revealer = revealer.clone();
     let rail = rail.clone();
     let closure_rail = rail.clone();
+    let closure_sidebar = sidebar.clone();
+    let closure_sidebar_queue = sidebar_queue.clone();
+    let closure_sidebar_cover = sidebar_cover.clone();
+    let closure_layout_root = layout_root.clone();
+    let closure_revealer = revealer.clone();
     button.connect_clicked(move |_| {
-        let expanded = !revealer.reveals_child();
-        revealer.set_reveal_child(expanded);
-        closure_rail.set_size_request(
-            if expanded {
-                CONTEXT_RAIL_EXPANDED_WIDTH
-            } else {
-                0
-            },
-            -1,
+        let expanded = !closure_revealer.reveals_child();
+        set_context_rail_expanded(
+            expanded,
+            &closure_button,
+            &closure_revealer,
+            &closure_rail,
+            &closure_sidebar,
+            &closure_sidebar_queue,
+            &closure_sidebar_cover,
+            &closure_layout_root,
         );
-        update_context_rail_toggle_button(&closure_button, expanded);
+    });
+
+    let resize_revealer = revealer.clone();
+    let resize_rail = rail.clone();
+    let resize_sidebar = sidebar.clone();
+    let resize_sidebar_queue = sidebar_queue.clone();
+    let resize_sidebar_cover = sidebar_cover.clone();
+    layout_root.connect_notify_local(Some("width"), move |layout_root, _| {
+        apply_body_responsive_layout(
+            &resize_sidebar,
+            &resize_sidebar_queue,
+            &resize_sidebar_cover,
+            layout_root,
+        );
+        apply_context_rail_layout(&resize_revealer, &resize_rail, &resize_sidebar, layout_root);
+    });
+
+    let tick_revealer = revealer.clone();
+    let tick_rail = rail.clone();
+    let tick_sidebar = sidebar.clone();
+    let tick_sidebar_queue = sidebar_queue.clone();
+    let tick_sidebar_cover = sidebar_cover.clone();
+    let last_size = Rc::new(RefCell::new((0, 0)));
+    let tick_last_size = last_size.clone();
+    layout_root.add_tick_callback(move |layout_root, _| {
+        let width = layout_root.allocated_width();
+        let height = layout_root.allocated_height();
+        let mut last_size = tick_last_size.borrow_mut();
+        if (width, height) != *last_size {
+            *last_size = (width, height);
+            apply_body_responsive_layout(
+                &tick_sidebar,
+                &tick_sidebar_queue,
+                &tick_sidebar_cover,
+                layout_root,
+            );
+            apply_context_rail_layout(&tick_revealer, &tick_rail, &tick_sidebar, layout_root);
+        }
+        gtk::glib::ControlFlow::Continue
     });
 
     rail.set_size_request(0, -1);
+    apply_body_responsive_layout(sidebar, sidebar_queue, sidebar_cover, layout_root);
+    apply_context_rail_layout(&revealer, &rail, sidebar, layout_root);
     update_context_rail_toggle_button(&button, false);
+}
+
+fn connect_context_rail_shortcut(
+    button: &gtk::Button,
+    revealer: &gtk::Revealer,
+    rail: &gtk::Box,
+    sidebar: &gtk::Box,
+    sidebar_queue: &gtk::Box,
+    sidebar_cover: &gtk::Box,
+    layout_root: &gtk::Box,
+) {
+    let controller = gtk::EventControllerKey::new();
+    controller.set_propagation_phase(gtk::PropagationPhase::Capture);
+
+    let button = button.clone();
+    let revealer = revealer.clone();
+    let rail = rail.clone();
+    let sidebar = sidebar.clone();
+    let sidebar_queue = sidebar_queue.clone();
+    let sidebar_cover = sidebar_cover.clone();
+    let layout_root = layout_root.clone();
+    let controller_root = layout_root.clone();
+    controller.connect_key_pressed(move |_, key, _, state| {
+        if state.contains(gtk::gdk::ModifierType::CONTROL_MASK)
+            && (key == gtk::gdk::Key::L || key == gtk::gdk::Key::l)
+        {
+            let expanded = !revealer.reveals_child();
+            set_context_rail_expanded(
+                expanded,
+                &button,
+                &revealer,
+                &rail,
+                &sidebar,
+                &sidebar_queue,
+                &sidebar_cover,
+                &layout_root,
+            );
+            return gtk::glib::Propagation::Stop;
+        }
+
+        gtk::glib::Propagation::Proceed
+    });
+
+    controller_root.add_controller(controller);
+}
+
+fn set_context_rail_expanded(
+    expanded: bool,
+    button: &gtk::Button,
+    revealer: &gtk::Revealer,
+    rail: &gtk::Box,
+    sidebar: &gtk::Box,
+    sidebar_queue: &gtk::Box,
+    sidebar_cover: &gtk::Box,
+    layout_root: &gtk::Box,
+) {
+    revealer.set_reveal_child(expanded);
+    apply_body_responsive_layout(sidebar, sidebar_queue, sidebar_cover, layout_root);
+    apply_context_rail_layout(revealer, rail, sidebar, layout_root);
+    update_context_rail_toggle_button(button, expanded);
+}
+
+fn apply_context_rail_layout(
+    revealer: &gtk::Revealer,
+    rail: &gtk::Box,
+    sidebar: &gtk::Box,
+    layout_root: &impl IsA<gtk::Widget>,
+) {
+    if !revealer.reveals_child() {
+        rail.set_size_request(0, -1);
+        return;
+    }
+
+    let width = context_rail_width(layout_root, sidebar);
+    rail.set_size_request(width, -1);
+}
+
+fn apply_body_responsive_layout(
+    sidebar: &gtk::Box,
+    sidebar_queue: &gtk::Box,
+    sidebar_cover: &gtk::Box,
+    layout_root: &impl IsA<gtk::Widget>,
+) {
+    let width = layout_root.allocated_width();
+    let height = layout_root.allocated_height();
+    if width <= 0 {
+        return;
+    }
+
+    let compact = width < COMPACT_BODY_BREAKPOINT;
+    sidebar.set_visible(!compact);
+    sidebar_queue.set_visible(!compact && height >= SIDEBAR_QUEUE_BREAKPOINT);
+    sidebar_cover.set_visible(!compact && height >= SIDEBAR_COVER_BREAKPOINT);
+}
+
+fn context_rail_width(layout_root: &impl IsA<gtk::Widget>, sidebar: &gtk::Box) -> i32 {
+    let sidebar_width = if sidebar.is_visible() {
+        LEFT_SIDEBAR_WIDTH
+    } else {
+        0
+    };
+    let available = layout_root.allocated_width() - sidebar_width;
+    available.clamp(0, CONTEXT_RAIL_EXPANDED_WIDTH)
 }
 
 fn update_context_rail_toggle_button(button: &gtk::Button, expanded: bool) {
@@ -3590,22 +3874,6 @@ fn icon_button(icon_name: &str, tooltip: &str) -> gtk::Button {
         .build();
     button.add_css_class("icon-button");
     button
-}
-
-fn shuffle_button() -> (gtk::Button, gtk::Label) {
-    let button = gtk::Button::builder()
-        .icon_name("media-playlist-shuffle-symbolic")
-        .tooltip_text("Shuffle")
-        .build();
-    button.add_css_class("icon-button");
-    button.add_css_class("toolbar-button");
-    button.add_css_class("shuffle-toggle");
-    button.add_css_class("shuffle-off");
-
-    let status = gtk::Label::new(Some("Off"));
-    status.add_css_class("shuffle-state-label");
-
-    (button, status)
 }
 
 fn cover_art(size: i32) -> gtk::Image {

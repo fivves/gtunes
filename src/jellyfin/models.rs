@@ -38,6 +38,8 @@ pub struct JellyfinTrack {
     #[serde(default)]
     pub album_artist: Option<String>,
     #[serde(default)]
+    pub album_artists: Vec<JellyfinNameId>,
+    #[serde(default)]
     pub album: Option<String>,
     #[serde(default)]
     pub album_id: Option<JellyfinItemId>,
