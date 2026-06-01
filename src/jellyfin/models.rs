@@ -132,3 +132,36 @@ impl ArtistImageKind {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn track_deserialization_defaults_optional_collections() {
+        let json = r#"{
+            "Id": "track",
+            "Name": "Song"
+        }"#;
+
+        let track: JellyfinTrack = serde_json::from_str(json).expect("track decodes");
+
+        assert_eq!(track.id, "track");
+        assert_eq!(track.name, "Song");
+        assert!(track.artists.is_empty());
+        assert!(track.artist_items.is_empty());
+        assert!(track.album_artists.is_empty());
+        assert!(track.media_sources.is_empty());
+        assert_eq!(track.album, None);
+        assert_eq!(track.run_time_ticks, None);
+    }
+
+    #[test]
+    fn items_response_accepts_missing_items_and_total() {
+        let response: JellyfinItemsResponse<JellyfinTrack> =
+            serde_json::from_str("{}").expect("response decodes");
+
+        assert!(response.items.is_empty());
+        assert_eq!(response.total_record_count, None);
+    }
+}

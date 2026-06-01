@@ -1,5 +1,6 @@
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::Serialize;
+use std::time::Duration;
 use thiserror::Error;
 use url::Url;
 
@@ -8,6 +9,7 @@ use crate::config;
 use super::models::{JellyfinAuthResponse, JellyfinItemsResponse, JellyfinTrack};
 
 const MUSIC_TRACK_PAGE_SIZE: u32 = 500;
+const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Error)]
 pub enum JellyfinClientError {
@@ -43,10 +45,12 @@ impl JellyfinClient {
         let http = reqwest::Client::builder()
             .user_agent(user_agent.clone())
             .default_headers(headers.clone())
+            .timeout(HTTP_TIMEOUT)
             .build()?;
         let blocking_http = reqwest::blocking::Client::builder()
             .user_agent(user_agent)
             .default_headers(headers)
+            .timeout(HTTP_TIMEOUT)
             .build()?;
 
         Ok(Self {
@@ -91,13 +95,30 @@ impl JellyfinClient {
     }
 
     pub fn item_stream_url(&self, item_id: &str) -> Result<Url, JellyfinClientError> {
+        self.item_direct_stream_url(item_id)
+    }
+
+    pub fn item_direct_stream_url(&self, item_id: &str) -> Result<Url, JellyfinClientError> {
+        let mut url = self.server_url.join(&format!("Audio/{item_id}/stream"))?;
+        url.query_pairs_mut().append_pair("static", "true");
+        if let Some(token) = self.access_token.as_deref() {
+            url.query_pairs_mut().append_pair("api_key", token);
+        }
+        Ok(url)
+    }
+
+    pub fn item_transcode_stream_url(&self, item_id: &str) -> Result<Url, JellyfinClientError> {
         let mut url = self.server_url.join(&format!(
-            "Audio/{item_id}/universal?UserId=&Container=opus,mp3,aac,m4a,flac,webma,webm,wav&TranscodingContainer=mp3&AudioCodec=mp3&EnableRedirection=true"
+            "Audio/{item_id}/universal?UserId=&Container=opus,mp3,aac,m4a,flac,webma,webm,wav&TranscodingContainer=mp3&AudioCodec=mp3&EnableDirectPlay=false&EnableDirectStream=false&EnableRedirection=true"
         ))?;
         if let Some(token) = self.access_token.as_deref() {
             url.query_pairs_mut().append_pair("api_key", token);
         }
         Ok(url)
+    }
+
+    pub fn stream_http_headers(&self) -> Vec<(String, String)> {
+        stream_http_headers_for_token(self.access_token.as_deref())
     }
 
     pub fn item_image_url(
@@ -205,6 +226,12 @@ impl JellyfinClient {
     }
 }
 
+pub fn stream_http_headers_for_token(token: Option<&str>) -> Vec<(String, String)> {
+    token
+        .map(|token| vec![("X-Emby-Token".to_string(), token.to_string())])
+        .unwrap_or_default()
+}
+
 fn auth_header(token: &str) -> Result<HeaderValue, JellyfinClientError> {
     HeaderValue::from_str(&authorization_header_value(Some(token)))
         .map_err(|_| JellyfinClientError::InvalidAuthHeader)
@@ -231,4 +258,41 @@ fn authorization_header_value(token: Option<&str>) -> String {
 struct AuthenticateByName<'a> {
     username: &'a str,
     pw: &'a str,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_headers_include_jellyfin_token_when_available() {
+        assert_eq!(
+            stream_http_headers_for_token(Some("secret")),
+            vec![("X-Emby-Token".to_string(), "secret".to_string())]
+        );
+        assert!(stream_http_headers_for_token(None).is_empty());
+    }
+
+    #[test]
+    fn stream_urls_prefer_direct_play_and_expose_transcode_fallback() {
+        let client = JellyfinClient::new("https://jellyfin.example/base/", Some("token".into()))
+            .expect("valid client");
+
+        let direct = client
+            .item_direct_stream_url("track-id")
+            .expect("direct stream url");
+        assert_eq!(
+            direct.as_str(),
+            "https://jellyfin.example/base/Audio/track-id/stream?static=true&api_key=token"
+        );
+
+        let fallback = client
+            .item_transcode_stream_url("track-id")
+            .expect("transcode stream url");
+        let query = fallback.query().expect("query string");
+        assert_eq!(fallback.path(), "/base/Audio/track-id/universal");
+        assert!(query.contains("EnableDirectPlay=false"));
+        assert!(query.contains("AudioCodec=mp3"));
+        assert!(query.contains("api_key=token"));
+    }
 }

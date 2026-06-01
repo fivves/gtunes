@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -15,8 +16,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::cache::{CacheDatabase, JellyfinSession};
 use crate::config;
-use crate::jellyfin::{JellyfinClient, JellyfinTrack};
-use crate::playback::{PlaybackEngine, PlaybackRequest, PlaybackState};
+use crate::jellyfin::{
+    JellyfinClient, JellyfinClientError, JellyfinTrack, stream_http_headers_for_token,
+};
+use crate::playback::{
+    PlaybackEngine, PlaybackEvent, PlaybackRequest, PlaybackState, PlaybackStreamKind,
+};
 use crate::waveform::{WaveformKey, WaveformSummary};
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -26,6 +31,10 @@ struct UiTrack {
     album_id: Option<String>,
     media_source_id: Option<String>,
     stream_url: Option<String>,
+    #[serde(default)]
+    fallback_stream_url: Option<String>,
+    #[serde(skip)]
+    stream_http_headers: Vec<(String, String)>,
     artwork_url: Option<String>,
     thumbnail_artwork_url: Option<String>,
     title: String,
@@ -61,6 +70,25 @@ enum LibraryPage {
     Tracks,
     Albums,
     Artists,
+}
+
+#[derive(Debug)]
+enum ImageFetchError {
+    Missing,
+    HttpStatus(reqwest::StatusCode),
+    Request(&'static str),
+    Io(std::io::Error),
+}
+
+impl fmt::Display for ImageFetchError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Missing => formatter.write_str("image not found"),
+            Self::HttpStatus(status) => write!(formatter, "HTTP status {status}"),
+            Self::Request(message) => formatter.write_str(message),
+            Self::Io(error) => write!(formatter, "io error: {error}"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
@@ -213,9 +241,14 @@ impl UiTrack {
             .trim()
             .to_uppercase();
         let stream_url = client
-            .item_stream_url(&track.id)
+            .item_direct_stream_url(&track.id)
             .ok()
             .map(|url| url.to_string());
+        let fallback_stream_url = client
+            .item_transcode_stream_url(&track.id)
+            .ok()
+            .map(|url| url.to_string());
+        let stream_http_headers = client.stream_http_headers();
         let media_source_id = track
             .media_sources
             .first()
@@ -236,6 +269,8 @@ impl UiTrack {
             album_id: track.album_id,
             media_source_id: Some(media_source_id),
             stream_url,
+            fallback_stream_url,
+            stream_http_headers,
             artwork_url,
             thumbnail_artwork_url,
             title: track.name,
@@ -590,6 +625,10 @@ fn build_player_bar(state: Rc<RefCell<UiState>>, context_toggle: gtk::Button) ->
     state.borrow().now_meta.set_halign(Align::Center);
     state.borrow().now_meta.set_single_line_mode(true);
     state.borrow().now_meta.set_lines(1);
+    state
+        .borrow()
+        .now_meta
+        .set_cursor_from_name(Some("pointer"));
     state.borrow().playback_status.set_xalign(0.5);
     state.borrow().playback_status.set_halign(Align::Center);
     state.borrow().playback_status.set_single_line_mode(true);
@@ -605,6 +644,20 @@ fn build_player_bar(state: Rc<RefCell<UiState>>, context_toggle: gtk::Button) ->
             .borrow()
             .now_title
             .set_cursor_from_name(Some("pointer"));
+    }
+    {
+        let state_click = state.clone();
+        state
+            .borrow()
+            .now_meta
+            .connect_activate_link(move |_, uri| {
+                match uri {
+                    "gtunes:artist" => navigate_to_now_playing_artist(&state_click),
+                    "gtunes:album" => navigate_to_now_playing_album(&state_click),
+                    _ => {}
+                }
+                gtk::glib::Propagation::Stop
+            });
     }
     wave_track.append(&state.borrow().now_title);
     wave_track.append(&state.borrow().now_meta);
@@ -1018,6 +1071,7 @@ fn detail_header(state: Rc<RefCell<UiState>>) -> gtk::Box {
 
     let back = icon_button("go-previous-symbolic", "Back");
     back.add_css_class("toolbar-button");
+    back.set_valign(Align::Center);
     {
         let state = state.clone();
         back.connect_clicked(move |_| {
@@ -1028,6 +1082,7 @@ fn detail_header(state: Rc<RefCell<UiState>>) -> gtk::Box {
 
     let detail_text = gtk::Box::new(Orientation::Vertical, 2);
     detail_text.set_halign(Align::Fill);
+    detail_text.set_valign(Align::Center);
     detail_text.set_hexpand(true);
     let detail_title = label("", "page-title");
     detail_title.set_single_line_mode(true);
@@ -1092,21 +1147,32 @@ fn connection_card(state: Rc<RefCell<UiState>>) -> gtk::Box {
         ui.connection_password_entry = Some(password.clone());
     }
 
-    if let Ok(Some(session)) =
-        CacheDatabase::open_default().and_then(|db| db.load_jellyfin_session())
-    {
-        let generation = CONNECTION_GENERATION.load(AtomicOrdering::SeqCst);
-        server.set_text(&session.server_url);
-        username.set_text(&session.username);
-        status.set_text("Loading saved library...");
-        set_library_loading(&state, "Loading cached Jellyfin library");
-        card.set_visible(false);
+    match CacheDatabase::open_default().and_then(|db| db.load_jellyfin_session()) {
+        Ok(Some(session)) => {
+            let generation = CONNECTION_GENERATION.load(AtomicOrdering::SeqCst);
+            server.set_text(&session.server_url);
+            username.set_text(&session.username);
+            status.set_text("Loading saved library...");
+            set_library_loading(&state, "Loading cached Jellyfin library");
+            card.set_visible(false);
 
-        let (sender, receiver) = mpsc::channel();
-        std::thread::spawn(move || {
-            fetch_saved_session(session, sender, generation);
-        });
-        poll_connection_result(receiver, state.clone(), status.clone(), None, generation);
+            let (sender, receiver) = mpsc::channel();
+            std::thread::spawn(move || {
+                fetch_saved_session(session, sender, generation);
+            });
+            poll_connection_result(receiver, state.clone(), status.clone(), None, generation);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            let message = error.to_string();
+            status.set_text("Cache unavailable");
+            state
+                .borrow()
+                .connection_status
+                .set_text("Cache unavailable");
+            state.borrow().connection_detail.set_text(&message);
+            state.borrow().page_summary.set_text(&message);
+        }
     }
 
     form.append(&username);
@@ -1329,6 +1395,7 @@ fn album_grid_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
 
     let flow = gtk::FlowBox::new();
     flow.add_css_class("collection-grid");
+    flow.add_css_class("album-grid");
     flow.set_selection_mode(gtk::SelectionMode::None);
     flow.set_min_children_per_line(1);
     flow.set_max_children_per_line(8);
@@ -1457,7 +1524,7 @@ fn album_tile(album: AlbumSummary, state: Rc<RefCell<UiState>>) -> gtk::Button {
     let frame = gtk::Box::new(Orientation::Vertical, 0);
     frame.add_css_class("album-art-frame");
     frame.set_size_request(ALBUM_ART_SIZE, ALBUM_ART_SIZE);
-    frame.set_halign(Align::Fill);
+    frame.set_halign(Align::Start);
     frame.set_valign(Align::Fill);
     frame.set_overflow(gtk::Overflow::Hidden);
 
@@ -2359,6 +2426,41 @@ fn return_to_collection_grid(state: &Rc<RefCell<UiState>>) {
     load_selected_waveform(state);
 }
 
+fn navigate_to_now_playing_artist(state: &Rc<RefCell<UiState>>) {
+    let artist = {
+        let ui = state.borrow();
+        let Some(track) = current_display_track(&ui) else {
+            return;
+        };
+        let key = artist_key(&track.artist);
+        artist_summaries(&ui.all_tracks, "")
+            .into_iter()
+            .find(|artist| artist.key == key)
+    };
+
+    if let Some(artist) = artist {
+        show_artist_albums(state, &artist);
+    }
+}
+
+fn navigate_to_now_playing_album(state: &Rc<RefCell<UiState>>) {
+    let album = {
+        let ui = state.borrow();
+        let Some(track) = current_display_track(&ui) else {
+            return;
+        };
+        let key = album_key(track);
+        album_summaries(&ui.all_tracks, "")
+            .into_iter()
+            .find(|album| album.key == key)
+    };
+
+    if let Some(album) = album {
+        state.borrow_mut().active_page = LibraryPage::Albums;
+        show_album_tracks(state, &album);
+    }
+}
+
 fn update_content_view(state: &Rc<RefCell<UiState>>) {
     let (
         stack,
@@ -2685,9 +2787,11 @@ fn apply_connection_payload(state: &Rc<RefCell<UiState>>, payload: ConnectionPay
 fn update_now_playing_labels(state: &UiState) {
     if let Some(track) = current_display_track(state) {
         state.now_title.set_text(&track.title);
-        state
-            .now_meta
-            .set_text(&format!("{} - {}", track.artist, track.album));
+        state.now_meta.set_markup(&format!(
+            "<a href=\"gtunes:artist\"><span underline=\"none\">{}</span></a> - <a href=\"gtunes:album\"><span underline=\"none\">{}</span></a>",
+            gtk::glib::markup_escape_text(&track.artist),
+            gtk::glib::markup_escape_text(&track.album)
+        ));
         if track.stream_url.is_some() {
             state
                 .playback_status
@@ -2923,6 +3027,8 @@ fn play_selected_track(state: &Rc<RefCell<UiState>>) {
     let request = PlaybackRequest {
         item_id: track.item_id.clone().unwrap_or_default(),
         stream_url,
+        http_headers: track.stream_http_headers.clone(),
+        stream_kind: PlaybackStreamKind::Direct,
         title: track.title.clone(),
     };
     let mut refresh_now_playing = false;
@@ -2953,9 +3059,23 @@ fn play_selected_track(state: &Rc<RefCell<UiState>>) {
 }
 
 fn playback_request_for_track(track: &UiTrack) -> Option<PlaybackRequest> {
+    playback_request_for_track_kind(track, PlaybackStreamKind::Direct)
+}
+
+fn playback_request_for_track_kind(
+    track: &UiTrack,
+    stream_kind: PlaybackStreamKind,
+) -> Option<PlaybackRequest> {
+    let stream_url = match stream_kind {
+        PlaybackStreamKind::Direct => track.stream_url.as_deref(),
+        PlaybackStreamKind::Transcode => track.fallback_stream_url.as_deref(),
+    }?;
+
     Some(PlaybackRequest {
         item_id: track.item_id.clone().unwrap_or_default(),
-        stream_url: track.stream_url.as_deref()?.parse().ok()?,
+        stream_url: stream_url.parse().ok()?,
+        http_headers: track.stream_http_headers.clone(),
+        stream_kind,
         title: track.title.clone(),
     })
 }
@@ -3103,20 +3223,32 @@ fn load_full_size_artwork(url: String, picture: gtk::Picture) {
     });
 }
 
-fn fetch_image_file(url: &str) -> Result<PathBuf, String> {
-    let bytes = reqwest::blocking::get(url)
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?
+fn fetch_image_file(url: &str) -> Result<PathBuf, ImageFetchError> {
+    let response = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|_| ImageFetchError::Request("request client failed"))?
+        .get(url)
+        .send()
+        .map_err(|_| ImageFetchError::Request("request failed"))?;
+    let status = response.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Err(ImageFetchError::Missing);
+    }
+    if !status.is_success() {
+        return Err(ImageFetchError::HttpStatus(status));
+    }
+
+    let bytes = response
         .bytes()
-        .map_err(|error| error.to_string())?;
+        .map_err(|_| ImageFetchError::Request("failed to read response body"))?;
 
     let path = artwork_cache_path(url);
-    std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
+    std::fs::write(&path, bytes).map_err(ImageFetchError::Io)?;
     Ok(path)
 }
 
-fn fetch_cached_image_file(url: &str) -> Result<PathBuf, String> {
+fn fetch_cached_image_file(url: &str) -> Result<PathBuf, ImageFetchError> {
     let path = artwork_cache_path(url);
     if path.exists() {
         Ok(path)
@@ -3156,7 +3288,7 @@ fn connect_and_fetch_payload(
     generation: u64,
 ) -> Result<ConnectionPayload, String> {
     let (client, auth) = JellyfinClient::authenticate(server_url, username, password)
-        .map_err(|error| error.to_string())?;
+        .map_err(describe_jellyfin_error)?;
     let session = JellyfinSession {
         server_url: client.server_url().to_string(),
         server_id: auth.server_id,
@@ -3199,16 +3331,18 @@ fn fetch_saved_session_payload(
 ) -> Result<ConnectionPayload, String> {
     let cache = CacheDatabase::open_default().map_err(|error| error.to_string())?;
     match load_library_cache(&cache, &session) {
-        Ok(Some(tracks)) => return Ok(ConnectionPayload { session, tracks }),
+        Ok(Some(mut tracks)) => {
+            hydrate_stream_http_headers(&mut tracks, &session);
+            return Ok(ConnectionPayload { session, tracks });
+        }
         Ok(None) => {}
         Err(error) => tracing::warn!(%error, "failed to load cached Jellyfin library"),
     }
 
     let client = JellyfinClient::new(&session.server_url, Some(session.access_token.clone()))
-        .map_err(|error| error.to_string())?;
+        .map_err(describe_jellyfin_error)?;
 
-    let payload = fetch_library_for_session(client, session, sender)
-        .map_err(|error| format!("{error}; enter your password to refresh the session"))?;
+    let payload = fetch_library_for_session(client, session, sender)?;
     {
         let _guard = CACHE_RESET_LOCK
             .lock()
@@ -3240,12 +3374,40 @@ fn fetch_library_for_session(
                 let _ = sender.send(ConnectionMessage::Progress { loaded, total });
             }
         })
-        .map_err(|error| error.to_string())?
+        .map_err(describe_jellyfin_error)?
         .into_iter()
         .map(|track| UiTrack::from_jellyfin(track, &client))
         .collect::<Vec<_>>();
 
     Ok(ConnectionPayload { session, tracks })
+}
+
+fn describe_jellyfin_error(error: JellyfinClientError) -> String {
+    match &error {
+        JellyfinClientError::Http(http_error) => {
+            if matches!(
+                http_error.status(),
+                Some(reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN)
+            ) {
+                return "Jellyfin session expired or was revoked; enter your password to reconnect"
+                    .to_string();
+            }
+            if http_error.is_timeout() {
+                return "Jellyfin server timed out; check the server and try again".to_string();
+            }
+            if http_error.is_connect() {
+                return "Jellyfin server is offline or unreachable; cached library data will remain available when present".to_string();
+            }
+        }
+        JellyfinClientError::InvalidServerUrl(_) => {
+            return "Invalid Jellyfin server URL".to_string();
+        }
+        JellyfinClientError::InvalidAuthHeader => {
+            return "Saved Jellyfin token is invalid; enter your password to reconnect".to_string();
+        }
+    }
+
+    error.to_string()
 }
 
 fn save_library_cache(
@@ -3289,6 +3451,13 @@ fn load_cached_tracks(
         .get_setting(key)?
         .map(|json| serde_json::from_str(&json).map_err(crate::cache::CacheError::from))
         .transpose()
+}
+
+fn hydrate_stream_http_headers(tracks: &mut [UiTrack], session: &JellyfinSession) {
+    let headers = stream_http_headers_for_token(Some(&session.access_token));
+    for track in tracks {
+        track.stream_http_headers = headers.clone();
+    }
 }
 
 fn library_cache_key(session: &JellyfinSession) -> String {
@@ -3508,6 +3677,10 @@ fn load_picture_art(url: String, picture: gtk::Picture) {
                 }
                 gtk::glib::ControlFlow::Break
             }
+            Ok(Err(ImageFetchError::Missing)) => {
+                tracing::debug!("artist artwork is unavailable");
+                gtk::glib::ControlFlow::Break
+            }
             Ok(Err(error)) => {
                 tracing::warn!(%error, "failed to fetch artist artwork");
                 gtk::glib::ControlFlow::Break
@@ -3702,6 +3875,7 @@ fn connect_context_rail_shortcut(
     controller_root.add_controller(controller);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn set_context_rail_expanded(
     expanded: bool,
     button: &gtk::Button,
@@ -3897,8 +4071,8 @@ fn update_playback_position(state: &Rc<RefCell<UiState>>) {
         return;
     }
 
-    if playback_reached_end(state) {
-        advance_after_track_end(state);
+    if let Some(event) = take_playback_event(state) {
+        handle_playback_event(state, event);
         return;
     }
 
@@ -3940,13 +4114,85 @@ fn update_playback_position(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn playback_reached_end(state: &Rc<RefCell<UiState>>) -> bool {
+fn take_playback_event(state: &Rc<RefCell<UiState>>) -> Option<PlaybackEvent> {
     state
         .borrow_mut()
         .playback
         .as_mut()
-        .map(PlaybackEngine::take_end_of_stream)
-        .unwrap_or(false)
+        .and_then(PlaybackEngine::take_playback_event)
+}
+
+fn handle_playback_event(state: &Rc<RefCell<UiState>>, event: PlaybackEvent) {
+    match event {
+        PlaybackEvent::EndOfStream => advance_after_track_end(state),
+        PlaybackEvent::Error {
+            item_id,
+            stream_kind,
+            message,
+        } => handle_playback_error(state, item_id, stream_kind, message),
+    }
+}
+
+fn handle_playback_error(
+    state: &Rc<RefCell<UiState>>,
+    item_id: Option<String>,
+    stream_kind: Option<PlaybackStreamKind>,
+    message: String,
+) {
+    let fallback = {
+        let ui = state.borrow();
+        let track = item_id
+            .as_deref()
+            .and_then(|item_id| {
+                ui.tracks
+                    .iter()
+                    .find(|track| track.item_id.as_deref() == Some(item_id))
+            })
+            .or_else(|| current_display_track(&ui));
+
+        if stream_kind == Some(PlaybackStreamKind::Direct) {
+            track.and_then(|track| {
+                playback_request_for_track_kind(track, PlaybackStreamKind::Transcode)
+                    .map(|request| (track_key(track), track.quality.clone(), request))
+            })
+        } else {
+            None
+        }
+    };
+
+    if let Some((track_key_value, quality, request)) = fallback {
+        let mut ui = state.borrow_mut();
+        ui.playback_status
+            .set_text("Direct play failed; retrying with Jellyfin transcoding");
+        if let Some(playback) = ui.playback.as_mut() {
+            match playback.play(request) {
+                Ok(()) => {
+                    ui.now_playing_key = Some(track_key_value);
+                    arm_gapless_next(&mut ui);
+                    ui.playback_status
+                        .set_text(&format!("Playing transcoded stream | {quality}"));
+                    update_play_button(&ui);
+                    update_mpris_status(&mut ui);
+                    return;
+                }
+                Err(error) => {
+                    ui.playback_status
+                        .set_text(&format!("Transcode fallback failed: {error}"));
+                }
+            }
+        }
+    }
+
+    {
+        let mut ui = state.borrow_mut();
+        ui.playback_status
+            .set_text(&format!("Playback failed: {message}"));
+        ui.now_playing_key = None;
+        arm_gapless_next(&mut ui);
+        update_play_button(&ui);
+        update_mpris_status(&mut ui);
+    }
+    update_list_indicators(state);
 }
 
 fn apply_gapless_transition(state: &Rc<RefCell<UiState>>) -> bool {
@@ -4018,7 +4264,7 @@ fn advance_after_track_end(state: &Rc<RefCell<UiState>>) {
 }
 
 fn load_selected_waveform(state: &Rc<RefCell<UiState>>) {
-    let (key, stream_url, area, status, waveform) = {
+    let (key, stream_url, stream_http_headers, area, status, waveform) = {
         let ui = state.borrow();
         let track = ui.tracks.get(ui.selected_index);
         let key = track.and_then(|track| {
@@ -4028,9 +4274,13 @@ fn load_selected_waveform(state: &Rc<RefCell<UiState>>) {
             })
         });
         let stream_url = track.and_then(|track| track.stream_url.clone());
+        let stream_http_headers = track
+            .map(|track| track.stream_http_headers.clone())
+            .unwrap_or_default();
         (
             key,
             stream_url,
+            stream_http_headers,
             ui.wave_area.clone(),
             ui.waveform_status.clone(),
             ui.waveform.clone(),
@@ -4078,7 +4328,8 @@ fn load_selected_waveform(state: &Rc<RefCell<UiState>>) {
     let (sender, receiver) = mpsc::channel();
     let request_key = key.clone();
     std::thread::spawn(move || {
-        let result = crate::waveform::load_or_generate(request_key, &stream_url);
+        let result =
+            crate::waveform::load_or_generate(request_key, &stream_url, &stream_http_headers);
         let _ = sender.send(result);
     });
 
@@ -4241,6 +4492,112 @@ fn waveform_widget(state: Rc<RefCell<UiState>>) -> gtk::DrawingArea {
     area.add_controller(drag);
 
     area
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+
+    fn test_session() -> JellyfinSession {
+        JellyfinSession {
+            server_url: "https://jellyfin.example/".to_string(),
+            server_id: Some("server-id".to_string()),
+            user_id: "user-id".to_string(),
+            username: "eddie".to_string(),
+            access_token: "token".to_string(),
+        }
+    }
+
+    fn test_track() -> UiTrack {
+        UiTrack {
+            item_id: Some("track-id".to_string()),
+            album_id: Some("album-id".to_string()),
+            media_source_id: Some("media-source-id".to_string()),
+            stream_url: Some("https://jellyfin.example/Audio/track-id/stream".to_string()),
+            fallback_stream_url: Some(
+                "https://jellyfin.example/Audio/track-id/universal".to_string(),
+            ),
+            stream_http_headers: Vec::new(),
+            artwork_url: None,
+            thumbnail_artwork_url: None,
+            title: "Song".to_string(),
+            artist: "Artist".to_string(),
+            album_artist: Some("Artist".to_string()),
+            artist_images: Vec::new(),
+            album: "Album".to_string(),
+            disc_number: Some(1),
+            track_number: Some(2),
+            duration: "3:04".to_string(),
+            quality: "FLAC".to_string(),
+        }
+    }
+
+    #[test]
+    fn legacy_library_cache_migrates_and_hydrates_stream_headers() {
+        let cache = CacheDatabase::open_memory().expect("in-memory cache opens");
+        let session = test_session();
+        let tracks = vec![test_track()];
+        let legacy_key = legacy_library_cache_key(&session);
+        cache
+            .set_setting(
+                &legacy_key,
+                &serde_json::to_string(&tracks).expect("serialize"),
+            )
+            .expect("write legacy cache");
+
+        let mut loaded = load_library_cache(&cache, &session)
+            .expect("load library cache")
+            .expect("tracks exist");
+        hydrate_stream_http_headers(&mut loaded, &session);
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].title, "Song");
+        assert_eq!(loaded[0].fallback_stream_url, tracks[0].fallback_stream_url);
+        assert_eq!(
+            loaded[0].stream_http_headers,
+            vec![("X-Emby-Token".to_string(), "token".to_string())]
+        );
+        assert!(
+            cache
+                .get_setting(&library_cache_key(&session))
+                .expect("read migrated cache")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn empty_library_cache_is_ignored() {
+        let cache = CacheDatabase::open_memory().expect("in-memory cache opens");
+        let session = test_session();
+        cache
+            .set_setting(
+                &library_cache_key(&session),
+                &serde_json::to_string(&Vec::<UiTrack>::new()).expect("serialize"),
+            )
+            .expect("write empty cache");
+
+        assert!(
+            load_library_cache(&cache, &session)
+                .expect("load library cache")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn playback_requests_can_target_direct_or_transcoded_urls() {
+        let track = test_track();
+
+        let direct =
+            playback_request_for_track_kind(&track, PlaybackStreamKind::Direct).expect("direct");
+        let fallback = playback_request_for_track_kind(&track, PlaybackStreamKind::Transcode)
+            .expect("fallback");
+
+        assert_eq!(direct.stream_kind, PlaybackStreamKind::Direct);
+        assert_eq!(direct.stream_url.path(), "/Audio/track-id/stream");
+        assert_eq!(fallback.stream_kind, PlaybackStreamKind::Transcode);
+        assert_eq!(fallback.stream_url.path(), "/Audio/track-id/universal");
+    }
 }
 
 fn rounded_rect(cr: &gtk::cairo::Context, x: f64, y: f64, width: f64, height: f64, radius: f64) {

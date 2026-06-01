@@ -79,6 +79,7 @@ struct WaveformFile {
 pub fn load_or_generate(
     key: WaveformKey,
     stream_url: &str,
+    http_headers: &[(String, String)],
 ) -> Result<WaveformSummary, WaveformError> {
     let database = CacheDatabase::open_default()?;
     if let Some(path) = database.waveform_cache_path(&key.item_id, &key.media_source_id)?
@@ -92,7 +93,7 @@ pub fn load_or_generate(
         }
     }
 
-    let peaks = generate_from_uri(stream_url, TARGET_SAMPLE_COUNT)?;
+    let peaks = generate_from_uri(stream_url, http_headers, TARGET_SAMPLE_COUNT)?;
     let summary = WaveformSummary {
         key,
         sample_count: peaks.len(),
@@ -127,17 +128,21 @@ fn write_summary(path: &Path, summary: &WaveformSummary) -> Result<(), WaveformE
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let file = std::fs::File::create(path)?;
-    serde_json::to_writer(
-        file,
-        &WaveformFile {
-            version: WAVEFORM_CACHE_VERSION,
-            item_id: summary.key.item_id.clone(),
-            media_source_id: summary.key.media_source_id.clone(),
-            sample_count: summary.sample_count,
-            peaks: summary.peaks.clone(),
-        },
-    )?;
+    let temp_path = path.with_extension("json.tmp");
+    {
+        let file = std::fs::File::create(&temp_path)?;
+        serde_json::to_writer(
+            file,
+            &WaveformFile {
+                version: WAVEFORM_CACHE_VERSION,
+                item_id: summary.key.item_id.clone(),
+                media_source_id: summary.key.media_source_id.clone(),
+                sample_count: summary.sample_count,
+                peaks: summary.peaks.clone(),
+            },
+        )?;
+    }
+    std::fs::rename(temp_path, path)?;
     Ok(())
 }
 
@@ -166,7 +171,11 @@ fn sanitize_cache_component(value: &str) -> String {
         .collect()
 }
 
-fn generate_from_uri(uri: &str, target_count: usize) -> Result<Vec<f32>, WaveformError> {
+fn generate_from_uri(
+    uri: &str,
+    http_headers: &[(String, String)],
+    target_count: usize,
+) -> Result<Vec<f32>, WaveformError> {
     let pipeline = gst::Pipeline::new();
     let source = make_element("uridecodebin")?;
     let convert = make_element("audioconvert")?;
@@ -175,6 +184,16 @@ fn generate_from_uri(uri: &str, target_count: usize) -> Result<Vec<f32>, Wavefor
     let sink = make_element("fakesink")?;
 
     source.set_property("uri", uri);
+    {
+        let http_headers = http_headers.to_vec();
+        source.connect("source-setup", false, move |values| {
+            let source = values
+                .get(1)
+                .and_then(|value| value.get::<gst::Element>().ok())?;
+            configure_http_source_headers(&source, &http_headers);
+            None
+        });
+    }
     capsfilter.set_property(
         "caps",
         gst::Caps::builder("audio/x-raw")
@@ -270,6 +289,19 @@ fn generate_from_uri(uri: &str, target_count: usize) -> Result<Vec<f32>, Wavefor
     Ok(shape_peaks(resample_peaks(&peaks, target_count)))
 }
 
+fn configure_http_source_headers(source: &gst::Element, headers: &[(String, String)]) {
+    if headers.is_empty() || source.find_property("extra-headers").is_none() {
+        return;
+    }
+
+    let mut builder = gst::Structure::builder("extra-headers");
+    for (name, value) in headers {
+        builder = builder.field(name.as_str(), value.as_str());
+    }
+    let headers = builder.build();
+    source.set_property("extra-headers", &headers);
+}
+
 fn make_element(name: &'static str) -> Result<gst::Element, WaveformError> {
     gst::ElementFactory::make(name)
         .build()
@@ -277,6 +309,10 @@ fn make_element(name: &'static str) -> Result<gst::Element, WaveformError> {
 }
 
 fn resample_peaks(peaks: &[f32], target_count: usize) -> Vec<f32> {
+    if peaks.is_empty() || target_count == 0 {
+        return Vec::new();
+    }
+
     if peaks.len() == target_count {
         return peaks.to_vec();
     }
@@ -312,4 +348,60 @@ fn shape_peaks(mut peaks: Vec<f32>) -> Vec<f32> {
         *peak = normalized.powf(0.72).clamp(0.03, 0.92);
     }
     peaks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_key() -> WaveformKey {
+        WaveformKey {
+            item_id: "item/one".to_string(),
+            media_source_id: "source:main".to_string(),
+        }
+    }
+
+    #[test]
+    fn cache_component_sanitization_keeps_filenames_safe() {
+        assert_eq!(sanitize_cache_component("abc-DEF_123"), "abc-DEF_123");
+        assert_eq!(sanitize_cache_component("album/source:1"), "album_source_1");
+    }
+
+    #[test]
+    fn read_summary_rejects_interrupted_or_stale_cache_files() {
+        let path =
+            std::env::temp_dir().join(format!("gtunes-waveform-test-{}.json", std::process::id()));
+        std::fs::write(&path, b"{").expect("write corrupt cache");
+
+        let result = read_summary(&path, test_key());
+        let _ = std::fs::remove_file(&path);
+
+        assert!(matches!(result, Err(WaveformError::Json(_))));
+    }
+
+    #[test]
+    fn write_summary_round_trips_expected_cache_version() {
+        let path = std::env::temp_dir().join(format!(
+            "gtunes-waveform-test-{}-roundtrip.json",
+            std::process::id()
+        ));
+        let key = test_key();
+        let summary = WaveformSummary {
+            key: key.clone(),
+            sample_count: TARGET_SAMPLE_COUNT,
+            peaks: vec![0.25; TARGET_SAMPLE_COUNT],
+        };
+
+        write_summary(&path, &summary).expect("write summary");
+        let loaded = read_summary(&path, key).expect("read summary");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(loaded.sample_count, TARGET_SAMPLE_COUNT);
+        assert_eq!(loaded.peaks, summary.peaks);
+    }
+
+    #[test]
+    fn resample_handles_empty_input_without_panicking() {
+        assert!(resample_peaks(&[], TARGET_SAMPLE_COUNT).is_empty());
+    }
 }

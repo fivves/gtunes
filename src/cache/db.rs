@@ -13,6 +13,10 @@ use super::schema;
 pub enum CacheError {
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[error(
+        "cache schema migration failed: {0}. Reset the database and cache from Settings, then reconnect to Jellyfin."
+    )]
+    Migration(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("project directory is unavailable")]
@@ -66,7 +70,19 @@ impl CacheDatabase {
     }
 
     pub fn migrate(&self) -> Result<(), CacheError> {
-        self.connection.execute_batch(schema::V1)?;
+        let user_version = self
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i32>(0))?;
+        if user_version > schema::SCHEMA_VERSION {
+            return Err(CacheError::Migration(format!(
+                "database version {user_version} is newer than supported version {}",
+                schema::SCHEMA_VERSION
+            )));
+        }
+
+        self.connection
+            .execute_batch(schema::V1)
+            .map_err(|error| CacheError::Migration(error.to_string()))?;
         self.connection
             .pragma_update(None, "user_version", schema::SCHEMA_VERSION)?;
         Ok(())
@@ -156,6 +172,60 @@ impl CacheDatabase {
         } else {
             Ok(None)
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_persist_and_update_in_memory() {
+        let database = CacheDatabase::open_memory().expect("in-memory cache opens");
+
+        assert_eq!(
+            database.get_setting("library.sort").expect("read setting"),
+            None
+        );
+        database
+            .set_setting("library.sort", "title")
+            .expect("write setting");
+        database
+            .set_setting("library.sort", "artist")
+            .expect("update setting");
+
+        assert_eq!(
+            database.get_setting("library.sort").expect("read setting"),
+            Some("artist".to_string())
+        );
+    }
+
+    #[test]
+    fn session_round_trips_through_settings() {
+        let database = CacheDatabase::open_memory().expect("in-memory cache opens");
+        let session = JellyfinSession {
+            server_url: "https://jellyfin.example/".to_string(),
+            server_id: Some("server".to_string()),
+            user_id: "user".to_string(),
+            username: "eddie".to_string(),
+            access_token: "token".to_string(),
+        };
+
+        database
+            .save_jellyfin_session(&session)
+            .expect("save session");
+
+        let loaded = database
+            .load_jellyfin_session()
+            .expect("load session")
+            .expect("session exists");
+
+        assert_eq!(loaded.server_url, session.server_url);
+        assert_eq!(loaded.server_id, session.server_id);
+        assert_eq!(loaded.user_id, session.user_id);
+        assert_eq!(loaded.username, session.username);
+        assert_eq!(loaded.access_token, session.access_token);
     }
 }
 

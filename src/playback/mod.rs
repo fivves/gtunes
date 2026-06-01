@@ -23,7 +23,25 @@ pub enum PlaybackError {
 pub struct PlaybackRequest {
     pub item_id: String,
     pub stream_url: Url,
+    pub http_headers: Vec<(String, String)>,
+    pub stream_kind: PlaybackStreamKind,
     pub title: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlaybackStreamKind {
+    Direct,
+    Transcode,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PlaybackEvent {
+    EndOfStream,
+    Error {
+        item_id: Option<String>,
+        stream_kind: Option<PlaybackStreamKind>,
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,8 +57,10 @@ pub struct PlaybackEngine {
     playbin: gst::Element,
     bus: gst::Bus,
     gapless: Arc<Mutex<GaplessState>>,
+    http_headers: Arc<Mutex<Vec<(String, String)>>>,
     state: PlaybackState,
     current_item_id: Option<String>,
+    current_stream_kind: Option<PlaybackStreamKind>,
 }
 
 #[derive(Debug, Default)]
@@ -56,27 +76,39 @@ impl PlaybackEngine {
             .map_err(|_| PlaybackError::PlaybinUnavailable)?;
         let bus = playbin.bus().ok_or(PlaybackError::PlaybinUnavailable)?;
         let gapless = Arc::new(Mutex::new(GaplessState::default()));
+        let http_headers = Arc::new(Mutex::new(Vec::new()));
+        let http_headers_for_signal = http_headers.clone();
+        playbin.connect("source-setup", false, move |values| {
+            let source = values
+                .get(1)
+                .and_then(|value| value.get::<gst::Element>().ok())?;
+            let headers = http_headers_for_signal
+                .lock()
+                .map(|headers| headers.clone())
+                .unwrap_or_default();
+            configure_http_source_headers(&source, &headers);
+            None
+        });
+
         let gapless_for_signal = gapless.clone();
+        let http_headers_for_gapless = http_headers.clone();
         playbin.connect("about-to-finish", false, move |values| {
-            let Some(playbin) = values
+            let playbin = values
                 .first()
-                .and_then(|value| value.get::<gst::Element>().ok())
-            else {
-                return None;
-            };
-            let Some(request) = gapless_for_signal
+                .and_then(|value| value.get::<gst::Element>().ok())?;
+            let request = gapless_for_signal
                 .lock()
                 .ok()
-                .and_then(|mut gapless| gapless.pending_next.take())
-            else {
-                return None;
-            };
+                .and_then(|mut gapless| gapless.pending_next.take())?;
 
             tracing::info!(
                 item_id = %request.item_id,
                 title = %request.title,
                 "queueing gapless Jellyfin stream"
             );
+            if let Ok(mut headers) = http_headers_for_gapless.lock() {
+                *headers = request.http_headers.clone();
+            }
             playbin.set_property("uri", request.stream_url.as_str());
             if let Ok(mut gapless) = gapless_for_signal.lock() {
                 gapless.transitions.push_back(request);
@@ -88,8 +120,10 @@ impl PlaybackEngine {
             playbin,
             bus,
             gapless,
+            http_headers,
             state: PlaybackState::Stopped,
             current_item_id: None,
+            current_stream_kind: None,
         })
     }
 
@@ -110,11 +144,14 @@ impl PlaybackEngine {
         self.playbin.set_state(gst::State::Null)?;
         self.clear_gapless_state();
         self.current_item_id = None;
+        self.current_stream_kind = None;
         self.state = PlaybackState::Stopped;
+        self.set_http_headers(request.http_headers.clone());
         self.playbin
             .set_property("uri", request.stream_url.as_str());
         self.playbin.set_state(gst::State::Playing)?;
         self.current_item_id = Some(request.item_id);
+        self.current_stream_kind = Some(request.stream_kind);
         self.state = PlaybackState::Playing;
         Ok(())
     }
@@ -132,6 +169,7 @@ impl PlaybackEngine {
             .ok()
             .and_then(|mut gapless| gapless.transitions.pop_front())?;
         self.current_item_id = Some(request.item_id.clone());
+        self.current_stream_kind = Some(request.stream_kind);
         self.state = PlaybackState::Playing;
         Some(request)
     }
@@ -168,33 +206,41 @@ impl PlaybackEngine {
         Ok(())
     }
 
-    pub fn take_end_of_stream(&mut self) -> bool {
-        let mut ended = false;
+    pub fn take_playback_event(&mut self) -> Option<PlaybackEvent> {
+        let mut event = None;
 
         while let Some(message) = self.bus.pop() {
             match message.view() {
                 gst::MessageView::Eos(..) => {
                     self.current_item_id = None;
+                    self.current_stream_kind = None;
                     self.state = PlaybackState::Stopped;
-                    ended = true;
+                    event = Some(PlaybackEvent::EndOfStream);
                 }
                 gst::MessageView::Error(error) => {
                     let message = error.error().to_string();
                     tracing::warn!(error = %message, "GStreamer playback error");
-                    self.current_item_id = None;
-                    self.state = PlaybackState::Error(message);
+                    let item_id = self.current_item_id.clone();
+                    let stream_kind = self.current_stream_kind;
+                    self.state = PlaybackState::Error(message.clone());
+                    event = Some(PlaybackEvent::Error {
+                        item_id,
+                        stream_kind,
+                        message,
+                    });
                 }
                 _ => {}
             }
         }
 
-        ended
+        event
     }
 
     pub fn stop(&mut self) -> Result<(), PlaybackError> {
         self.playbin.set_state(gst::State::Null)?;
         self.clear_gapless_state();
         self.current_item_id = None;
+        self.current_stream_kind = None;
         self.state = PlaybackState::Stopped;
         Ok(())
     }
@@ -205,10 +251,29 @@ impl PlaybackEngine {
             gapless.transitions.clear();
         }
     }
+
+    fn set_http_headers(&mut self, headers: Vec<(String, String)>) {
+        if let Ok(mut current_headers) = self.http_headers.lock() {
+            *current_headers = headers;
+        }
+    }
 }
 
 impl Drop for PlaybackEngine {
     fn drop(&mut self) {
         let _ = self.playbin.set_state(gst::State::Null);
     }
+}
+
+fn configure_http_source_headers(source: &gst::Element, headers: &[(String, String)]) {
+    if headers.is_empty() || source.find_property("extra-headers").is_none() {
+        return;
+    }
+
+    let mut builder = gst::Structure::builder("extra-headers");
+    for (name, value) in headers {
+        builder = builder.field(name.as_str(), value.as_str());
+    }
+    let headers = builder.build();
+    source.set_property("extra-headers", &headers);
 }

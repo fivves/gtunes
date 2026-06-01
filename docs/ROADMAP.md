@@ -17,7 +17,7 @@ tracks the intended development direction for contributors.
 - SQLite cache for settings, sessions, library JSON, and waveform records.
 - Waveform and lyrics UI placeholders.
 
-## V1 Priorities
+## Completed V1 Reliability Work
 
 1. Harden playback.
    - Prefer direct play where possible.
@@ -37,12 +37,14 @@ tracks the intended development direction for contributors.
    - Make cache migration failures actionable.
    - Add focused tests around cache and Jellyfin model handling.
 
-4. Add lyrics support.
+## Remaining V1 Priorities
+
+1. Add lyrics support.
    - Display Jellyfin-provided lyrics where available.
    - Support embedded unsynced lyrics when practical.
    - Add `.lrc` synced lyrics support after playback timing is stable.
 
-5. Prepare packaging.
+2. Prepare packaging.
    - Decide initial package target.
    - Add desktop metadata and icons.
    - Document runtime plugin requirements.
@@ -58,8 +60,5 @@ tracks the intended development direction for contributors.
 
 ## Contribution Candidates
 
-- Add tests for cache setting persistence and waveform cache key behavior.
 - Improve empty, loading, and error states in the connection panel.
-- Add small Jellyfin model fixtures for deserialization coverage.
-- Improve GStreamer error messages shown to the user.
 - Document confirmed distribution-specific dependency names.

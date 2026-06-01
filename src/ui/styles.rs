@@ -229,6 +229,19 @@ window {
   background: @view_bg_color;
 }
 
+.album-grid flowboxchild,
+.album-grid flowboxchild:hover,
+.album-grid flowboxchild:active,
+.album-grid flowboxchild:selected,
+.album-grid flowboxchild:focus,
+.album-grid flowboxchild:focus-visible {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+}
+
 .collection-tile {
   min-width: 156px;
   min-height: 228px;
@@ -250,16 +263,23 @@ window {
   background: alpha(@accent_bg_color, .10);
 }
 
-.album-tile:hover {
+.album-tile,
+.album-tile:hover,
+.album-tile:active,
+.album-tile:focus,
+.album-tile:focus-visible,
+button.album-tile.flat,
+button.album-tile.flat:hover,
+button.album-tile.flat:active,
+button.album-tile.flat:focus,
+button.album-tile.flat:focus-visible {
+  border: 0;
+  box-shadow: none;
   background: transparent;
 }
 
 .collection-tile:active {
   background: alpha(@accent_bg_color, .18);
-}
-
-.album-tile:active {
-  background: transparent;
 }
 
 .collection-art {
@@ -272,6 +292,21 @@ window {
   min-height: 168px;
   border-radius: 8px;
   background: @card_bg_color;
+  transition: box-shadow 140ms ease-out;
+}
+
+.album-tile:hover .album-art-frame,
+.album-tile:focus .album-art-frame,
+.album-tile:focus-visible .album-art-frame {
+  box-shadow:
+    0 0 0 1px alpha(@accent_bg_color, .68),
+    0 0 18px alpha(@accent_bg_color, .36);
+}
+
+.album-tile:active .album-art-frame {
+  box-shadow:
+    0 0 0 1px alpha(@accent_bg_color, .82),
+    0 0 12px alpha(@accent_bg_color, .30);
 }
 
 .album-art {
