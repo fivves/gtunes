@@ -34,6 +34,8 @@ pub struct JellyfinTrack {
     pub id: JellyfinItemId,
     pub name: String,
     #[serde(default)]
+    pub date_last_saved: Option<String>,
+    #[serde(default)]
     pub artists: Vec<String>,
     #[serde(default)]
     pub album_artist: Option<String>,
@@ -83,7 +85,17 @@ pub struct JellyfinPlaylist {
     pub id: JellyfinItemId,
     pub name: String,
     #[serde(default)]
+    pub date_last_saved: Option<String>,
+    #[serde(default)]
     pub child_count: Option<i32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct JellyfinItemSummary {
+    pub id: JellyfinItemId,
+    #[serde(default)]
+    pub date_last_saved: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

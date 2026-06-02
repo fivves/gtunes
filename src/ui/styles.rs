@@ -231,6 +231,46 @@ window {
   font-weight: 800;
 }
 
+.bottom-reconnect-button {
+  min-height: 28px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+.reconnect-dialog-content {
+  min-width: 354px;
+}
+
+.reconnect-summary {
+  padding: 10px 12px;
+  border: 1px solid @borders;
+  border-radius: 8px;
+  background: alpha(@window_fg_color, .035);
+}
+
+.reconnect-summary-row {
+  min-height: 24px;
+}
+
+.reconnect-summary-name {
+  font-size: 11px;
+  font-weight: 800;
+  color: alpha(@window_fg_color, .58);
+}
+
+.reconnect-summary-value {
+  font-size: 12px;
+  color: @window_fg_color;
+}
+
+.reconnect-password {
+  min-height: 38px;
+}
+
+.reconnect-status {
+  min-height: 18px;
+}
+
 .detail-header {
   min-height: 64px;
   padding: 10px 16px;

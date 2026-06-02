@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::cache::{CacheDatabase, JellyfinSession};
 use crate::config;
 use crate::jellyfin::{
-    JellyfinClient, JellyfinClientError, JellyfinPlaylist, JellyfinTrack,
+    JellyfinClient, JellyfinClientError, JellyfinItemSummary, JellyfinPlaylist, JellyfinTrack,
     stream_http_headers_for_token,
 };
 use crate::playback::{
@@ -28,6 +28,8 @@ use crate::waveform::{WaveformKey, WaveformSummary};
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 struct UiTrack {
     item_id: Option<String>,
+    #[serde(default)]
+    date_last_saved: Option<String>,
     #[serde(default)]
     album_id: Option<String>,
     media_source_id: Option<String>,
@@ -62,6 +64,8 @@ struct UiArtistImage {
 struct UiPlaylist {
     id: String,
     name: String,
+    #[serde(default)]
+    date_last_saved: Option<String>,
     #[serde(default)]
     artwork_url: Option<String>,
     #[serde(default)]
@@ -178,6 +182,7 @@ struct UiState {
     play_button: Option<gtk::Button>,
     shuffle_button: Option<gtk::Button>,
     refresh_button: Option<gtk::Button>,
+    reconnect_button: Option<gtk::Button>,
     queue_view: Option<Rc<QueueView>>,
     wave_area: Option<gtk::DrawingArea>,
     elapsed_label: gtk::Label,
@@ -244,6 +249,8 @@ struct CachedLibrary {
 }
 
 enum ConnectionMessage {
+    Authenticated(JellyfinSession),
+    Status(String),
     Progress { loaded: usize, total: Option<usize> },
     Finished(Result<ConnectionPayload, String>),
 }
@@ -340,6 +347,7 @@ impl UiTrack {
 
         Self {
             item_id: Some(track.id),
+            date_last_saved: track.date_last_saved,
             album_id: track.album_id,
             media_source_id: Some(media_source_id),
             stream_url,
@@ -398,6 +406,7 @@ impl UiPlaylist {
         Self {
             id: playlist.id,
             name: playlist.name,
+            date_last_saved: playlist.date_last_saved,
             artwork_url,
             thumbnail_artwork_url,
             tracks,
@@ -524,6 +533,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         play_button: None,
         shuffle_button: None,
         refresh_button: None,
+        reconnect_button: None,
         queue_view: None,
         wave_area: None,
         elapsed_label: label("0:00", "mono"),
@@ -1128,6 +1138,7 @@ fn apply_first_time_setup_state(state: &Rc<RefCell<UiState>>) {
     if let Some(button) = refresh_button.as_ref() {
         button.set_sensitive(false);
     }
+    set_reconnect_button_needed(state, false);
     if let Some(cover) = cover.as_ref() {
         cover.set_paintable(Option::<&gtk::gdk::Paintable>::None);
         cover.set_icon_name(Some("audio-x-generic-symbolic"));
@@ -1436,6 +1447,14 @@ fn poll_connection_result(
         }
 
         match receiver.try_recv() {
+            Ok(ConnectionMessage::Authenticated(_)) => gtk::glib::ControlFlow::Continue,
+            Ok(ConnectionMessage::Status(message)) => {
+                status.set_text(&message);
+                let ui = state.borrow();
+                ui.connection_status.set_text("Refreshing library");
+                ui.connection_detail.set_text(&message);
+                gtk::glib::ControlFlow::Continue
+            }
             Ok(ConnectionMessage::Progress { loaded, total }) => {
                 let progress = library_progress_text(loaded, total);
                 status.set_text(&progress);
@@ -1451,6 +1470,7 @@ fn poll_connection_result(
                 status.set_text("Connected");
                 set_library_loaded(&state);
                 apply_connection_payload(&state, payload);
+                set_reconnect_button_needed(&state, false);
                 if let Some(card) = state.borrow().connection_card.as_ref() {
                     card.set_visible(false);
                 }
@@ -1468,6 +1488,7 @@ fn poll_connection_result(
                     .connection_status
                     .set_text("Connection failed");
                 state.borrow().connection_detail.set_text(&error);
+                set_reconnect_button_error_state(&state, &error);
                 gtk::glib::ControlFlow::Break
             }
             Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
@@ -1511,6 +1532,30 @@ fn set_refresh_button_connected_state(state: &Rc<RefCell<UiState>>) {
     if let Some(button) = button.as_ref() {
         button.set_sensitive(connected);
     }
+}
+
+fn set_reconnect_button_needed(state: &Rc<RefCell<UiState>>, needed: bool) {
+    if let Some(button) = state.borrow().reconnect_button.as_ref() {
+        button.set_visible(needed);
+        button.set_sensitive(needed);
+    }
+}
+
+fn set_reconnect_button_error_state(state: &Rc<RefCell<UiState>>, error: &str) {
+    if !error_needs_reconnect(error) {
+        set_reconnect_button_needed(state, false);
+        return;
+    }
+
+    let has_session = CacheDatabase::open_default()
+        .and_then(|db| db.load_jellyfin_session())
+        .map(|session| session.is_some())
+        .unwrap_or(false);
+    set_reconnect_button_needed(state, has_session);
+}
+
+fn error_needs_reconnect(error: &str) -> bool {
+    error.contains("reconnect")
 }
 
 fn set_library_loading(state: &Rc<RefCell<UiState>>, message: &str) {
@@ -3511,6 +3556,10 @@ fn apply_connection_payload(state: &Rc<RefCell<UiState>>, payload: ConnectionPay
         if let Some(button) = ui.refresh_button.as_ref() {
             button.set_sensitive(true);
         }
+        if let Some(button) = ui.reconnect_button.as_ref() {
+            button.set_visible(false);
+            button.set_sensitive(false);
+        }
     }
     refresh_track_model(state);
     update_nav_counts(state);
@@ -4015,6 +4064,70 @@ fn connect_and_fetch(
     let _ = sender.send(ConnectionMessage::Finished(result));
 }
 
+fn reconnect_and_fetch(
+    server_url: &str,
+    username: &str,
+    password: &str,
+    sender: mpsc::Sender<ConnectionMessage>,
+    generation: u64,
+) {
+    let result = reconnect_and_fetch_payload(
+        server_url,
+        username,
+        password,
+        Some(sender.clone()),
+        generation,
+    );
+    let _ = sender.send(ConnectionMessage::Finished(result));
+}
+
+fn reconnect_and_fetch_payload(
+    server_url: &str,
+    username: &str,
+    password: &str,
+    sender: Option<mpsc::Sender<ConnectionMessage>>,
+    generation: u64,
+) -> Result<ConnectionPayload, String> {
+    let (client, auth) = JellyfinClient::authenticate(server_url, username, password)
+        .map_err(describe_jellyfin_error)?;
+    let session = JellyfinSession {
+        server_url: client.server_url().to_string(),
+        server_id: auth.server_id,
+        user_id: auth.user.id,
+        username: auth.user.name,
+        access_token: auth.access_token,
+    };
+
+    {
+        let _guard = CACHE_RESET_LOCK
+            .lock()
+            .map_err(|_| "cache reset lock is poisoned".to_string())?;
+        ensure_connection_generation_current(generation)?;
+        let cache = CacheDatabase::open_default().map_err(|error| error.to_string())?;
+        cache
+            .save_jellyfin_session(&session)
+            .map_err(|error| error.to_string())?;
+    }
+
+    if let Some(sender) = sender.as_ref() {
+        let _ = sender.send(ConnectionMessage::Authenticated(session.clone()));
+    }
+
+    let payload = fetch_library_for_session(client, session, sender)?;
+    {
+        let _guard = CACHE_RESET_LOCK
+            .lock()
+            .map_err(|_| "cache reset lock is poisoned".to_string())?;
+        ensure_connection_generation_current(generation)?;
+        let cache = CacheDatabase::open_default().map_err(|error| error.to_string())?;
+        if let Err(error) = save_library_cache(&cache, &payload.session, &payload) {
+            tracing::warn!(%error, "failed to cache Jellyfin library");
+        }
+    }
+
+    Ok(payload)
+}
+
 fn connect_and_fetch_payload(
     server_url: &str,
     username: &str,
@@ -4077,7 +4190,18 @@ fn refresh_saved_session_payload(
     let client = JellyfinClient::new(&session.server_url, Some(session.access_token.clone()))
         .map_err(describe_jellyfin_error)?;
 
-    let payload = fetch_library_for_session(client, session, sender)?;
+    let cached_library = load_library_cache(&cache, &session)
+        .map_err(|error| error.to_string())?
+        .map(|mut library| {
+            hydrate_cached_library(&mut library, &session);
+            library
+        });
+
+    let payload = if let Some(cached_library) = cached_library {
+        fetch_incremental_library_for_session(client, session, cached_library, sender)?
+    } else {
+        fetch_library_for_session(client, session, sender)?
+    };
     {
         let _guard = CACHE_RESET_LOCK
             .lock()
@@ -4173,6 +4297,203 @@ fn fetch_library_for_session(
         tracks,
         playlists,
     })
+}
+
+fn fetch_incremental_library_for_session(
+    client: JellyfinClient,
+    session: JellyfinSession,
+    cached_library: CachedLibrary,
+    sender: Option<mpsc::Sender<ConnectionMessage>>,
+) -> Result<ConnectionPayload, String> {
+    send_connection_status(sender.as_ref(), "Scanning Jellyfin changes");
+    let track_summaries = client
+        .music_track_summaries_with_progress(&session.user_id, |loaded, total| {
+            if let Some(sender) = sender.as_ref() {
+                let _ = sender.send(ConnectionMessage::Progress { loaded, total });
+            }
+        })
+        .map_err(describe_jellyfin_error)?;
+
+    if summaries_missing_change_stamps(&track_summaries)
+        || cached_library
+            .tracks
+            .iter()
+            .any(|track| track.date_last_saved.is_none())
+    {
+        send_connection_status(sender.as_ref(), "Refreshing full library metadata");
+        return fetch_library_for_session(client, session, sender);
+    }
+
+    let cached_tracks_by_id = cached_library
+        .tracks
+        .into_iter()
+        .filter_map(|track| track.item_id.clone().map(|id| (id, track)))
+        .collect::<HashMap<_, _>>();
+    let changed_track_ids = changed_summary_ids(&track_summaries, &cached_tracks_by_id, |track| {
+        track.date_last_saved.as_deref()
+    });
+
+    let mut fetched_tracks_by_id = HashMap::new();
+    if !changed_track_ids.is_empty() {
+        send_connection_status(
+            sender.as_ref(),
+            &format!("Fetching {} changed tracks", changed_track_ids.len()),
+        );
+    }
+    for ids in changed_track_ids.chunks(100) {
+        for track in client
+            .music_tracks_by_ids(&session.user_id, ids)
+            .map_err(describe_jellyfin_error)?
+            .into_iter()
+            .map(|track| UiTrack::from_jellyfin(track, &client))
+        {
+            if let Some(id) = track.item_id.clone() {
+                fetched_tracks_by_id.insert(id, track);
+            }
+        }
+    }
+
+    let mut tracks = Vec::with_capacity(track_summaries.len());
+    for summary in &track_summaries {
+        if let Some(track) = fetched_tracks_by_id
+            .remove(&summary.id)
+            .or_else(|| cached_tracks_by_id.get(&summary.id).cloned())
+        {
+            tracks.push(track);
+        }
+    }
+
+    send_connection_status(sender.as_ref(), "Scanning Jellyfin playlists");
+    let playlist_summaries = client
+        .music_playlist_summaries(&session.user_id)
+        .map_err(describe_jellyfin_error)?;
+    if summaries_missing_change_stamps(&playlist_summaries)
+        || cached_library
+            .playlists
+            .iter()
+            .any(|playlist| playlist.date_last_saved.is_none())
+    {
+        send_connection_status(sender.as_ref(), "Refreshing playlist metadata");
+        return fetch_library_for_session(client, session, sender);
+    }
+
+    let playlists = merge_incremental_playlists(
+        &client,
+        &session,
+        &tracks,
+        cached_library.playlists,
+        playlist_summaries,
+        sender.as_ref(),
+    )?;
+
+    Ok(ConnectionPayload {
+        session,
+        tracks,
+        playlists,
+    })
+}
+
+fn merge_incremental_playlists(
+    client: &JellyfinClient,
+    session: &JellyfinSession,
+    tracks: &[UiTrack],
+    cached_playlists: Vec<UiPlaylist>,
+    playlist_summaries: Vec<JellyfinItemSummary>,
+    sender: Option<&mpsc::Sender<ConnectionMessage>>,
+) -> Result<Vec<UiPlaylist>, String> {
+    let cached_playlists_by_id = cached_playlists
+        .into_iter()
+        .map(|playlist| (playlist.id.clone(), playlist))
+        .collect::<HashMap<_, _>>();
+    let changed_playlist_ids =
+        changed_summary_ids(&playlist_summaries, &cached_playlists_by_id, |playlist| {
+            playlist.date_last_saved.as_deref()
+        });
+    let changed_playlist_id_set = changed_playlist_ids
+        .iter()
+        .cloned()
+        .collect::<HashSet<_>>();
+
+    let all_playlists = client
+        .music_playlists(&session.user_id)
+        .map_err(describe_jellyfin_error)?;
+    let playlist_models_by_id = all_playlists
+        .into_iter()
+        .map(|playlist| (playlist.id.clone(), playlist))
+        .collect::<HashMap<_, _>>();
+
+    if !changed_playlist_ids.is_empty() {
+        send_connection_status(
+            sender,
+            &format!("Refreshing {} changed playlists", changed_playlist_ids.len()),
+        );
+    }
+
+    let tracks_by_id = tracks
+        .iter()
+        .filter_map(|track| track.item_id.as_ref().map(|id| (id.as_str(), track)))
+        .collect::<HashMap<_, _>>();
+    let mut playlists = Vec::with_capacity(playlist_summaries.len());
+
+    for summary in playlist_summaries {
+        if changed_playlist_id_set.contains(&summary.id) {
+            let Some(playlist) = playlist_models_by_id.get(&summary.id).cloned() else {
+                continue;
+            };
+            let playlist_tracks = client
+                .playlist_tracks(&session.user_id, &summary.id)
+                .map_err(describe_jellyfin_error)?
+                .into_iter()
+                .map(|track| UiTrack::from_jellyfin(track, client))
+                .collect::<Vec<_>>();
+            playlists.push(UiPlaylist::from_jellyfin(playlist, playlist_tracks, client));
+            continue;
+        }
+
+        if let Some(mut playlist) = cached_playlists_by_id.get(&summary.id).cloned() {
+            playlist.tracks = playlist
+                .tracks
+                .into_iter()
+                .filter_map(|track| {
+                    track
+                        .item_id
+                        .as_deref()
+                        .and_then(|id| tracks_by_id.get(id).copied())
+                        .cloned()
+                })
+                .collect();
+            playlists.push(playlist);
+        }
+    }
+
+    Ok(playlists)
+}
+
+fn summaries_missing_change_stamps(summaries: &[JellyfinItemSummary]) -> bool {
+    summaries.iter().any(|summary| summary.date_last_saved.is_none())
+}
+
+fn changed_summary_ids<T>(
+    summaries: &[JellyfinItemSummary],
+    cached_by_id: &HashMap<String, T>,
+    cached_stamp: impl Fn(&T) -> Option<&str>,
+) -> Vec<String> {
+    summaries
+        .iter()
+        .filter(|summary| {
+            cached_by_id
+                .get(&summary.id)
+                .and_then(&cached_stamp)
+                != summary.date_last_saved.as_deref()
+        })
+        .map(|summary| summary.id.clone())
+        .collect()
+}
+
+fn send_connection_status(sender: Option<&mpsc::Sender<ConnectionMessage>>, message: &str) {
+    if let Some(sender) = sender {
+        let _ = sender.send(ConnectionMessage::Status(message.to_string()));
+    }
 }
 
 fn describe_jellyfin_error(error: JellyfinClientError) -> String {
@@ -4549,6 +4870,14 @@ fn load_picture_art(url: String, image: gtk::Image) {
 }
 
 fn scroll_to_now_playing(state: &Rc<RefCell<UiState>>) {
+    let needs_tracks_page = {
+        let ui = state.borrow();
+        ui.active_page != LibraryPage::Tracks
+    };
+    if needs_tracks_page {
+        set_library_page(state, LibraryPage::Tracks);
+    }
+
     let (idx, stack) = {
         let ui = state.borrow();
         let idx = ui
@@ -4561,6 +4890,18 @@ fn scroll_to_now_playing(state: &Rc<RefCell<UiState>>) {
     let Some(idx) = idx else {
         return;
     };
+
+    {
+        let mut ui = state.borrow_mut();
+        ui.selected_index = idx;
+        update_now_playing_labels(&ui);
+        update_play_button(&ui);
+    }
+    select_track_model_row(state, idx);
+    rebuild_queue_list(state);
+    load_selected_cover_art(state);
+    load_selected_waveform(state);
+    update_list_indicators(state);
 
     let scroll = stack
         .as_ref()
@@ -4598,7 +4939,254 @@ fn build_bottom_bar(state: Rc<RefCell<UiState>>) -> gtk::Box {
     let spacer = gtk::Box::new(Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
     bar.append(&spacer);
+
+    let reconnect = gtk::Button::with_label("Reconnect");
+    reconnect.add_css_class("connection-button");
+    reconnect.add_css_class("bottom-reconnect-button");
+    reconnect.set_visible(false);
+    reconnect.set_sensitive(false);
+    reconnect.set_tooltip_text(Some("Reconnect to Jellyfin"));
+    {
+        let state = state.clone();
+        reconnect.connect_clicked(move |button| {
+            if let Some(window) = button
+                .root()
+                .and_then(|root| root.downcast::<gtk::Window>().ok())
+            {
+                show_reconnect_dialog(&window, state.clone());
+            }
+        });
+    }
+    state.borrow_mut().reconnect_button = Some(reconnect.clone());
+    bar.append(&reconnect);
+
     bar
+}
+
+#[allow(deprecated)]
+fn show_reconnect_dialog(parent: &gtk::Window, state: Rc<RefCell<UiState>>) {
+    let session = match CacheDatabase::open_default().and_then(|db| db.load_jellyfin_session()) {
+        Ok(Some(session)) => session,
+        Ok(None) => {
+            set_reconnect_button_needed(&state, false);
+            let ui = state.borrow();
+            ui.connection_status.set_text("Not connected");
+            ui.connection_detail
+                .set_text("Connect to Jellyfin before reconnecting");
+            return;
+        }
+        Err(error) => {
+            let message = error.to_string();
+            let ui = state.borrow();
+            ui.connection_status.set_text("Reconnect unavailable");
+            ui.connection_detail.set_text(&message);
+            return;
+        }
+    };
+
+    let dialog = gtk::Dialog::builder()
+        .transient_for(parent)
+        .modal(true)
+        .title("Reconnect to Jellyfin")
+        .build();
+    dialog.set_default_size(390, -1);
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button("Reconnect", gtk::ResponseType::Accept);
+    dialog.set_default_response(gtk::ResponseType::Accept);
+
+    let reconnect_button = dialog
+        .widget_for_response(gtk::ResponseType::Accept)
+        .and_then(|widget| widget.downcast::<gtk::Button>().ok());
+    if let Some(button) = reconnect_button.as_ref() {
+        button.add_css_class("suggested-action");
+    }
+
+    let content = dialog.content_area();
+    content.add_css_class("reconnect-dialog-content");
+    content.set_spacing(14);
+    content.set_margin_top(18);
+    content.set_margin_bottom(16);
+    content.set_margin_start(18);
+    content.set_margin_end(18);
+
+    let summary = gtk::Box::new(Orientation::Vertical, 6);
+    summary.add_css_class("reconnect-summary");
+    summary.append(&reconnect_summary_row("Server", &session.server_url));
+    summary.append(&reconnect_summary_row("User", &session.username));
+    content.append(&summary);
+
+    let password = gtk::PasswordEntry::new();
+    password.set_placeholder_text(Some("Password"));
+    password.set_activates_default(true);
+    password.set_hexpand(true);
+    password.add_css_class("reconnect-password");
+    content.append(&password);
+
+    let status = label("Enter your password to reconnect", "meta");
+    status.add_css_class("reconnect-status");
+    status.set_wrap(true);
+    content.append(&status);
+
+    let session_for_response = session.clone();
+    dialog.connect_response(move |dialog, response| {
+        if response != gtk::ResponseType::Accept {
+            dialog.close();
+            return;
+        }
+
+        let password_text = password.text().to_string();
+        if password_text.is_empty() {
+            status.set_text("Password is required");
+            return;
+        }
+
+        if let Some(button) = reconnect_button.as_ref() {
+            button.set_sensitive(false);
+        }
+        password.set_sensitive(false);
+        status.set_text("Connecting...");
+        set_library_loading(&state, "Reconnecting to Jellyfin");
+
+        let generation = state.borrow().connection_generation;
+        let server_url = session_for_response.server_url.clone();
+        let username = session_for_response.username.clone();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            reconnect_and_fetch(
+                &server_url,
+                &username,
+                &password_text,
+                sender,
+                generation,
+            );
+        });
+
+        poll_reconnect_result(
+            receiver,
+            state.clone(),
+            status.clone(),
+            password.clone(),
+            reconnect_button.clone(),
+            dialog.clone(),
+            generation,
+        );
+    });
+
+    dialog.present();
+}
+
+fn reconnect_summary_row(name: &str, value: &str) -> gtk::Box {
+    let row = gtk::Box::new(Orientation::Horizontal, 10);
+    row.add_css_class("reconnect-summary-row");
+
+    let name = label(name, "reconnect-summary-name");
+    name.set_width_chars(7);
+    row.append(&name);
+
+    let value = label(value, "reconnect-summary-value");
+    value.set_hexpand(true);
+    value.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    value.set_single_line_mode(true);
+    value.set_lines(1);
+    row.append(&value);
+
+    row
+}
+
+#[allow(deprecated)]
+fn poll_reconnect_result(
+    receiver: mpsc::Receiver<ConnectionMessage>,
+    state: Rc<RefCell<UiState>>,
+    status: gtk::Label,
+    password: gtk::PasswordEntry,
+    button: Option<gtk::Button>,
+    dialog: gtk::Dialog,
+    generation: u64,
+) {
+    gtk::glib::timeout_add_local(Duration::from_millis(100), move || {
+        if state.borrow().connection_generation != generation {
+            if let Some(button) = button.as_ref() {
+                button.set_sensitive(true);
+            }
+            password.set_sensitive(true);
+            set_refresh_button_connected_state(&state);
+            set_reconnect_button_needed(&state, false);
+            set_library_loaded(&state);
+            return gtk::glib::ControlFlow::Break;
+        }
+
+        match receiver.try_recv() {
+            Ok(ConnectionMessage::Authenticated(session)) => {
+                if let Some(button) = button.as_ref() {
+                    button.set_sensitive(true);
+                }
+                password.set_sensitive(true);
+                set_reconnect_button_needed(&state, false);
+                {
+                    let ui = state.borrow();
+                    ui.connection_status.set_text("Connected to Jellyfin");
+                    ui.connection_detail.set_text(&format!(
+                        "{} | refreshing library in background",
+                        session.username
+                    ));
+                    ui.page_summary
+                        .set_text("Refreshing Jellyfin library in background");
+                }
+                dialog.close();
+                gtk::glib::ControlFlow::Continue
+            }
+            Ok(ConnectionMessage::Status(message)) => {
+                status.set_text(&message);
+                let ui = state.borrow();
+                ui.connection_status.set_text("Refreshing library");
+                ui.connection_detail.set_text(&message);
+                gtk::glib::ControlFlow::Continue
+            }
+            Ok(ConnectionMessage::Progress { loaded, total }) => {
+                let progress = library_progress_text(loaded, total);
+                status.set_text(&progress);
+                let ui = state.borrow();
+                ui.connection_status.set_text("Loading library");
+                ui.connection_detail.set_text(&progress);
+                gtk::glib::ControlFlow::Continue
+            }
+            Ok(ConnectionMessage::Finished(Ok(payload))) => {
+                set_library_loaded(&state);
+                apply_connection_payload(&state, payload);
+                if let Some(card) = state.borrow().connection_card.as_ref() {
+                    card.set_visible(false);
+                }
+                dialog.close();
+                gtk::glib::ControlFlow::Break
+            }
+            Ok(ConnectionMessage::Finished(Err(error))) => {
+                if let Some(button) = button.as_ref() {
+                    button.set_sensitive(true);
+                }
+                password.set_sensitive(true);
+                set_refresh_button_connected_state(&state);
+                set_library_loaded(&state);
+                set_reconnect_button_error_state(&state, &error);
+                status.set_text(&error);
+                let ui = state.borrow();
+                ui.connection_status.set_text("Connection failed");
+                ui.connection_detail.set_text(&error);
+                gtk::glib::ControlFlow::Break
+            }
+            Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                if let Some(button) = button.as_ref() {
+                    button.set_sensitive(true);
+                }
+                password.set_sensitive(true);
+                set_refresh_button_connected_state(&state);
+                set_reconnect_button_needed(&state, false);
+                set_library_loaded(&state);
+                status.set_text("Connection worker stopped");
+                gtk::glib::ControlFlow::Break
+            }
+        }
+    });
 }
 
 fn context_rail_toggle_button() -> (gtk::Button, gtk::Revealer) {
@@ -5371,6 +5959,7 @@ mod tests {
     fn test_track() -> UiTrack {
         UiTrack {
             item_id: Some("track-id".to_string()),
+            date_last_saved: Some("2026-01-01T00:00:00.0000000Z".to_string()),
             album_id: Some("album-id".to_string()),
             media_source_id: Some("media-source-id".to_string()),
             stream_url: Some("https://jellyfin.example/Audio/track-id/stream".to_string()),
@@ -5403,6 +5992,7 @@ mod tests {
         UiTrack {
             item_id: Some(item_id.to_string()),
             album_id: Some(album_id.to_string()),
+            date_last_saved: Some("2026-01-01T00:00:00.0000000Z".to_string()),
             title: title.to_string(),
             album: album.to_string(),
             artist: artist.to_string(),
@@ -5476,6 +6066,60 @@ mod tests {
     }
 
     #[test]
+    fn changed_summary_ids_selects_new_and_modified_items() {
+        let unchanged = UiTrack {
+            item_id: Some("unchanged".to_string()),
+            date_last_saved: Some("stamp-a".to_string()),
+            ..test_track()
+        };
+        let changed = UiTrack {
+            item_id: Some("changed".to_string()),
+            date_last_saved: Some("stamp-b".to_string()),
+            ..test_track()
+        };
+        let deleted = UiTrack {
+            item_id: Some("deleted".to_string()),
+            date_last_saved: Some("stamp-c".to_string()),
+            ..test_track()
+        };
+        let cached = [unchanged, changed, deleted]
+            .into_iter()
+            .filter_map(|track| track.item_id.clone().map(|id| (id, track)))
+            .collect::<HashMap<_, _>>();
+        let summaries = vec![
+            JellyfinItemSummary {
+                id: "unchanged".to_string(),
+                date_last_saved: Some("stamp-a".to_string()),
+            },
+            JellyfinItemSummary {
+                id: "changed".to_string(),
+                date_last_saved: Some("stamp-new".to_string()),
+            },
+            JellyfinItemSummary {
+                id: "new".to_string(),
+                date_last_saved: Some("stamp-new-item".to_string()),
+            },
+        ];
+
+        let changed_ids =
+            changed_summary_ids(&summaries, &cached, |track| track.date_last_saved.as_deref());
+
+        assert_eq!(changed_ids, vec!["changed".to_string(), "new".to_string()]);
+    }
+
+    #[test]
+    fn summaries_missing_change_stamps_detects_unsafe_incremental_refresh() {
+        assert!(summaries_missing_change_stamps(&[JellyfinItemSummary {
+            id: "track-id".to_string(),
+            date_last_saved: None,
+        }]));
+        assert!(!summaries_missing_change_stamps(&[JellyfinItemSummary {
+            id: "track-id".to_string(),
+            date_last_saved: Some("stamp".to_string()),
+        }]));
+    }
+
+    #[test]
     fn empty_library_cache_is_ignored() {
         let cache = CacheDatabase::open_memory().expect("in-memory cache opens");
         let session = test_session();
@@ -5505,6 +6149,7 @@ mod tests {
         let playlist = UiPlaylist {
             id: "playlist-id".to_string(),
             name: "Favorites".to_string(),
+            date_last_saved: Some("2026-01-01T00:00:00.0000000Z".to_string()),
             artwork_url: None,
             thumbnail_artwork_url: None,
             tracks: vec![track.clone()],

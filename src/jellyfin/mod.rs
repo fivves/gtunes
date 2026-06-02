@@ -6,5 +6,6 @@ mod models;
 pub use client::{JellyfinClient, JellyfinClientError, stream_http_headers_for_token};
 pub use models::{
     ArtistImageKind, JellyfinAlbum, JellyfinArtist, JellyfinAuthResponse, JellyfinItemId,
-    JellyfinItemsResponse, JellyfinNameId, JellyfinPlaylist, JellyfinTrack, JellyfinUser,
+    JellyfinItemSummary, JellyfinItemsResponse, JellyfinNameId, JellyfinPlaylist, JellyfinTrack,
+    JellyfinUser,
 };
