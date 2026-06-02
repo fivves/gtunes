@@ -17,7 +17,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::cache::{CacheDatabase, JellyfinSession};
 use crate::config;
 use crate::jellyfin::{
-    JellyfinClient, JellyfinClientError, JellyfinTrack, stream_http_headers_for_token,
+    JellyfinClient, JellyfinClientError, JellyfinPlaylist, JellyfinTrack,
+    stream_http_headers_for_token,
 };
 use crate::playback::{
     PlaybackEngine, PlaybackEvent, PlaybackRequest, PlaybackState, PlaybackStreamKind,
@@ -57,6 +58,18 @@ struct UiArtistImage {
     thumbnail_url: String,
 }
 
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+struct UiPlaylist {
+    id: String,
+    name: String,
+    #[serde(default)]
+    artwork_url: Option<String>,
+    #[serde(default)]
+    thumbnail_artwork_url: Option<String>,
+    #[serde(default)]
+    tracks: Vec<UiTrack>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 enum SortColumn {
     Title,
@@ -70,6 +83,7 @@ enum LibraryPage {
     Tracks,
     Albums,
     Artists,
+    Playlists,
 }
 
 #[derive(Debug)]
@@ -109,14 +123,21 @@ impl Default for LibraryViewSettings {
 struct UiState {
     all_tracks: Vec<UiTrack>,
     tracks: Vec<UiTrack>,
+    playlists: Vec<UiPlaylist>,
+    track_filter_signature: TrackFilterSignature,
+    library_albums: Vec<AlbumSummary>,
+    library_artists: Vec<ArtistSummary>,
+    collection_render_generation: u64,
     active_page: LibraryPage,
     album_filter: Option<String>,
     artist_filter: Option<String>,
+    playlist_filter: Option<String>,
     collection_detail_title: Option<String>,
     collection_detail_subtitle: Option<String>,
     selected_index: usize,
     search_query: String,
     connection_generation: u64,
+    jellyfin_connected: bool,
     sort_column: SortColumn,
     sort_ascending: bool,
     shuffle_enabled: bool,
@@ -126,6 +147,7 @@ struct UiState {
     library_stack: Option<gtk::Stack>,
     album_grid: Option<gtk::FlowBox>,
     artist_grid: Option<gtk::FlowBox>,
+    playlist_grid: Option<gtk::FlowBox>,
     detail_header: Option<gtk::Box>,
     detail_title_label: Option<gtk::Label>,
     detail_subtitle_label: Option<gtk::Label>,
@@ -133,6 +155,7 @@ struct UiState {
     nav_track_count: Option<gtk::Label>,
     nav_album_count: Option<gtk::Label>,
     nav_artist_count: Option<gtk::Label>,
+    nav_playlist_count: Option<gtk::Label>,
     track_model: gtk::StringList,
     track_selection: Option<gtk::SingleSelection>,
     track_stack: Option<gtk::Stack>,
@@ -154,6 +177,7 @@ struct UiState {
     cover_art: Option<gtk::Image>,
     play_button: Option<gtk::Button>,
     shuffle_button: Option<gtk::Button>,
+    refresh_button: Option<gtk::Button>,
     queue_view: Option<Rc<QueueView>>,
     wave_area: Option<gtk::DrawingArea>,
     elapsed_label: gtk::Label,
@@ -162,6 +186,39 @@ struct UiState {
     waveform: Rc<RefCell<WaveformVisual>>,
     playback: Option<PlaybackEngine>,
     mpris: Option<MediaControls>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TrackFilterSignature {
+    album_filter: Option<String>,
+    artist_filter: Option<String>,
+    playlist_filter: Option<String>,
+    search_query: String,
+    sort_column: SortColumn,
+    sort_ascending: bool,
+}
+
+impl UiState {
+    fn is_track_list_visible(&self) -> bool {
+        self.active_page == LibraryPage::Tracks
+            || self.album_filter.is_some()
+            || self.playlist_filter.is_some()
+    }
+
+    fn current_track_filter_signature(&self) -> TrackFilterSignature {
+        TrackFilterSignature {
+            album_filter: self.album_filter.clone(),
+            artist_filter: self.artist_filter.clone(),
+            playlist_filter: self.playlist_filter.clone(),
+            search_query: self.search_query.clone(),
+            sort_column: self.sort_column,
+            sort_ascending: self.sort_ascending,
+        }
+    }
+
+    fn track_filter_is_current(&self) -> bool {
+        self.track_filter_signature == self.current_track_filter_signature()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -176,6 +233,14 @@ struct WaveformVisual {
 struct ConnectionPayload {
     session: JellyfinSession,
     tracks: Vec<UiTrack>,
+    playlists: Vec<UiPlaylist>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+struct CachedLibrary {
+    tracks: Vec<UiTrack>,
+    #[serde(default)]
+    playlists: Vec<UiPlaylist>,
 }
 
 enum ConnectionMessage {
@@ -194,6 +259,11 @@ const ACTION_PANEL_WIDTH: i32 = 130;
 const ALBUM_ART_SIZE: i32 = 168;
 const COLLECTION_TILE_WIDTH: i32 = 184;
 const ARTIST_ART_SIZE: i32 = 148;
+const COLLECTION_ARTWORK_INITIAL_DELAY_MS: u64 = 24;
+const COLLECTION_ARTWORK_STAGGER_MS: u64 = 8;
+const COLLECTION_ARTWORK_MAX_STAGGERED_ITEMS: usize = 160;
+const COLLECTION_TILE_INITIAL_BATCH: usize = 24;
+const COLLECTION_TILE_IDLE_BATCH: usize = 24;
 static CONNECTION_GENERATION: AtomicU64 = AtomicU64::new(0);
 static CACHE_RESET_LOCK: Mutex<()> = Mutex::new(());
 
@@ -305,6 +375,36 @@ impl UiTrack {
     }
 }
 
+impl UiPlaylist {
+    fn from_jellyfin(
+        playlist: JellyfinPlaylist,
+        tracks: Vec<UiTrack>,
+        client: &JellyfinClient,
+    ) -> Self {
+        let artwork_url = client
+            .item_image_url(&playlist.id, "Primary")
+            .ok()
+            .map(|url| url.to_string());
+        let thumbnail_artwork_url = client
+            .item_image_url_with_size(&playlist.id, "Primary", Some(160))
+            .ok()
+            .map(|url| url.to_string())
+            .or_else(|| {
+                tracks
+                    .iter()
+                    .find_map(|track| track.thumbnail_artwork_url.clone())
+            });
+
+        Self {
+            id: playlist.id,
+            name: playlist.name,
+            artwork_url,
+            thumbnail_artwork_url,
+            tracks,
+        }
+    }
+}
+
 fn artist_image_urls<'a>(
     artists: impl Iterator<Item = &'a crate::jellyfin::JellyfinNameId>,
     client: &JellyfinClient,
@@ -362,14 +462,28 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
     let state = Rc::new(RefCell::new(UiState {
         all_tracks: Vec::new(),
         tracks: Vec::new(),
+        playlists: Vec::new(),
+        track_filter_signature: TrackFilterSignature {
+            album_filter: None,
+            artist_filter: None,
+            playlist_filter: None,
+            search_query: String::new(),
+            sort_column: view_settings.sort_column,
+            sort_ascending: view_settings.sort_ascending,
+        },
+        library_albums: Vec::new(),
+        library_artists: Vec::new(),
+        collection_render_generation: 0,
         active_page: LibraryPage::Tracks,
         album_filter: None,
         artist_filter: None,
+        playlist_filter: None,
         collection_detail_title: None,
         collection_detail_subtitle: None,
         selected_index: 0,
         search_query: String::new(),
         connection_generation: CONNECTION_GENERATION.load(AtomicOrdering::SeqCst),
+        jellyfin_connected: false,
         sort_column: view_settings.sort_column,
         sort_ascending: view_settings.sort_ascending,
         shuffle_enabled: false,
@@ -379,6 +493,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         library_stack: None,
         album_grid: None,
         artist_grid: None,
+        playlist_grid: None,
         detail_header: None,
         detail_title_label: None,
         detail_subtitle_label: None,
@@ -386,6 +501,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         nav_track_count: None,
         nav_album_count: None,
         nav_artist_count: None,
+        nav_playlist_count: None,
         track_model: gtk::StringList::new(&[]),
         track_selection: None,
         track_stack: None,
@@ -407,6 +523,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         cover_art: None,
         play_button: None,
         shuffle_button: None,
+        refresh_button: None,
         queue_view: None,
         wave_area: None,
         elapsed_label: label("0:00", "mono"),
@@ -447,6 +564,7 @@ fn connect_app_shortcuts(root: &gtk::Box, state: Rc<RefCell<UiState>>) {
             gtk::gdk::Key::_1 => set_library_page(&state, LibraryPage::Tracks),
             gtk::gdk::Key::_2 => set_library_page(&state, LibraryPage::Albums),
             gtk::gdk::Key::_3 => set_library_page(&state, LibraryPage::Artists),
+            gtk::gdk::Key::_4 => set_library_page(&state, LibraryPage::Playlists),
             gtk::gdk::Key::f | gtk::gdk::Key::F => {
                 if let Some(search) = state.borrow().search_entry.as_ref() {
                     search.grab_focus();
@@ -740,6 +858,18 @@ fn build_player_bar(state: Rc<RefCell<UiState>>, context_toggle: gtk::Button) ->
     utility_row.set_valign(Align::Start);
     utility_row.set_margin_end(CONTEXT_RAIL_EDGE_INSET);
 
+    let refresh = icon_button("view-refresh-symbolic", "Refresh library from Jellyfin");
+    refresh.add_css_class("toolbar-button");
+    refresh.set_sensitive(false);
+    {
+        let state = state.clone();
+        refresh.connect_clicked(move |button| {
+            refresh_jellyfin_library(state.clone(), button.clone());
+        });
+    }
+    state.borrow_mut().refresh_button = Some(refresh.clone());
+    utility_row.append(&refresh);
+
     let shuffle = icon_button("media-playlist-shuffle-symbolic", "Shuffle");
     shuffle.add_css_class("toolbar-button");
     shuffle.add_css_class("shuffle-toggle");
@@ -902,6 +1032,7 @@ fn apply_first_time_setup_state(state: &Rc<RefCell<UiState>>) {
         password_entry,
         form_status,
         connection_card,
+        refresh_button,
         cover,
         wave_area,
         spinner,
@@ -914,6 +1045,7 @@ fn apply_first_time_setup_state(state: &Rc<RefCell<UiState>>) {
             ui.connection_password_entry.clone(),
             ui.connection_form_status.clone(),
             ui.connection_card.clone(),
+            ui.refresh_button.clone(),
             ui.cover_art.clone(),
             ui.wave_area.clone(),
             ui.sync_spinner.clone(),
@@ -924,13 +1056,27 @@ fn apply_first_time_setup_state(state: &Rc<RefCell<UiState>>) {
         let mut ui = state.borrow_mut();
         ui.all_tracks.clear();
         ui.tracks.clear();
+        ui.playlists.clear();
+        ui.track_filter_signature = TrackFilterSignature {
+            album_filter: None,
+            artist_filter: None,
+            playlist_filter: None,
+            search_query: String::new(),
+            sort_column: LibraryViewSettings::default().sort_column,
+            sort_ascending: LibraryViewSettings::default().sort_ascending,
+        };
+        ui.library_albums.clear();
+        ui.library_artists.clear();
+        ui.collection_render_generation = ui.collection_render_generation.wrapping_add(1);
         ui.active_page = LibraryPage::Tracks;
         ui.album_filter = None;
         ui.artist_filter = None;
+        ui.playlist_filter = None;
         ui.collection_detail_title = None;
         ui.collection_detail_subtitle = None;
         ui.selected_index = 0;
         ui.search_query.clear();
+        ui.jellyfin_connected = false;
         ui.sort_column = LibraryViewSettings::default().sort_column;
         ui.sort_ascending = LibraryViewSettings::default().sort_ascending;
         ui.shuffle_enabled = false;
@@ -978,6 +1124,9 @@ fn apply_first_time_setup_state(state: &Rc<RefCell<UiState>>) {
     }
     if let Some(card) = connection_card.as_ref() {
         card.set_visible(true);
+    }
+    if let Some(button) = refresh_button.as_ref() {
+        button.set_sensitive(false);
     }
     if let Some(cover) = cover.as_ref() {
         cover.set_paintable(Option::<&gtk::gdk::Paintable>::None);
@@ -1105,6 +1254,7 @@ fn build_content(state: Rc<RefCell<UiState>>) -> gtk::Box {
     stack.add_named(&track_table(state.clone()), Some("tracks"));
     stack.add_named(&album_grid_page(state.clone()), Some("albums"));
     stack.add_named(&artist_grid_page(state.clone()), Some("artists"));
+    stack.add_named(&playlist_grid_page(state.clone()), Some("playlists"));
     stack.set_visible_child_name("tracks");
     state.borrow_mut().library_stack = Some(stack.clone());
 
@@ -1280,6 +1430,7 @@ fn poll_connection_result(
             if let Some(button) = button.as_ref() {
                 button.set_sensitive(true);
             }
+            set_refresh_button_connected_state(&state);
             set_library_loaded(&state);
             return gtk::glib::ControlFlow::Break;
         }
@@ -1309,6 +1460,7 @@ fn poll_connection_result(
                 if let Some(button) = button.as_ref() {
                     button.set_sensitive(true);
                 }
+                set_refresh_button_connected_state(&state);
                 status.set_text("Connection failed");
                 set_library_loaded(&state);
                 state
@@ -1323,12 +1475,42 @@ fn poll_connection_result(
                 if let Some(button) = button.as_ref() {
                     button.set_sensitive(true);
                 }
+                set_refresh_button_connected_state(&state);
                 status.set_text("Connection worker stopped");
                 set_library_loaded(&state);
                 gtk::glib::ControlFlow::Break
             }
         }
     });
+}
+
+fn refresh_jellyfin_library(state: Rc<RefCell<UiState>>, button: gtk::Button) {
+    let generation = state.borrow().connection_generation;
+    button.set_sensitive(false);
+    set_library_loading(&state, "Refreshing Jellyfin library");
+
+    let status = {
+        let ui = state.borrow();
+        ui.connection_status.clone()
+    };
+    status.set_text("Refreshing library");
+
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        refresh_saved_session(sender, generation);
+    });
+
+    poll_connection_result(receiver, state, status, Some(button), generation);
+}
+
+fn set_refresh_button_connected_state(state: &Rc<RefCell<UiState>>) {
+    let (button, connected) = {
+        let ui = state.borrow();
+        (ui.refresh_button.clone(), ui.jellyfin_connected)
+    };
+    if let Some(button) = button.as_ref() {
+        button.set_sensitive(connected);
+    }
 }
 
 fn set_library_loading(state: &Rc<RefCell<UiState>>, message: &str) {
@@ -1483,10 +1665,55 @@ fn artist_grid_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
     scroll
 }
 
+fn playlist_grid_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.add_css_class("collection-scroll");
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_overlay_scrolling(true);
+    scroll.set_hexpand(true);
+    scroll.set_vexpand(true);
+
+    let flow = gtk::FlowBox::new();
+    flow.add_css_class("collection-grid");
+    flow.add_css_class("playlist-grid");
+    flow.set_selection_mode(gtk::SelectionMode::None);
+    flow.set_min_children_per_line(1);
+    flow.set_max_children_per_line(8);
+    flow.set_row_spacing(18);
+    flow.set_column_spacing(18);
+    flow.set_homogeneous(false);
+    flow.set_valign(Align::Start);
+    scroll.set_child(Some(&flow));
+
+    state.borrow_mut().playlist_grid = Some(flow);
+    scroll
+}
+
 fn refresh_collection_grids(state: &Rc<RefCell<UiState>>) {
     refresh_album_grid(state);
     refresh_artist_grid(state);
+    refresh_playlist_grid(state);
     update_nav_counts(state);
+}
+
+fn refresh_visible_collection_grid(state: &Rc<RefCell<UiState>>) {
+    let active_view = {
+        let ui = state.borrow();
+        (
+            ui.active_page,
+            ui.album_filter.clone(),
+            ui.artist_filter.clone(),
+            ui.playlist_filter.clone(),
+        )
+    };
+
+    match active_view {
+        (LibraryPage::Albums, None, _, _) => refresh_album_grid(state),
+        (LibraryPage::Artists, _, None, _) => refresh_artist_grid(state),
+        (LibraryPage::Artists, None, Some(_), _) => refresh_album_grid(state),
+        (LibraryPage::Playlists, _, _, None) => refresh_playlist_grid(state),
+        _ => {}
+    }
 }
 
 fn refresh_album_grid(state: &Rc<RefCell<UiState>>) {
@@ -1496,21 +1723,22 @@ fn refresh_album_grid(state: &Rc<RefCell<UiState>>) {
             ui.artist_filter
                 .as_deref()
                 .map(|selected_artist_key| {
-                    album_summaries_for_artist(
-                        &ui.all_tracks,
+                    album_summaries_for_artist_from(
+                        &ui.library_albums,
                         selected_artist_key,
                         &ui.search_query,
                     )
                 })
-                .unwrap_or_else(|| album_summaries(&ui.all_tracks, &ui.search_query))
+                .unwrap_or_else(|| filter_album_summaries(&ui.library_albums, &ui.search_query))
         } else {
-            album_summaries(&ui.all_tracks, &ui.search_query)
+            filter_album_summaries(&ui.library_albums, &ui.search_query)
         };
         (ui.album_grid.clone(), albums)
     };
     let Some(grid) = grid else {
         return;
     };
+    next_collection_render_generation(state);
     clear_flow_box(&grid);
 
     if albums.is_empty() {
@@ -1518,10 +1746,7 @@ fn refresh_album_grid(state: &Rc<RefCell<UiState>>) {
         return;
     }
 
-    for album in albums {
-        let tile = album_tile(album, state.clone());
-        grid.insert(&tile, -1);
-    }
+    render_album_tiles_batched(state, grid, albums);
 }
 
 fn refresh_artist_grid(state: &Rc<RefCell<UiState>>) {
@@ -1529,12 +1754,13 @@ fn refresh_artist_grid(state: &Rc<RefCell<UiState>>) {
         let ui = state.borrow();
         (
             ui.artist_grid.clone(),
-            artist_summaries(&ui.all_tracks, &ui.search_query),
+            filter_artist_summaries(&ui.library_artists, &ui.search_query),
         )
     };
     let Some(grid) = grid else {
         return;
     };
+    next_collection_render_generation(state);
     clear_flow_box(&grid);
 
     if artists.is_empty() {
@@ -1542,16 +1768,153 @@ fn refresh_artist_grid(state: &Rc<RefCell<UiState>>) {
         return;
     }
 
-    for artist in artists {
-        let tile = artist_tile(artist, state.clone());
-        grid.insert(&tile, -1);
+    render_artist_tiles_batched(state, grid, artists);
+}
+
+fn refresh_playlist_grid(state: &Rc<RefCell<UiState>>) {
+    let (grid, playlists) = {
+        let ui = state.borrow();
+        (
+            ui.playlist_grid.clone(),
+            filter_playlists(&ui.playlists, &ui.search_query),
+        )
+    };
+    let Some(grid) = grid else {
+        return;
+    };
+    next_collection_render_generation(state);
+    clear_flow_box(&grid);
+
+    if playlists.is_empty() {
+        grid.insert(&collection_empty_state("No playlists found"), -1);
+        return;
     }
+
+    render_playlist_tiles_batched(state, grid, playlists);
 }
 
 fn clear_flow_box(flow: &gtk::FlowBox) {
     while let Some(child) = flow.first_child() {
         flow.remove(&child);
     }
+}
+
+fn next_collection_render_generation(state: &Rc<RefCell<UiState>>) -> u64 {
+    let mut ui = state.borrow_mut();
+    ui.collection_render_generation = ui.collection_render_generation.wrapping_add(1);
+    ui.collection_render_generation
+}
+
+fn collection_render_generation(state: &Rc<RefCell<UiState>>) -> u64 {
+    state.borrow().collection_render_generation
+}
+
+fn render_album_tiles_batched(
+    state: &Rc<RefCell<UiState>>,
+    grid: gtk::FlowBox,
+    mut albums: Vec<AlbumSummary>,
+) {
+    let generation = next_collection_render_generation(state);
+    let initial_count = albums.len().min(COLLECTION_TILE_INITIAL_BATCH);
+    for (index, album) in albums.drain(..initial_count).enumerate() {
+        grid.insert(&album_tile(album, state.clone(), index), -1);
+    }
+
+    if albums.is_empty() {
+        return;
+    }
+
+    let state = state.clone();
+    let mut next_index = initial_count;
+    gtk::glib::idle_add_local(move || {
+        if collection_render_generation(&state) != generation {
+            return gtk::glib::ControlFlow::Break;
+        }
+
+        let batch_count = albums.len().min(COLLECTION_TILE_IDLE_BATCH);
+        for album in albums.drain(..batch_count) {
+            grid.insert(&album_tile(album, state.clone(), next_index), -1);
+            next_index += 1;
+        }
+
+        if albums.is_empty() {
+            gtk::glib::ControlFlow::Break
+        } else {
+            gtk::glib::ControlFlow::Continue
+        }
+    });
+}
+
+fn render_artist_tiles_batched(
+    state: &Rc<RefCell<UiState>>,
+    grid: gtk::FlowBox,
+    mut artists: Vec<ArtistSummary>,
+) {
+    let generation = next_collection_render_generation(state);
+    let initial_count = artists.len().min(COLLECTION_TILE_INITIAL_BATCH);
+    for (index, artist) in artists.drain(..initial_count).enumerate() {
+        grid.insert(&artist_tile(artist, state.clone(), index), -1);
+    }
+
+    if artists.is_empty() {
+        return;
+    }
+
+    let state = state.clone();
+    let mut next_index = initial_count;
+    gtk::glib::idle_add_local(move || {
+        if collection_render_generation(&state) != generation {
+            return gtk::glib::ControlFlow::Break;
+        }
+
+        let batch_count = artists.len().min(COLLECTION_TILE_IDLE_BATCH);
+        for artist in artists.drain(..batch_count) {
+            grid.insert(&artist_tile(artist, state.clone(), next_index), -1);
+            next_index += 1;
+        }
+
+        if artists.is_empty() {
+            gtk::glib::ControlFlow::Break
+        } else {
+            gtk::glib::ControlFlow::Continue
+        }
+    });
+}
+
+fn render_playlist_tiles_batched(
+    state: &Rc<RefCell<UiState>>,
+    grid: gtk::FlowBox,
+    mut playlists: Vec<UiPlaylist>,
+) {
+    let generation = next_collection_render_generation(state);
+    let initial_count = playlists.len().min(COLLECTION_TILE_INITIAL_BATCH);
+    for (index, playlist) in playlists.drain(..initial_count).enumerate() {
+        grid.insert(&playlist_tile(playlist, state.clone(), index), -1);
+    }
+
+    if playlists.is_empty() {
+        return;
+    }
+
+    let state = state.clone();
+    let mut next_index = initial_count;
+    gtk::glib::idle_add_local(move || {
+        if collection_render_generation(&state) != generation {
+            return gtk::glib::ControlFlow::Break;
+        }
+
+        let batch_count = playlists.len().min(COLLECTION_TILE_IDLE_BATCH);
+        for playlist in playlists.drain(..batch_count) {
+            grid.insert(&playlist_tile(playlist, state.clone(), next_index), -1);
+            next_index += 1;
+        }
+
+        if playlists.is_empty() {
+            gtk::glib::ControlFlow::Break
+        } else {
+            gtk::glib::ControlFlow::Continue
+        }
+    });
 }
 
 fn collection_empty_state(text: &str) -> gtk::Box {
@@ -1565,7 +1928,7 @@ fn collection_empty_state(text: &str) -> gtk::Box {
     empty
 }
 
-fn album_tile(album: AlbumSummary, state: Rc<RefCell<UiState>>) -> gtk::Button {
+fn album_tile(album: AlbumSummary, state: Rc<RefCell<UiState>>, tile_index: usize) -> gtk::Button {
     let button = collection_tile_button(&album.name);
     button.add_css_class("album-tile");
     button.set_halign(Align::Fill);
@@ -1591,7 +1954,7 @@ fn album_tile(album: AlbumSummary, state: Rc<RefCell<UiState>>) -> gtk::Button {
     art.set_icon_name(Some("audio-x-generic-symbolic"));
     if let Some(url) = album.artwork_url.clone() {
         let current_url = Rc::new(RefCell::new(Some(url.clone())));
-        load_queue_art(Some(url), art.clone(), current_url);
+        load_collection_queue_art(Some(url), art.clone(), current_url, tile_index);
     }
     frame.append(&art);
     layout.append(&frame);
@@ -1612,7 +1975,11 @@ fn album_tile(album: AlbumSummary, state: Rc<RefCell<UiState>>) -> gtk::Button {
     button
 }
 
-fn artist_tile(artist: ArtistSummary, state: Rc<RefCell<UiState>>) -> gtk::Button {
+fn artist_tile(
+    artist: ArtistSummary,
+    state: Rc<RefCell<UiState>>,
+    tile_index: usize,
+) -> gtk::Button {
     let button = collection_tile_button(&artist.name);
     button.add_css_class("artist-tile");
 
@@ -1628,7 +1995,7 @@ fn artist_tile(artist: ArtistSummary, state: Rc<RefCell<UiState>>) -> gtk::Butto
     avatar.set_overflow(gtk::Overflow::Hidden);
     avatar.set_pixel_size(56);
     if let Some(url) = artist.image_url.clone() {
-        load_picture_art(url, avatar.clone());
+        load_collection_picture_art(url, avatar.clone(), tile_index);
     }
     layout.append(&avatar);
     layout.append(&collection_tile_label(&artist.name, "collection-title"));
@@ -1640,6 +2007,53 @@ fn artist_tile(artist: ArtistSummary, state: Rc<RefCell<UiState>>) -> gtk::Butto
 
     button.connect_clicked(move |_| {
         show_artist_albums(&state, &artist);
+    });
+    button
+}
+
+fn playlist_tile(
+    playlist: UiPlaylist,
+    state: Rc<RefCell<UiState>>,
+    tile_index: usize,
+) -> gtk::Button {
+    let button = collection_tile_button(&playlist.name);
+    button.add_css_class("playlist-tile");
+    button.set_halign(Align::Fill);
+    button.set_hexpand(false);
+    button.set_size_request(COLLECTION_TILE_WIDTH, -1);
+
+    let layout = gtk::Box::new(Orientation::Vertical, 8);
+    layout.set_halign(Align::Fill);
+    layout.set_hexpand(true);
+
+    let frame = gtk::Box::new(Orientation::Vertical, 0);
+    frame.add_css_class("album-art-frame");
+    frame.set_size_request(ALBUM_ART_SIZE, ALBUM_ART_SIZE);
+    frame.set_halign(Align::Center);
+    frame.set_valign(Align::Fill);
+    frame.set_overflow(gtk::Overflow::Hidden);
+
+    let art = cover_art(ALBUM_ART_SIZE);
+    art.add_css_class("collection-art");
+    art.add_css_class("album-art");
+    art.set_halign(Align::Fill);
+    art.set_valign(Align::Fill);
+    art.set_icon_name(Some("media-playlist-consecutive-symbolic"));
+    if let Some(url) = playlist.thumbnail_artwork_url.clone() {
+        let current_url = Rc::new(RefCell::new(Some(url.clone())));
+        load_collection_queue_art(Some(url), art.clone(), current_url, tile_index);
+    }
+    frame.append(&art);
+    layout.append(&frame);
+    layout.append(&collection_tile_label(&playlist.name, "collection-title"));
+    layout.append(&collection_tile_label(
+        &count_text(playlist.tracks.len(), "song", "songs"),
+        "collection-subtitle",
+    ));
+    button.set_child(Some(&layout));
+
+    button.connect_clicked(move |_| {
+        show_playlist_tracks(&state, &playlist);
     });
     button
 }
@@ -1670,9 +2084,11 @@ fn collection_tile_label(text: &str, class_name: &str) -> gtk::Label {
 
 fn album_summaries(tracks: &[UiTrack], query: &str) -> Vec<AlbumSummary> {
     let mut albums = Vec::<AlbumAccumulator>::new();
+    let mut album_indexes = HashMap::<String, usize>::new();
     for (track_index, track) in tracks.iter().enumerate() {
         let key = album_key(track);
-        if let Some(album) = albums.iter_mut().find(|album| album.key == key) {
+        if let Some(album_index) = album_indexes.get(&key).copied() {
+            let album = &mut albums[album_index];
             album.song_count += 1;
             if album.artwork_url.is_none() {
                 album.artwork_url = track.thumbnail_artwork_url.clone();
@@ -1695,6 +2111,7 @@ fn album_summaries(tracks: &[UiTrack], query: &str) -> Vec<AlbumSummary> {
             continue;
         }
 
+        album_indexes.insert(key.clone(), albums.len());
         let mut album = AlbumAccumulator {
             key,
             name: track.album.clone(),
@@ -1752,30 +2169,57 @@ fn album_summaries(tracks: &[UiTrack], query: &str) -> Vec<AlbumSummary> {
     albums
 }
 
-fn album_summaries_for_artist(
-    tracks: &[UiTrack],
+fn album_summaries_for_artist_from(
+    albums: &[AlbumSummary],
     selected_artist_key: &str,
     query: &str,
 ) -> Vec<AlbumSummary> {
-    album_summaries(tracks, query)
+    filter_album_summaries(albums, query)
         .into_iter()
         .filter(|album| artist_key(&album.artist) == selected_artist_key)
         .collect()
 }
 
-fn artist_album_count(tracks: &[UiTrack], selected_artist_key: &str) -> usize {
-    album_summaries(tracks, "")
-        .into_iter()
-        .filter(|album| artist_key(&album.artist) == selected_artist_key)
-        .count()
+fn filter_album_summaries(albums: &[AlbumSummary], query: &str) -> Vec<AlbumSummary> {
+    let query = query.trim().to_lowercase();
+    let mut albums = albums
+        .iter()
+        .filter(|album| {
+            query.is_empty()
+                || album.name.to_lowercase().contains(&query)
+                || album.artist.to_lowercase().contains(&query)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    albums.sort_by(|left, right| {
+        compare_text(&left.name, &right.name)
+            .then_with(|| compare_text(&left.artist, &right.artist))
+    });
+    albums
+}
+
+fn artist_album_song_counts_from(
+    albums: &[AlbumSummary],
+    selected_artist_key: &str,
+    query: &str,
+) -> (usize, usize) {
+    let albums = album_summaries_for_artist_from(albums, selected_artist_key, query);
+    album_song_counts(&albums)
+}
+
+fn album_song_counts(albums: &[AlbumSummary]) -> (usize, usize) {
+    let song_count = albums.iter().map(|album| album.song_count).sum();
+    (albums.len(), song_count)
 }
 
 fn artist_summaries(tracks: &[UiTrack], query: &str) -> Vec<ArtistSummary> {
     let mut artists = Vec::<ArtistSummary>::new();
+    let mut artist_indexes = HashMap::<String, usize>::new();
     for album in album_summaries(tracks, "") {
         let key = artist_key(&album.artist);
         let image_url = artist_summary_image_url(&album);
-        if let Some(artist) = artists.iter_mut().find(|artist| artist.key == key) {
+        if let Some(artist_index) = artist_indexes.get(&key).copied() {
+            let artist = &mut artists[artist_index];
             artist.album_count += 1;
             artist.song_count += album.song_count;
             if artist.image_url.is_none() {
@@ -1784,6 +2228,7 @@ fn artist_summaries(tracks: &[UiTrack], query: &str) -> Vec<ArtistSummary> {
             continue;
         }
 
+        artist_indexes.insert(key.clone(), artists.len());
         artists.push(ArtistSummary {
             key,
             name: album.artist,
@@ -1800,6 +2245,33 @@ fn artist_summaries(tracks: &[UiTrack], query: &str) -> Vec<ArtistSummary> {
 
     artists.sort_by(|left, right| compare_text(&left.name, &right.name));
     artists
+}
+
+fn filter_artist_summaries(artists: &[ArtistSummary], query: &str) -> Vec<ArtistSummary> {
+    let query = query.trim().to_lowercase();
+    let mut artists = artists
+        .iter()
+        .filter(|artist| query.is_empty() || artist.name.to_lowercase().contains(&query))
+        .cloned()
+        .collect::<Vec<_>>();
+    artists.sort_by(|left, right| compare_text(&left.name, &right.name));
+    artists
+}
+
+fn rebuild_library_summaries(ui: &mut UiState) {
+    ui.library_albums = album_summaries(&ui.all_tracks, "");
+    ui.library_artists = artist_summaries(&ui.all_tracks, "");
+}
+
+fn filter_playlists(playlists: &[UiPlaylist], query: &str) -> Vec<UiPlaylist> {
+    let query = query.trim().to_lowercase();
+    let mut playlists = playlists
+        .iter()
+        .filter(|playlist| query.is_empty() || playlist.name.to_lowercase().contains(&query))
+        .cloned()
+        .collect::<Vec<_>>();
+    playlists.sort_by(|left, right| compare_text(&left.name, &right.name));
+    playlists
 }
 
 fn artist_summary_image_url(album: &AlbumSummary) -> Option<String> {
@@ -2400,46 +2872,74 @@ fn sort_track_slice(
 }
 
 fn set_search_query(state: &Rc<RefCell<UiState>>, query: &str) {
+    let show_tracks = state.borrow().is_track_list_visible();
     {
         let mut ui = state.borrow_mut();
         if ui.search_query == query {
             return;
         }
-        let selected_key = ui.tracks.get(ui.selected_index).map(track_key);
         ui.search_query = query.to_string();
-        apply_track_filter(&mut ui, selected_key.as_deref());
-        update_now_playing_labels(&ui);
-        update_play_button(&ui);
+        if show_tracks {
+            let selected_key = ui.tracks.get(ui.selected_index).map(track_key);
+            apply_track_filter(&mut ui, selected_key.as_deref());
+            update_now_playing_labels(&ui);
+            update_play_button(&ui);
+        }
         update_page_summary(&ui);
     }
-    refresh_track_model(state);
-    refresh_collection_grids(state);
+    if show_tracks {
+        refresh_track_model(state);
+    }
+    refresh_visible_collection_grid(state);
     update_content_view(state);
-    load_selected_cover_art(state);
-    load_selected_waveform(state);
+    if show_tracks {
+        load_selected_cover_art(state);
+        load_selected_waveform(state);
+    }
 }
 
 fn set_library_page(state: &Rc<RefCell<UiState>>, page: LibraryPage) {
+    let show_tracks = page == LibraryPage::Tracks;
+    let mut refresh_tracks = false;
     {
         let mut ui = state.borrow_mut();
+        if ui.active_page == page
+            && ui.album_filter.is_none()
+            && ui.artist_filter.is_none()
+            && ui.playlist_filter.is_none()
+            && ui.collection_detail_title.is_none()
+            && ui.collection_detail_subtitle.is_none()
+        {
+            return;
+        }
         ui.active_page = page;
         ui.album_filter = None;
         ui.artist_filter = None;
+        ui.playlist_filter = None;
         ui.collection_detail_title = None;
         ui.collection_detail_subtitle = None;
-        let selected_key = ui.tracks.get(ui.selected_index).map(track_key);
-        apply_track_filter(&mut ui, selected_key.as_deref());
-        update_now_playing_labels(&ui);
-        update_play_button(&ui);
+        if show_tracks {
+            if !ui.track_filter_is_current() {
+                let selected_key = ui.tracks.get(ui.selected_index).map(track_key);
+                apply_track_filter(&mut ui, selected_key.as_deref());
+                refresh_tracks = true;
+            }
+            update_now_playing_labels(&ui);
+            update_play_button(&ui);
+        }
         update_page_summary(&ui);
     }
-    refresh_track_model(state);
-    refresh_collection_grids(state);
+    if refresh_tracks {
+        refresh_track_model(state);
+    }
+    refresh_visible_collection_grid(state);
     update_nav_selection(state);
     update_content_view(state);
     focus_active_collection_grid(state);
-    load_selected_cover_art(state);
-    load_selected_waveform(state);
+    if refresh_tracks {
+        load_selected_cover_art(state);
+        load_selected_waveform(state);
+    }
 }
 
 fn show_album_tracks(state: &Rc<RefCell<UiState>>, album: &AlbumSummary) {
@@ -2455,6 +2955,7 @@ fn show_album_tracks(state: &Rc<RefCell<UiState>>, album: &AlbumSummary) {
         } else {
             LibraryPage::Albums
         };
+        ui.playlist_filter = None;
         ui.album_filter = Some(album.key.clone());
         ui.artist_filter = selected_artist;
         ui.collection_detail_title = Some(album.name.clone());
@@ -2475,15 +2976,15 @@ fn show_album_tracks(state: &Rc<RefCell<UiState>>, album: &AlbumSummary) {
     load_selected_waveform(state);
 }
 
-fn show_artist_albums(state: &Rc<RefCell<UiState>>, artist: &ArtistSummary) {
+fn show_playlist_tracks(state: &Rc<RefCell<UiState>>, playlist: &UiPlaylist) {
     {
         let mut ui = state.borrow_mut();
-        ui.active_page = LibraryPage::Artists;
+        ui.active_page = LibraryPage::Playlists;
         ui.album_filter = None;
-        ui.artist_filter = Some(artist.key.clone());
-        ui.collection_detail_title = Some(artist.name.clone());
-        ui.collection_detail_subtitle =
-            Some(artist_count_text(artist.album_count, artist.song_count));
+        ui.artist_filter = None;
+        ui.playlist_filter = Some(playlist.id.clone());
+        ui.collection_detail_title = Some(playlist.name.clone());
+        ui.collection_detail_subtitle = Some(count_text(playlist.tracks.len(), "song", "songs"));
         ui.selected_index = 0;
         apply_track_filter(&mut ui, None);
         update_now_playing_labels(&ui);
@@ -2491,22 +2992,52 @@ fn show_artist_albums(state: &Rc<RefCell<UiState>>, artist: &ArtistSummary) {
         update_page_summary(&ui);
     }
     refresh_track_model(state);
-    refresh_collection_grids(state);
     update_content_view(state);
-    focus_active_collection_grid(state);
     load_selected_cover_art(state);
     load_selected_waveform(state);
 }
 
+fn show_artist_albums(state: &Rc<RefCell<UiState>>, artist: &ArtistSummary) {
+    {
+        let mut ui = state.borrow_mut();
+        ui.active_page = LibraryPage::Artists;
+        ui.album_filter = None;
+        ui.playlist_filter = None;
+        ui.artist_filter = Some(artist.key.clone());
+        ui.collection_detail_title = Some(artist.name.clone());
+        ui.collection_detail_subtitle =
+            Some(artist_count_text(artist.album_count, artist.song_count));
+        ui.selected_index = 0;
+        ui.page_summary.set_text(&format!(
+            "{} | {}",
+            artist.name,
+            artist_count_text(artist.album_count, artist.song_count)
+        ));
+    }
+    refresh_visible_collection_grid(state);
+    update_content_view(state);
+    focus_active_collection_grid(state);
+}
+
 fn focus_active_collection_grid(state: &Rc<RefCell<UiState>>) {
-    let (active_page, album_filter, artist_filter, album_grid, artist_grid) = {
+    let (
+        active_page,
+        album_filter,
+        artist_filter,
+        playlist_filter,
+        album_grid,
+        artist_grid,
+        playlist_grid,
+    ) = {
         let ui = state.borrow();
         (
             ui.active_page,
             ui.album_filter.clone(),
             ui.artist_filter.clone(),
+            ui.playlist_filter.clone(),
             ui.album_grid.clone(),
             ui.artist_grid.clone(),
+            ui.playlist_grid.clone(),
         )
     };
 
@@ -2514,6 +3045,7 @@ fn focus_active_collection_grid(state: &Rc<RefCell<UiState>>) {
         LibraryPage::Albums if album_filter.is_none() => album_grid,
         LibraryPage::Artists if artist_filter.is_none() => artist_grid,
         LibraryPage::Artists if album_filter.is_none() => album_grid,
+        LibraryPage::Playlists if playlist_filter.is_none() => playlist_grid,
         _ => None,
     };
 
@@ -2538,32 +3070,34 @@ fn return_to_collection_grid(state: &Rc<RefCell<UiState>>) {
         let mut ui = state.borrow_mut();
         if ui.active_page == LibraryPage::Artists && ui.album_filter.is_some() {
             ui.album_filter = None;
-            if let Some(artist_key_value) = ui.artist_filter.clone()
-                && let Some(artist) = artist_summaries(&ui.all_tracks, "")
-                    .into_iter()
+            if let Some(artist_key_value) = ui.artist_filter.clone() {
+                let artist_detail = ui
+                    .library_artists
+                    .iter()
                     .find(|artist| artist.key == artist_key_value)
-            {
-                ui.collection_detail_title = Some(artist.name);
-                ui.collection_detail_subtitle =
-                    Some(artist_count_text(artist.album_count, artist.song_count));
+                    .map(|artist| {
+                        (
+                            artist.name.clone(),
+                            artist_count_text(artist.album_count, artist.song_count),
+                        )
+                    });
+                if let Some((name, subtitle)) = artist_detail {
+                    ui.collection_detail_title = Some(name);
+                    ui.collection_detail_subtitle = Some(subtitle);
+                }
             }
         } else {
             ui.album_filter = None;
             ui.artist_filter = None;
+            ui.playlist_filter = None;
             ui.collection_detail_title = None;
             ui.collection_detail_subtitle = None;
         }
         ui.selected_index = 0;
-        apply_track_filter(&mut ui, None);
-        update_now_playing_labels(&ui);
-        update_play_button(&ui);
         update_page_summary(&ui);
     }
-    refresh_track_model(state);
-    refresh_collection_grids(state);
+    refresh_visible_collection_grid(state);
     update_content_view(state);
-    load_selected_cover_art(state);
-    load_selected_waveform(state);
 }
 
 fn navigate_to_now_playing_artist(state: &Rc<RefCell<UiState>>) {
@@ -2573,8 +3107,9 @@ fn navigate_to_now_playing_artist(state: &Rc<RefCell<UiState>>) {
             return;
         };
         let key = artist_key(&track.artist);
-        artist_summaries(&ui.all_tracks, "")
-            .into_iter()
+        ui.library_artists
+            .iter()
+            .cloned()
             .find(|artist| artist.key == key)
     };
 
@@ -2590,8 +3125,9 @@ fn navigate_to_now_playing_album(state: &Rc<RefCell<UiState>>) {
             return;
         };
         let key = album_key(track);
-        album_summaries(&ui.all_tracks, "")
-            .into_iter()
+        ui.library_albums
+            .iter()
+            .cloned()
             .find(|album| album.key == key)
     };
 
@@ -2613,7 +3149,8 @@ fn update_content_view(state: &Rc<RefCell<UiState>>) {
         subtitle,
     ) = {
         let ui = state.borrow();
-        let show_detail = ui.album_filter.is_some() || ui.artist_filter.is_some();
+        let show_detail =
+            ui.album_filter.is_some() || ui.artist_filter.is_some() || ui.playlist_filter.is_some();
         let visible_child = match (ui.active_page, show_detail) {
             (LibraryPage::Tracks, _) => "tracks",
             (LibraryPage::Albums, false) => "albums",
@@ -2621,6 +3158,8 @@ fn update_content_view(state: &Rc<RefCell<UiState>>) {
             (LibraryPage::Artists, false) => "artists",
             (LibraryPage::Artists, true) if ui.album_filter.is_none() => "albums",
             (LibraryPage::Artists, true) => "tracks",
+            (LibraryPage::Playlists, false) => "playlists",
+            (LibraryPage::Playlists, true) => "tracks",
         };
         (
             ui.library_stack.clone(),
@@ -2649,15 +3188,26 @@ fn update_content_view(state: &Rc<RefCell<UiState>>) {
 }
 
 fn update_nav_counts(state: &Rc<RefCell<UiState>>) {
-    let (track_label, album_label, artist_label, tracks, albums, artists) = {
+    let (
+        track_label,
+        album_label,
+        artist_label,
+        playlist_label,
+        tracks,
+        albums,
+        artists,
+        playlists,
+    ) = {
         let ui = state.borrow();
         (
             ui.nav_track_count.clone(),
             ui.nav_album_count.clone(),
             ui.nav_artist_count.clone(),
+            ui.nav_playlist_count.clone(),
             ui.all_tracks.len(),
-            album_summaries(&ui.all_tracks, "").len(),
-            artist_summaries(&ui.all_tracks, "").len(),
+            ui.library_albums.len(),
+            ui.library_artists.len(),
+            ui.playlists.len(),
         )
     };
 
@@ -2669,6 +3219,9 @@ fn update_nav_counts(state: &Rc<RefCell<UiState>>) {
     }
     if let Some(label) = artist_label.as_ref() {
         label.set_text(&artists.to_string());
+    }
+    if let Some(label) = playlist_label.as_ref() {
+        label.set_text(&playlists.to_string());
     }
 }
 
@@ -2685,6 +3238,7 @@ fn update_nav_selection(state: &Rc<RefCell<UiState>>) {
         LibraryPage::Tracks => 0,
         LibraryPage::Albums => 1,
         LibraryPage::Artists => 2,
+        LibraryPage::Playlists => 3,
     };
     if list.selected_row().as_ref().map(gtk::ListBoxRow::index) == Some(row_index) {
         return;
@@ -2697,14 +3251,23 @@ fn update_nav_selection(state: &Rc<RefCell<UiState>>) {
 fn apply_track_filter(ui: &mut UiState, selected_key: Option<&str>) {
     let query = ui.search_query.to_lowercase();
     let artist_album_keys = ui.artist_filter.as_deref().map(|selected_artist_key| {
-        album_summaries(&ui.all_tracks, "")
-            .into_iter()
+        ui.library_albums
+            .iter()
             .filter(|album| artist_key(&album.artist) == selected_artist_key)
-            .map(|album| album.key)
+            .map(|album| album.key.clone())
             .collect::<HashSet<_>>()
     });
-    ui.tracks = ui
-        .all_tracks
+    let source_tracks = ui
+        .playlist_filter
+        .as_deref()
+        .and_then(|playlist_id| {
+            ui.playlists
+                .iter()
+                .find(|playlist| playlist.id == playlist_id)
+                .map(|playlist| playlist.tracks.as_slice())
+        })
+        .unwrap_or(ui.all_tracks.as_slice());
+    ui.tracks = source_tracks
         .iter()
         .filter(|track| {
             let album_matches = ui
@@ -2734,6 +3297,7 @@ fn apply_track_filter(ui: &mut UiState, selected_key: Option<&str>) {
         selected_key,
         &mut ui.selected_index,
     );
+    ui.track_filter_signature = ui.current_track_filter_signature();
     let selected_index = ui.selected_index;
     rebuild_playback_order(ui, selected_index);
 }
@@ -2741,14 +3305,16 @@ fn apply_track_filter(ui: &mut UiState, selected_key: Option<&str>) {
 fn update_page_summary(ui: &UiState) {
     if let Some(title) = ui.collection_detail_title.as_deref() {
         if ui.active_page == LibraryPage::Artists && ui.album_filter.is_none() {
-            let album_count = ui
+            let (album_count, song_count) = ui
                 .artist_filter
                 .as_deref()
-                .map(|artist_key| artist_album_count(&ui.all_tracks, artist_key))
-                .unwrap_or(0);
+                .map(|artist_key| {
+                    artist_album_song_counts_from(&ui.library_albums, artist_key, &ui.search_query)
+                })
+                .unwrap_or((0, 0));
             ui.page_summary.set_text(&format!(
                 "{title} | {}",
-                artist_count_text(album_count, ui.tracks.len())
+                artist_count_text(album_count, song_count)
             ));
             return;
         }
@@ -2763,16 +3329,16 @@ fn update_page_summary(ui: &UiState) {
                 .set_text(&format!("Tracks | {} tracks", ui.all_tracks.len()));
         }
         LibraryPage::Albums => {
-            ui.page_summary.set_text(&format!(
-                "Albums | {} albums",
-                album_summaries(&ui.all_tracks, "").len()
-            ));
+            ui.page_summary
+                .set_text(&format!("Albums | {} albums", ui.library_albums.len()));
         }
         LibraryPage::Artists => {
-            ui.page_summary.set_text(&format!(
-                "Artists | {} artists",
-                artist_summaries(&ui.all_tracks, "").len()
-            ));
+            ui.page_summary
+                .set_text(&format!("Artists | {} artists", ui.library_artists.len()));
+        }
+        LibraryPage::Playlists => {
+            ui.page_summary
+                .set_text(&format!("Playlists | {} playlists", ui.playlists.len()));
         }
     }
 }
@@ -2916,11 +3482,15 @@ fn apply_connection_payload(state: &Rc<RefCell<UiState>>, payload: ConnectionPay
     {
         let mut ui = state.borrow_mut();
         ui.all_tracks = payload.tracks;
+        ui.playlists = payload.playlists;
+        rebuild_library_summaries(&mut ui);
         ui.selected_index = 0;
+        ui.jellyfin_connected = true;
         ui.now_playing_key = None;
         ui.active_page = LibraryPage::Tracks;
         ui.album_filter = None;
         ui.artist_filter = None;
+        ui.playlist_filter = None;
         ui.collection_detail_title = None;
         ui.collection_detail_subtitle = None;
         apply_track_filter(&mut ui, None);
@@ -2938,9 +3508,12 @@ fn apply_connection_payload(state: &Rc<RefCell<UiState>>, payload: ConnectionPay
             payload.session.username,
             ui.all_tracks.len()
         ));
+        if let Some(button) = ui.refresh_button.as_ref() {
+            button.set_sensitive(true);
+        }
     }
     refresh_track_model(state);
-    refresh_collection_grids(state);
+    update_nav_counts(state);
     update_content_view(state);
     load_selected_cover_art(state);
     load_selected_waveform(state);
@@ -3469,7 +4042,7 @@ fn connect_and_fetch_payload(
         cache
             .save_jellyfin_session(&payload.session)
             .map_err(|error| error.to_string())?;
-        if let Err(error) = save_library_cache(&cache, &payload.session, &payload.tracks) {
+        if let Err(error) = save_library_cache(&cache, &payload.session, &payload) {
             tracing::warn!(%error, "failed to cache Jellyfin library");
         }
     }
@@ -3486,6 +4059,37 @@ fn fetch_saved_session(
     let _ = sender.send(ConnectionMessage::Finished(result));
 }
 
+fn refresh_saved_session(sender: mpsc::Sender<ConnectionMessage>, generation: u64) {
+    let result = refresh_saved_session_payload(Some(sender.clone()), generation);
+    let _ = sender.send(ConnectionMessage::Finished(result));
+}
+
+fn refresh_saved_session_payload(
+    sender: Option<mpsc::Sender<ConnectionMessage>>,
+    generation: u64,
+) -> Result<ConnectionPayload, String> {
+    let cache = CacheDatabase::open_default().map_err(|error| error.to_string())?;
+    let session = cache
+        .load_jellyfin_session()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "No saved Jellyfin session. Connect to Jellyfin first.".to_string())?;
+
+    let client = JellyfinClient::new(&session.server_url, Some(session.access_token.clone()))
+        .map_err(describe_jellyfin_error)?;
+
+    let payload = fetch_library_for_session(client, session, sender)?;
+    {
+        let _guard = CACHE_RESET_LOCK
+            .lock()
+            .map_err(|_| "cache reset lock is poisoned".to_string())?;
+        ensure_connection_generation_current(generation)?;
+        if let Err(error) = save_library_cache(&cache, &payload.session, &payload) {
+            tracing::warn!(%error, "failed to cache Jellyfin library");
+        }
+    }
+    Ok(payload)
+}
+
 fn fetch_saved_session_payload(
     session: JellyfinSession,
     sender: Option<mpsc::Sender<ConnectionMessage>>,
@@ -3493,9 +4097,13 @@ fn fetch_saved_session_payload(
 ) -> Result<ConnectionPayload, String> {
     let cache = CacheDatabase::open_default().map_err(|error| error.to_string())?;
     match load_library_cache(&cache, &session) {
-        Ok(Some(mut tracks)) => {
-            hydrate_stream_http_headers(&mut tracks, &session);
-            return Ok(ConnectionPayload { session, tracks });
+        Ok(Some(mut library)) => {
+            hydrate_cached_library(&mut library, &session);
+            return Ok(ConnectionPayload {
+                session,
+                tracks: library.tracks,
+                playlists: library.playlists,
+            });
         }
         Ok(None) => {}
         Err(error) => tracing::warn!(%error, "failed to load cached Jellyfin library"),
@@ -3510,7 +4118,7 @@ fn fetch_saved_session_payload(
             .lock()
             .map_err(|_| "cache reset lock is poisoned".to_string())?;
         ensure_connection_generation_current(generation)?;
-        if let Err(error) = save_library_cache(&cache, &payload.session, &payload.tracks) {
+        if let Err(error) = save_library_cache(&cache, &payload.session, &payload) {
             tracing::warn!(%error, "failed to cache Jellyfin library");
         }
     }
@@ -3541,7 +4149,30 @@ fn fetch_library_for_session(
         .map(|track| UiTrack::from_jellyfin(track, &client))
         .collect::<Vec<_>>();
 
-    Ok(ConnectionPayload { session, tracks })
+    let playlists = client
+        .music_playlists(&session.user_id)
+        .map_err(describe_jellyfin_error)?
+        .into_iter()
+        .map(|playlist| {
+            let playlist_tracks = client
+                .playlist_tracks(&session.user_id, &playlist.id)
+                .map_err(describe_jellyfin_error)?
+                .into_iter()
+                .map(|track| UiTrack::from_jellyfin(track, &client))
+                .collect::<Vec<_>>();
+            Ok(UiPlaylist::from_jellyfin(
+                playlist,
+                playlist_tracks,
+                &client,
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    Ok(ConnectionPayload {
+        session,
+        tracks,
+        playlists,
+    })
 }
 
 fn describe_jellyfin_error(error: JellyfinClientError) -> String {
@@ -3575,34 +4206,52 @@ fn describe_jellyfin_error(error: JellyfinClientError) -> String {
 fn save_library_cache(
     cache: &CacheDatabase,
     session: &JellyfinSession,
-    tracks: &[UiTrack],
+    payload: &ConnectionPayload,
 ) -> Result<(), crate::cache::CacheError> {
-    let json = serde_json::to_string(tracks)?;
+    let json = serde_json::to_string(&CachedLibrary {
+        tracks: payload.tracks.clone(),
+        playlists: payload.playlists.clone(),
+    })?;
     cache.set_setting(&library_cache_key(session), &json)
 }
 
 fn load_library_cache(
     cache: &CacheDatabase,
     session: &JellyfinSession,
-) -> Result<Option<Vec<UiTrack>>, crate::cache::CacheError> {
-    if let Some(tracks) = load_cached_tracks(cache, &library_cache_key(session))? {
-        if !tracks.is_empty() {
-            return Ok(Some(tracks));
+) -> Result<Option<CachedLibrary>, crate::cache::CacheError> {
+    if let Some(library) = load_cached_library(cache, &library_cache_key(session))? {
+        if !library.tracks.is_empty() || !library.playlists.is_empty() {
+            return Ok(Some(library));
         }
         tracing::warn!("ignoring empty Jellyfin library cache");
     }
 
-    if let Some(tracks) = load_cached_tracks(cache, &legacy_library_cache_key(session))? {
-        if !tracks.is_empty() {
-            if let Err(error) = save_library_cache(cache, session, &tracks) {
-                tracing::warn!(%error, "failed to migrate legacy Jellyfin library cache");
+    for key in [
+        legacy_library_cache_key_v3(session),
+        legacy_library_cache_key_v2(session),
+    ] {
+        if let Some(tracks) = load_cached_tracks(cache, &key)? {
+            if !tracks.is_empty() {
+                return Ok(Some(CachedLibrary {
+                    tracks,
+                    playlists: Vec::new(),
+                }));
             }
-            return Ok(Some(tracks));
+            tracing::warn!("ignoring empty legacy Jellyfin library cache");
         }
-        tracing::warn!("ignoring empty legacy Jellyfin library cache");
     }
 
     Ok(None)
+}
+
+fn load_cached_library(
+    cache: &CacheDatabase,
+    key: &str,
+) -> Result<Option<CachedLibrary>, crate::cache::CacheError> {
+    cache
+        .get_setting(key)?
+        .map(|json| serde_json::from_str(&json).map_err(crate::cache::CacheError::from))
+        .transpose()
 }
 
 fn load_cached_tracks(
@@ -3622,7 +4271,22 @@ fn hydrate_stream_http_headers(tracks: &mut [UiTrack], session: &JellyfinSession
     }
 }
 
+fn hydrate_cached_library(library: &mut CachedLibrary, session: &JellyfinSession) {
+    hydrate_stream_http_headers(&mut library.tracks, session);
+    for playlist in &mut library.playlists {
+        hydrate_stream_http_headers(&mut playlist.tracks, session);
+    }
+}
+
 fn library_cache_key(session: &JellyfinSession) -> String {
+    format!(
+        "jellyfin.library.v4.{}.{}",
+        library_cache_server_key(session),
+        session.user_id
+    )
+}
+
+fn legacy_library_cache_key_v3(session: &JellyfinSession) -> String {
     format!(
         "jellyfin.library.v3.{}.{}",
         library_cache_server_key(session),
@@ -3630,7 +4294,7 @@ fn library_cache_key(session: &JellyfinSession) -> String {
     )
 }
 
-fn legacy_library_cache_key(session: &JellyfinSession) -> String {
+fn legacy_library_cache_key_v2(session: &JellyfinSession) -> String {
     format!(
         "jellyfin.library.{}.{}",
         library_cache_server_key(session),
@@ -3823,6 +4487,30 @@ fn load_queue_art(
             Err(mpsc::TryRecvError::Disconnected) => gtk::glib::ControlFlow::Break,
         }
     });
+}
+
+fn load_collection_queue_art(
+    url: Option<String>,
+    image: gtk::Image,
+    current_url: Rc<RefCell<Option<String>>>,
+    tile_index: usize,
+) {
+    gtk::glib::timeout_add_local_once(collection_artwork_delay(tile_index), move || {
+        load_queue_art(url, image, current_url);
+    });
+}
+
+fn load_collection_picture_art(url: String, image: gtk::Image, tile_index: usize) {
+    gtk::glib::timeout_add_local_once(collection_artwork_delay(tile_index), move || {
+        load_picture_art(url, image);
+    });
+}
+
+fn collection_artwork_delay(tile_index: usize) -> Duration {
+    let stagger_index = tile_index.min(COLLECTION_ARTWORK_MAX_STAGGERED_ITEMS) as u64;
+    Duration::from_millis(
+        COLLECTION_ARTWORK_INITIAL_DELAY_MS + (stagger_index * COLLECTION_ARTWORK_STAGGER_MS),
+    )
 }
 
 fn load_picture_art(url: String, image: gtk::Image) {
@@ -4141,8 +4829,8 @@ fn nav_list(state: Rc<RefCell<UiState>>) -> gtk::ListBox {
         (
             "media-playlist-consecutive-symbolic",
             "Playlists",
-            LibraryPage::Tracks,
-            false,
+            LibraryPage::Playlists,
+            true,
         ),
     ];
 
@@ -4160,6 +4848,7 @@ fn nav_list(state: Rc<RefCell<UiState>>) -> gtk::ListBox {
             "Tracks" => state.borrow_mut().nav_track_count = Some(count.clone()),
             "Albums" => state.borrow_mut().nav_album_count = Some(count.clone()),
             "Artists" => state.borrow_mut().nav_artist_count = Some(count.clone()),
+            "Playlists" => state.borrow_mut().nav_playlist_count = Some(count.clone()),
             _ => count.set_text("-"),
         }
         line.append(&count);
@@ -4168,7 +4857,6 @@ fn nav_list(state: Rc<RefCell<UiState>>) -> gtk::ListBox {
         row.set_activatable(*enabled);
         if !enabled {
             row.set_sensitive(false);
-            row.set_tooltip_text(Some("Playlists coming soon"));
         }
         list.append(&row);
         if index == 0 {
@@ -4185,6 +4873,7 @@ fn nav_list(state: Rc<RefCell<UiState>>) -> gtk::ListBox {
             0 => set_library_page(&nav_state, LibraryPage::Tracks),
             1 => set_library_page(&nav_state, LibraryPage::Albums),
             2 => set_library_page(&nav_state, LibraryPage::Artists),
+            3 => set_library_page(&nav_state, LibraryPage::Playlists),
             _ => {}
         }
     });
@@ -4703,12 +5392,64 @@ mod tests {
         }
     }
 
+    fn test_track_with(
+        item_id: &str,
+        album_id: &str,
+        title: &str,
+        album: &str,
+        artist: &str,
+        album_artist: &str,
+    ) -> UiTrack {
+        UiTrack {
+            item_id: Some(item_id.to_string()),
+            album_id: Some(album_id.to_string()),
+            title: title.to_string(),
+            album: album.to_string(),
+            artist: artist.to_string(),
+            album_artist: Some(album_artist.to_string()),
+            ..test_track()
+        }
+    }
+
+    #[test]
+    fn collection_summaries_group_tracks_and_count_artist_albums() {
+        let tracks = vec![
+            test_track_with("track-1", "album-1", "First", "Beta", "Guest", "Artist B"),
+            test_track_with("track-2", "album-1", "Second", "Beta", "Guest", "Artist B"),
+            test_track_with(
+                "track-3", "album-2", "Third", "Alpha", "Artist A", "Artist A",
+            ),
+        ];
+
+        let albums = album_summaries(&tracks, "");
+        assert_eq!(albums.len(), 2);
+        assert_eq!(albums[0].name, "Alpha");
+        assert_eq!(albums[0].song_count, 1);
+        assert_eq!(albums[1].name, "Beta");
+        assert_eq!(albums[1].artist, "Artist B");
+        assert_eq!(albums[1].song_count, 2);
+
+        let artists = artist_summaries(&tracks, "");
+        assert_eq!(artists.len(), 2);
+        assert_eq!(artists[0].name, "Artist A");
+        assert_eq!(artists[0].album_count, 1);
+        assert_eq!(artists[0].song_count, 1);
+        assert_eq!(artists[1].name, "Artist B");
+        assert_eq!(artists[1].album_count, 1);
+        assert_eq!(artists[1].song_count, 2);
+
+        assert_eq!(
+            artist_album_song_counts_from(&albums, &artist_key("Artist B"), ""),
+            (1, 2)
+        );
+    }
+
     #[test]
     fn legacy_library_cache_migrates_and_hydrates_stream_headers() {
         let cache = CacheDatabase::open_memory().expect("in-memory cache opens");
         let session = test_session();
         let tracks = vec![test_track()];
-        let legacy_key = legacy_library_cache_key(&session);
+        let legacy_key = legacy_library_cache_key_v2(&session);
         cache
             .set_setting(
                 &legacy_key,
@@ -4719,20 +5460,18 @@ mod tests {
         let mut loaded = load_library_cache(&cache, &session)
             .expect("load library cache")
             .expect("tracks exist");
-        hydrate_stream_http_headers(&mut loaded, &session);
+        hydrate_cached_library(&mut loaded, &session);
 
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].title, "Song");
-        assert_eq!(loaded[0].fallback_stream_url, tracks[0].fallback_stream_url);
+        assert_eq!(loaded.tracks.len(), 1);
+        assert_eq!(loaded.tracks[0].title, "Song");
+        assert!(loaded.playlists.is_empty());
         assert_eq!(
-            loaded[0].stream_http_headers,
-            vec![("X-Emby-Token".to_string(), "token".to_string())]
+            loaded.tracks[0].fallback_stream_url,
+            tracks[0].fallback_stream_url
         );
-        assert!(
-            cache
-                .get_setting(&library_cache_key(&session))
-                .expect("read migrated cache")
-                .is_some()
+        assert_eq!(
+            loaded.tracks[0].stream_http_headers,
+            vec![("X-Emby-Token".to_string(), "token".to_string())]
         );
     }
 
@@ -4743,7 +5482,11 @@ mod tests {
         cache
             .set_setting(
                 &library_cache_key(&session),
-                &serde_json::to_string(&Vec::<UiTrack>::new()).expect("serialize"),
+                &serde_json::to_string(&CachedLibrary {
+                    tracks: Vec::new(),
+                    playlists: Vec::new(),
+                })
+                .expect("serialize"),
             )
             .expect("write empty cache");
 
@@ -4751,6 +5494,40 @@ mod tests {
             load_library_cache(&cache, &session)
                 .expect("load library cache")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn library_cache_round_trips_playlists_and_hydrates_headers() {
+        let cache = CacheDatabase::open_memory().expect("in-memory cache opens");
+        let session = test_session();
+        let track = test_track();
+        let playlist = UiPlaylist {
+            id: "playlist-id".to_string(),
+            name: "Favorites".to_string(),
+            artwork_url: None,
+            thumbnail_artwork_url: None,
+            tracks: vec![track.clone()],
+        };
+        let payload = ConnectionPayload {
+            session: session.clone(),
+            tracks: vec![track],
+            playlists: vec![playlist],
+        };
+
+        save_library_cache(&cache, &session, &payload).expect("save library cache");
+        let mut loaded = load_library_cache(&cache, &session)
+            .expect("load library cache")
+            .expect("library exists");
+        hydrate_cached_library(&mut loaded, &session);
+
+        assert_eq!(loaded.tracks.len(), 1);
+        assert_eq!(loaded.playlists.len(), 1);
+        assert_eq!(loaded.playlists[0].name, "Favorites");
+        assert_eq!(loaded.playlists[0].tracks.len(), 1);
+        assert_eq!(
+            loaded.playlists[0].tracks[0].stream_http_headers,
+            vec![("X-Emby-Token".to_string(), "token".to_string())]
         );
     }
 

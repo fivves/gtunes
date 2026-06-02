@@ -6,9 +6,10 @@ use url::Url;
 
 use crate::config;
 
-use super::models::{JellyfinAuthResponse, JellyfinItemsResponse, JellyfinTrack};
+use super::models::{JellyfinAuthResponse, JellyfinItemsResponse, JellyfinPlaylist, JellyfinTrack};
 
 const MUSIC_TRACK_PAGE_SIZE: u32 = 500;
+const PLAYLIST_PAGE_SIZE: u32 = 200;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Error)]
@@ -209,6 +210,133 @@ impl JellyfinClient {
             )
             .append_pair("SortBy", "SortName")
             .append_pair("SortOrder", "Ascending")
+            .append_pair("StartIndex", &start_index.to_string())
+            .append_pair("Limit", &limit.to_string());
+
+        let response = self
+            .blocking_http
+            .get(endpoint)
+            .send()?
+            .error_for_status()?
+            .json::<JellyfinItemsResponse<JellyfinTrack>>()?;
+        Ok(response)
+    }
+
+    pub fn music_playlists(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<JellyfinPlaylist>, JellyfinClientError> {
+        let mut playlists = Vec::new();
+        let mut start_index = 0;
+        let mut total_record_count = None;
+
+        loop {
+            let response = self.music_playlists_page(user_id, start_index, PLAYLIST_PAGE_SIZE)?;
+            let page_len = response.items.len();
+
+            if total_record_count.is_none() {
+                total_record_count = response
+                    .total_record_count
+                    .map(|count| count.max(0) as usize);
+            }
+
+            playlists.extend(response.items);
+
+            let reached_total = total_record_count
+                .map(|total| playlists.len() >= total)
+                .unwrap_or(false);
+            if page_len == 0 || reached_total || page_len < PLAYLIST_PAGE_SIZE as usize {
+                break;
+            }
+
+            start_index += page_len as u32;
+        }
+
+        Ok(playlists)
+    }
+
+    fn music_playlists_page(
+        &self,
+        user_id: &str,
+        start_index: u32,
+        limit: u32,
+    ) -> Result<JellyfinItemsResponse<JellyfinPlaylist>, JellyfinClientError> {
+        let mut endpoint = self.server_url.join(&format!("Users/{user_id}/Items"))?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("Recursive", "true")
+            .append_pair("IncludeItemTypes", "Playlist")
+            .append_pair("SortBy", "SortName")
+            .append_pair("SortOrder", "Ascending")
+            .append_pair("StartIndex", &start_index.to_string())
+            .append_pair("Limit", &limit.to_string());
+
+        let response = self
+            .blocking_http
+            .get(endpoint)
+            .send()?
+            .error_for_status()?
+            .json::<JellyfinItemsResponse<JellyfinPlaylist>>()?;
+        Ok(response)
+    }
+
+    pub fn playlist_tracks(
+        &self,
+        user_id: &str,
+        playlist_id: &str,
+    ) -> Result<Vec<JellyfinTrack>, JellyfinClientError> {
+        let mut tracks = Vec::new();
+        let mut start_index = 0;
+        let mut total_record_count = None;
+
+        loop {
+            let response = self.playlist_tracks_page(
+                user_id,
+                playlist_id,
+                start_index,
+                MUSIC_TRACK_PAGE_SIZE,
+            )?;
+            let page_len = response.items.len();
+
+            if total_record_count.is_none() {
+                total_record_count = response
+                    .total_record_count
+                    .map(|count| count.max(0) as usize);
+            }
+
+            tracks.extend(response.items);
+
+            let reached_total = total_record_count
+                .map(|total| tracks.len() >= total)
+                .unwrap_or(false);
+            if page_len == 0 || reached_total || page_len < MUSIC_TRACK_PAGE_SIZE as usize {
+                break;
+            }
+
+            start_index += page_len as u32;
+        }
+
+        Ok(tracks)
+    }
+
+    fn playlist_tracks_page(
+        &self,
+        user_id: &str,
+        playlist_id: &str,
+        start_index: u32,
+        limit: u32,
+    ) -> Result<JellyfinItemsResponse<JellyfinTrack>, JellyfinClientError> {
+        let mut endpoint = self
+            .server_url
+            .join(&format!("Playlists/{playlist_id}/Items"))?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("UserId", user_id)
+            .append_pair("IncludeItemTypes", "Audio")
+            .append_pair(
+                "Fields",
+                "MediaSources,Genres,DateCreated,ArtistItems,AlbumArtists",
+            )
             .append_pair("StartIndex", &start_index.to_string())
             .append_pair("Limit", &limit.to_string());
 
