@@ -13,6 +13,9 @@ use super::models::{
 
 const MUSIC_TRACK_PAGE_SIZE: u32 = 500;
 const PLAYLIST_PAGE_SIZE: u32 = 200;
+
+const MUSIC_TRACK_FIELDS: &str = "MediaSources,Genres,DateCreated,DateLastSaved,ArtistItems,AlbumArtists,ParentIndexNumber,IndexNumber";
+const MUSIC_TRACK_SORT: &str = "Album,ParentIndexNumber,IndexNumber,SortName";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Error)]
@@ -249,11 +252,8 @@ impl JellyfinClient {
             .query_pairs_mut()
             .append_pair("Recursive", "true")
             .append_pair("IncludeItemTypes", "Audio")
-            .append_pair(
-                "Fields",
-                "MediaSources,Genres,DateCreated,DateLastSaved,ArtistItems,AlbumArtists",
-            )
-            .append_pair("SortBy", "SortName")
+            .append_pair("Fields", MUSIC_TRACK_FIELDS)
+            .append_pair("SortBy", MUSIC_TRACK_SORT)
             .append_pair("SortOrder", "Ascending")
             .append_pair("StartIndex", &start_index.to_string())
             .append_pair("Limit", &limit.to_string());
@@ -279,7 +279,7 @@ impl JellyfinClient {
             .append_pair("Recursive", "true")
             .append_pair("IncludeItemTypes", "Audio")
             .append_pair("Fields", "DateLastSaved")
-            .append_pair("SortBy", "SortName")
+            .append_pair("SortBy", MUSIC_TRACK_SORT)
             .append_pair("SortOrder", "Ascending")
             .append_pair("StartIndex", &start_index.to_string())
             .append_pair("Limit", &limit.to_string());
@@ -308,11 +308,8 @@ impl JellyfinClient {
             .append_pair("Recursive", "true")
             .append_pair("IncludeItemTypes", "Audio")
             .append_pair("Ids", &ids.join(","))
-            .append_pair(
-                "Fields",
-                "MediaSources,Genres,DateCreated,DateLastSaved,ArtistItems,AlbumArtists",
-            )
-            .append_pair("SortBy", "SortName")
+            .append_pair("Fields", MUSIC_TRACK_FIELDS)
+            .append_pair("SortBy", MUSIC_TRACK_SORT)
             .append_pair("SortOrder", "Ascending")
             .append_pair("Limit", &ids.len().to_string());
 
@@ -502,7 +499,7 @@ impl JellyfinClient {
             .append_pair("IncludeItemTypes", "Audio")
             .append_pair(
                 "Fields",
-                "MediaSources,Genres,DateCreated,ArtistItems,AlbumArtists",
+                "MediaSources,Genres,DateCreated,ArtistItems,AlbumArtists,ParentIndexNumber,IndexNumber",
             )
             .append_pair("StartIndex", &start_index.to_string())
             .append_pair("Limit", &limit.to_string());

@@ -49,6 +49,8 @@ struct UiTrack {
     album: String,
     disc_number: Option<i32>,
     track_number: Option<i32>,
+    #[serde(default)]
+    album_position: Option<usize>,
     duration: String,
     quality: String,
 }
@@ -362,6 +364,7 @@ impl UiTrack {
             album: track.album.unwrap_or_else(|| "Unknown Album".to_string()),
             disc_number: track.parent_index_number,
             track_number: track.index_number,
+            album_position: None,
             duration: format_runtime(track.run_time_ticks),
             quality,
         }
@@ -2308,6 +2311,15 @@ fn rebuild_library_summaries(ui: &mut UiState) {
     ui.library_artists = artist_summaries(&ui.all_tracks, "");
 }
 
+fn assign_album_positions(tracks: &mut [UiTrack]) {
+    let mut album_counts = HashMap::<String, usize>::new();
+    for track in tracks {
+        let position = album_counts.entry(album_key(track)).or_default();
+        track.album_position = Some(*position);
+        *position += 1;
+    }
+}
+
 fn filter_playlists(playlists: &[UiPlaylist], query: &str) -> Vec<UiPlaylist> {
     let query = query.trim().to_lowercase();
     let mut playlists = playlists
@@ -2872,6 +2884,7 @@ fn sort_track_slice(
     column: SortColumn,
     ascending: bool,
     search_query: &str,
+    album_order_first: bool,
     selected_key: Option<&str>,
     selected_index: &mut usize,
 ) {
@@ -2884,7 +2897,7 @@ fn sort_track_slice(
                 .cmp(&exact_title_match_rank(right, &normalized_query))
         };
 
-        let ordering = match column {
+        let column_ordering = match column {
             SortColumn::Title => compare_text(&left.title, &right.title),
             SortColumn::Artist => compare_artist_album_track(left, right),
             SortColumn::Album => compare_text(&left.album, &right.album),
@@ -2893,13 +2906,16 @@ fn sort_track_slice(
             }
         };
 
-        let ordering = exact_match_ordering
-            .then(ordering)
-            .then_with(|| compare_text(&left.title, &right.title))
-            .then_with(|| compare_text(&left.artist, &right.artist))
-            .then_with(|| compare_text(&left.album, &right.album));
+        let ordering = if album_order_first {
+            compare_album_track_order(left, right).then(exact_match_ordering)
+        } else {
+            exact_match_ordering.then(column_ordering)
+        }
+        .then_with(|| compare_text(&left.title, &right.title))
+        .then_with(|| compare_text(&left.artist, &right.artist))
+        .then_with(|| compare_text(&left.album, &right.album));
 
-        if ascending {
+        if ascending || album_order_first {
             ordering
         } else {
             ordering.reverse()
@@ -3339,6 +3355,7 @@ fn apply_track_filter(ui: &mut UiState, selected_key: Option<&str>) {
         ui.sort_column,
         ui.sort_ascending,
         &ui.search_query,
+        ui.album_filter.is_some(),
         selected_key,
         &mut ui.selected_index,
     );
@@ -3501,6 +3518,23 @@ fn compare_artist_album_track(left: &UiTrack, right: &UiTrack) -> Ordering {
         .then_with(|| compare_optional_i32(left.disc_number, right.disc_number))
         .then_with(|| compare_optional_i32(left.track_number, right.track_number))
         .then_with(|| compare_text(&left.title, &right.title))
+}
+
+fn compare_album_track_order(left: &UiTrack, right: &UiTrack) -> Ordering {
+    compare_optional_usize(left.album_position, right.album_position)
+        .then_with(|| compare_optional_i32(left.disc_number, right.disc_number))
+        .then_with(|| compare_optional_i32(left.track_number, right.track_number))
+        .then_with(|| compare_text(&left.title, &right.title))
+        .then_with(|| compare_text(&left.artist, &right.artist))
+}
+
+fn compare_optional_usize(left: Option<usize>, right: Option<usize>) -> Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
 }
 
 fn compare_optional_i32(left: Option<i32>, right: Option<i32>) -> Ordering {
@@ -4195,6 +4229,14 @@ fn refresh_saved_session_payload(
         .map(|mut library| {
             hydrate_cached_library(&mut library, &session);
             library
+        })
+        .filter(|library| {
+            if library_needs_album_order_refresh(library) {
+                send_connection_status(sender.as_ref(), "Refreshing album order metadata");
+                false
+            } else {
+                true
+            }
         });
 
     let payload = if let Some(cached_library) = cached_library {
@@ -4223,11 +4265,14 @@ fn fetch_saved_session_payload(
     match load_library_cache(&cache, &session) {
         Ok(Some(mut library)) => {
             hydrate_cached_library(&mut library, &session);
-            return Ok(ConnectionPayload {
-                session,
-                tracks: library.tracks,
-                playlists: library.playlists,
-            });
+            if !library_needs_album_order_refresh(&library) {
+                return Ok(ConnectionPayload {
+                    session,
+                    tracks: library.tracks,
+                    playlists: library.playlists,
+                });
+            }
+            send_connection_status(sender.as_ref(), "Refreshing album order metadata");
         }
         Ok(None) => {}
         Err(error) => tracing::warn!(%error, "failed to load cached Jellyfin library"),
@@ -4262,7 +4307,7 @@ fn fetch_library_for_session(
     session: JellyfinSession,
     sender: Option<mpsc::Sender<ConnectionMessage>>,
 ) -> Result<ConnectionPayload, String> {
-    let tracks = client
+    let mut tracks = client
         .music_tracks_with_progress(&session.user_id, |loaded, total| {
             if let Some(sender) = sender.as_ref() {
                 let _ = sender.send(ConnectionMessage::Progress { loaded, total });
@@ -4272,6 +4317,7 @@ fn fetch_library_for_session(
         .into_iter()
         .map(|track| UiTrack::from_jellyfin(track, &client))
         .collect::<Vec<_>>();
+    assign_album_positions(&mut tracks);
 
     let playlists = client
         .music_playlists(&session.user_id)
@@ -4362,6 +4408,7 @@ fn fetch_incremental_library_for_session(
             tracks.push(track);
         }
     }
+    assign_album_positions(&mut tracks);
 
     send_connection_status(sender.as_ref(), "Scanning Jellyfin playlists");
     let playlist_summaries = client
@@ -4597,6 +4644,23 @@ fn hydrate_cached_library(library: &mut CachedLibrary, session: &JellyfinSession
     for playlist in &mut library.playlists {
         hydrate_stream_http_headers(&mut playlist.tracks, session);
     }
+}
+
+fn library_needs_album_order_refresh(library: &CachedLibrary) -> bool {
+    let mut album_order_metadata = HashMap::<String, (usize, bool)>::new();
+    for track in &library.tracks {
+        let (count, has_order_metadata) = album_order_metadata
+            .entry(album_key(track))
+            .or_insert((0, true));
+        *count += 1;
+        *has_order_metadata &= track.album_position.is_some()
+            || track.disc_number.is_some()
+            || track.track_number.is_some();
+    }
+
+    album_order_metadata
+        .values()
+        .any(|(count, has_order_metadata)| *count > 1 && !*has_order_metadata)
 }
 
 fn library_cache_key(session: &JellyfinSession) -> String {
@@ -5976,6 +6040,7 @@ mod tests {
             album: "Album".to_string(),
             disc_number: Some(1),
             track_number: Some(2),
+            album_position: None,
             duration: "3:04".to_string(),
             quality: "FLAC".to_string(),
         }
@@ -5997,6 +6062,43 @@ mod tests {
             album: album.to_string(),
             artist: artist.to_string(),
             album_artist: Some(album_artist.to_string()),
+            ..test_track()
+        }
+    }
+
+    fn numbered_album_track(
+        item_id: &str,
+        title: &str,
+        artist: &str,
+        track_number: i32,
+    ) -> UiTrack {
+        UiTrack {
+            item_id: Some(item_id.to_string()),
+            title: title.to_string(),
+            artist: artist.to_string(),
+            album: "Mixed Artist Album".to_string(),
+            album_artist: Some("Main Artist".to_string()),
+            disc_number: Some(1),
+            track_number: Some(track_number),
+            ..test_track()
+        }
+    }
+
+    fn positioned_album_track(
+        item_id: &str,
+        title: &str,
+        artist: &str,
+        album_position: usize,
+    ) -> UiTrack {
+        UiTrack {
+            item_id: Some(item_id.to_string()),
+            title: title.to_string(),
+            artist: artist.to_string(),
+            album: "Mixed Artist Album".to_string(),
+            album_artist: Some("Main Artist".to_string()),
+            disc_number: None,
+            track_number: None,
+            album_position: Some(album_position),
             ..test_track()
         }
     }
@@ -6032,6 +6134,90 @@ mod tests {
             artist_album_song_counts_from(&albums, &artist_key("Artist B"), ""),
             (1, 2)
         );
+    }
+
+    #[test]
+    fn album_track_sort_preserves_track_order_before_artist_order() {
+        let mut tracks = vec![
+            numbered_album_track("track-3", "Third", "Main Artist", 3),
+            numbered_album_track("track-1", "First", "Main Artist", 1),
+            numbered_album_track("track-2", "Second", "ZZ Guest", 2),
+        ];
+        let mut selected_index = 0;
+
+        sort_track_slice(
+            &mut tracks,
+            SortColumn::Artist,
+            true,
+            "",
+            true,
+            None,
+            &mut selected_index,
+        );
+
+        let track_ids = tracks
+            .iter()
+            .map(|track| track.item_id.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            track_ids,
+            vec![Some("track-1"), Some("track-2"), Some("track-3")]
+        );
+    }
+
+    #[test]
+    fn album_track_sort_preserves_source_album_position_without_track_numbers() {
+        let mut tracks = vec![
+            positioned_album_track("track-3", "Third", "Main Artist", 2),
+            positioned_album_track("track-1", "First", "Main Artist", 0),
+            positioned_album_track("track-2", "Second", "ZZ Guest", 1),
+        ];
+        let mut selected_index = 0;
+
+        sort_track_slice(
+            &mut tracks,
+            SortColumn::Artist,
+            true,
+            "",
+            true,
+            None,
+            &mut selected_index,
+        );
+
+        let track_ids = tracks
+            .iter()
+            .map(|track| track.item_id.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            track_ids,
+            vec![Some("track-1"), Some("track-2"), Some("track-3")]
+        );
+    }
+
+    #[test]
+    fn cached_library_without_album_order_metadata_requires_refresh() {
+        let library = CachedLibrary {
+            tracks: vec![
+                UiTrack {
+                    album: "Album".to_string(),
+                    disc_number: None,
+                    track_number: None,
+                    album_position: None,
+                    ..test_track()
+                },
+                UiTrack {
+                    item_id: Some("track-2".to_string()),
+                    album: "Album".to_string(),
+                    disc_number: None,
+                    track_number: None,
+                    album_position: None,
+                    ..test_track()
+                },
+            ],
+            playlists: Vec::new(),
+        };
+
+        assert!(library_needs_album_order_refresh(&library));
     }
 
     #[test]
