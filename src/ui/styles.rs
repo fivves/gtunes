@@ -490,11 +490,6 @@ window {
   font-weight: 900;
 }
 
-.context-rail {
-  border-left: 1px solid @borders;
-  background: @window_bg_color;
-}
-
 .rail-header {
   padding: 14px 16px 13px;
   border-bottom: 1px solid @borders;

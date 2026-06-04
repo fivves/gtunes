@@ -257,11 +257,7 @@ enum ConnectionMessage {
     Finished(Result<ConnectionPayload, String>),
 }
 
-const CONTEXT_RAIL_EXPANDED_WIDTH: i32 = 320;
 const CONTEXT_RAIL_EDGE_INSET: i32 = 18;
-const COMPACT_BODY_BREAKPOINT: i32 = 680;
-const SIDEBAR_COVER_BREAKPOINT: i32 = 660;
-const SIDEBAR_QUEUE_BREAKPOINT: i32 = 500;
 const LEFT_SIDEBAR_CONTENT_WIDTH: i32 = 220;
 const LEFT_SIDEBAR_WIDTH: i32 = LEFT_SIDEBAR_CONTENT_WIDTH + 20;
 const ACTION_PANEL_WIDTH: i32 = 130;
@@ -552,11 +548,9 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         mpris: None,
     }));
 
-    let (context_toggle, context_revealer) = context_rail_toggle_button();
-
     setup_mpris(state.clone());
-    root.append(&build_player_bar(state.clone(), context_toggle.clone()));
-    root.append(&build_body(state.clone(), context_revealer, context_toggle));
+    root.append(&build_player_bar(state.clone()));
+    root.append(&build_body(state.clone()));
     root.append(&build_bottom_bar(state.clone()));
     connect_app_shortcuts(&root, state.clone());
     load_selected_waveform(&state);
@@ -736,7 +730,7 @@ fn update_mpris_metadata(ui: &mut UiState) {
     }
 }
 
-fn build_player_bar(state: Rc<RefCell<UiState>>, context_toggle: gtk::Button) -> gtk::Box {
+fn build_player_bar(state: Rc<RefCell<UiState>>) -> gtk::Box {
     let player = gtk::Box::new(Orientation::Horizontal, 14);
     player.add_css_class("player-bar");
     player.set_valign(Align::Start);
@@ -911,9 +905,6 @@ fn build_player_bar(state: Rc<RefCell<UiState>>, context_toggle: gtk::Button) ->
         });
     }
     utility_row.append(&settings);
-
-    context_toggle.add_css_class("toolbar-button");
-    utility_row.append(&context_toggle);
 
     actions.add_overlay(&utility_row);
 
@@ -1159,53 +1150,19 @@ fn apply_first_time_setup_state(state: &Rc<RefCell<UiState>>) {
     update_content_view(state);
 }
 
-fn build_body(
-    state: Rc<RefCell<UiState>>,
-    context_revealer: gtk::Revealer,
-    context_toggle: gtk::Button,
-) -> gtk::Box {
+fn build_body(state: Rc<RefCell<UiState>>) -> gtk::Box {
     let outer = gtk::Box::new(Orientation::Horizontal, 0);
     outer.add_css_class("main-paned");
     outer.set_hexpand(true);
     outer.set_vexpand(true);
 
-    let (sidebar, sidebar_queue, sidebar_cover) = build_sidebar(state.clone());
+    let (sidebar, _sidebar_queue, _sidebar_cover) = build_sidebar(state.clone());
     sidebar.set_size_request(LEFT_SIDEBAR_WIDTH, -1);
     sidebar.set_hexpand(false);
     outer.append(&sidebar);
 
-    let inner = gtk::Overlay::new();
-    inner.set_hexpand(true);
-    inner.set_vexpand(true);
     let content = build_content(state.clone());
-    inner.set_child(Some(&content));
-    let context_rail = build_context_rail(state);
-    context_revealer.set_halign(Align::End);
-    context_revealer.set_valign(Align::Fill);
-    context_revealer.set_vexpand(true);
-    context_revealer.set_child(Some(&context_rail));
-    context_revealer.set_reveal_child(false);
-    inner.add_overlay(&context_revealer);
-
-    outer.append(&inner);
-    connect_context_rail_toggle(
-        &context_toggle,
-        &context_revealer,
-        &context_rail,
-        &sidebar,
-        &sidebar_queue,
-        &sidebar_cover,
-        &outer,
-    );
-    connect_context_rail_shortcut(
-        &context_toggle,
-        &context_revealer,
-        &context_rail,
-        &sidebar,
-        &sidebar_queue,
-        &sidebar_cover,
-        &outer,
-    );
+    outer.append(&content);
     outer
 }
 
@@ -1585,48 +1542,6 @@ fn library_progress_text(loaded: usize, total: Option<usize>) -> String {
         Some(total) if total > 0 => format!("Loading full library: {loaded} of {total} tracks"),
         _ => format!("Loading full library: {loaded} tracks"),
     }
-}
-
-fn build_context_rail(_state: Rc<RefCell<UiState>>) -> gtk::Box {
-    let rail = gtk::Box::new(Orientation::Vertical, 0);
-    rail.add_css_class("context-rail");
-    rail.set_hexpand(false);
-    rail.set_size_request(0, -1);
-
-    let header = gtk::Box::new(Orientation::Vertical, 8);
-    header.add_css_class("rail-header");
-    let title_row = gtk::Box::new(Orientation::Horizontal, 8);
-    title_row.append(&label("Lyrics", "rail-title"));
-    let spacer = gtk::Box::new(Orientation::Horizontal, 0);
-    spacer.set_hexpand(true);
-    title_row.append(&spacer);
-    title_row.append(&pill("Jellyfin"));
-    header.append(&title_row);
-    rail.append(&header);
-
-    let placeholder = gtk::Box::new(Orientation::Vertical, 8);
-    placeholder.add_css_class("placeholder");
-    let microphone = gtk::Image::from_icon_name("audio-input-microphone-symbolic");
-    microphone.add_css_class("placeholder-icon");
-    microphone.set_pixel_size(28);
-    microphone.set_halign(Align::Start);
-    placeholder.append(&microphone);
-    placeholder.append(&label("Lyrics coming soon", "rail-title"));
-    let copy = label(
-        "Jellyfin lyrics and LRC sync will land after playback.",
-        "meta",
-    );
-    copy.set_wrap(true);
-    copy.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-    copy.set_width_chars(24);
-    copy.set_max_width_chars(28);
-    placeholder.append(&copy);
-    rail.append(&placeholder);
-
-    let spacer = gtk::Box::new(Orientation::Vertical, 0);
-    spacer.set_vexpand(true);
-    rail.append(&spacer);
-    rail
 }
 
 #[derive(Clone, Debug)]
@@ -5247,212 +5162,6 @@ fn poll_reconnect_result(
     });
 }
 
-fn context_rail_toggle_button() -> (gtk::Button, gtk::Revealer) {
-    let button = icon_button("audio-input-microphone-symbolic", "Show lyrics");
-    let revealer = gtk::Revealer::builder()
-        .transition_type(gtk::RevealerTransitionType::SlideLeft)
-        .transition_duration(180)
-        .build();
-    (button, revealer)
-}
-
-fn connect_context_rail_toggle(
-    button: &gtk::Button,
-    revealer: &gtk::Revealer,
-    rail: &gtk::Box,
-    sidebar: &gtk::Box,
-    sidebar_queue: &gtk::Box,
-    sidebar_cover: &gtk::Box,
-    layout_root: &gtk::Box,
-) {
-    let button = button.clone();
-    let closure_button = button.clone();
-    let revealer = revealer.clone();
-    let rail = rail.clone();
-    let closure_rail = rail.clone();
-    let closure_sidebar = sidebar.clone();
-    let closure_sidebar_queue = sidebar_queue.clone();
-    let closure_sidebar_cover = sidebar_cover.clone();
-    let closure_layout_root = layout_root.clone();
-    let closure_revealer = revealer.clone();
-    button.connect_clicked(move |_| {
-        let expanded = !closure_revealer.reveals_child();
-        set_context_rail_expanded(
-            expanded,
-            &closure_button,
-            &closure_revealer,
-            &closure_rail,
-            &closure_sidebar,
-            &closure_sidebar_queue,
-            &closure_sidebar_cover,
-            &closure_layout_root,
-        );
-    });
-
-    let resize_revealer = revealer.clone();
-    let resize_rail = rail.clone();
-    let resize_sidebar = sidebar.clone();
-    let resize_sidebar_queue = sidebar_queue.clone();
-    let resize_sidebar_cover = sidebar_cover.clone();
-    layout_root.connect_notify_local(Some("width"), move |layout_root, _| {
-        apply_body_responsive_layout(
-            &resize_sidebar,
-            &resize_sidebar_queue,
-            &resize_sidebar_cover,
-            layout_root,
-        );
-        apply_context_rail_layout(&resize_revealer, &resize_rail, &resize_sidebar, layout_root);
-    });
-
-    let tick_revealer = revealer.clone();
-    let tick_rail = rail.clone();
-    let tick_sidebar = sidebar.clone();
-    let tick_sidebar_queue = sidebar_queue.clone();
-    let tick_sidebar_cover = sidebar_cover.clone();
-    let last_size = Rc::new(RefCell::new((0, 0)));
-    let tick_last_size = last_size.clone();
-    layout_root.add_tick_callback(move |layout_root, _| {
-        let width = layout_root.allocated_width();
-        let height = layout_root.allocated_height();
-        let mut last_size = tick_last_size.borrow_mut();
-        if (width, height) != *last_size {
-            *last_size = (width, height);
-            apply_body_responsive_layout(
-                &tick_sidebar,
-                &tick_sidebar_queue,
-                &tick_sidebar_cover,
-                layout_root,
-            );
-            apply_context_rail_layout(&tick_revealer, &tick_rail, &tick_sidebar, layout_root);
-        }
-        gtk::glib::ControlFlow::Continue
-    });
-
-    rail.set_size_request(0, -1);
-    apply_body_responsive_layout(sidebar, sidebar_queue, sidebar_cover, layout_root);
-    apply_context_rail_layout(&revealer, &rail, sidebar, layout_root);
-    update_context_rail_toggle_button(&button, false);
-}
-
-fn connect_context_rail_shortcut(
-    button: &gtk::Button,
-    revealer: &gtk::Revealer,
-    rail: &gtk::Box,
-    sidebar: &gtk::Box,
-    sidebar_queue: &gtk::Box,
-    sidebar_cover: &gtk::Box,
-    layout_root: &gtk::Box,
-) {
-    let controller = gtk::EventControllerKey::new();
-    controller.set_propagation_phase(gtk::PropagationPhase::Capture);
-
-    let button = button.clone();
-    let revealer = revealer.clone();
-    let rail = rail.clone();
-    let sidebar = sidebar.clone();
-    let sidebar_queue = sidebar_queue.clone();
-    let sidebar_cover = sidebar_cover.clone();
-    let layout_root = layout_root.clone();
-    let controller_root = layout_root.clone();
-    controller.connect_key_pressed(move |_, key, _, state| {
-        if state.contains(gtk::gdk::ModifierType::CONTROL_MASK)
-            && (key == gtk::gdk::Key::L || key == gtk::gdk::Key::l)
-        {
-            let expanded = !revealer.reveals_child();
-            set_context_rail_expanded(
-                expanded,
-                &button,
-                &revealer,
-                &rail,
-                &sidebar,
-                &sidebar_queue,
-                &sidebar_cover,
-                &layout_root,
-            );
-            return gtk::glib::Propagation::Stop;
-        }
-
-        gtk::glib::Propagation::Proceed
-    });
-
-    controller_root.add_controller(controller);
-}
-
-#[allow(clippy::too_many_arguments)]
-fn set_context_rail_expanded(
-    expanded: bool,
-    button: &gtk::Button,
-    revealer: &gtk::Revealer,
-    rail: &gtk::Box,
-    sidebar: &gtk::Box,
-    sidebar_queue: &gtk::Box,
-    sidebar_cover: &gtk::Box,
-    layout_root: &gtk::Box,
-) {
-    revealer.set_reveal_child(expanded);
-    apply_body_responsive_layout(sidebar, sidebar_queue, sidebar_cover, layout_root);
-    apply_context_rail_layout(revealer, rail, sidebar, layout_root);
-    update_context_rail_toggle_button(button, expanded);
-}
-
-fn apply_context_rail_layout(
-    revealer: &gtk::Revealer,
-    rail: &gtk::Box,
-    sidebar: &gtk::Box,
-    layout_root: &impl IsA<gtk::Widget>,
-) {
-    if !revealer.reveals_child() {
-        rail.set_size_request(0, -1);
-        return;
-    }
-
-    let width = context_rail_width(layout_root, sidebar);
-    rail.set_size_request(width, -1);
-}
-
-fn apply_body_responsive_layout(
-    sidebar: &gtk::Box,
-    sidebar_queue: &gtk::Box,
-    sidebar_cover: &gtk::Box,
-    layout_root: &impl IsA<gtk::Widget>,
-) {
-    let width = layout_root.allocated_width();
-    let height = layout_root.allocated_height();
-    if width <= 0 {
-        return;
-    }
-
-    let compact = width < COMPACT_BODY_BREAKPOINT;
-    sidebar.set_visible(!compact);
-    sidebar_queue.set_visible(!compact && height >= SIDEBAR_QUEUE_BREAKPOINT);
-    sidebar_cover.set_visible(!compact && height >= SIDEBAR_COVER_BREAKPOINT);
-}
-
-fn context_rail_width(layout_root: &impl IsA<gtk::Widget>, sidebar: &gtk::Box) -> i32 {
-    let sidebar_width = if sidebar.is_visible() {
-        LEFT_SIDEBAR_WIDTH
-    } else {
-        0
-    };
-    let available = layout_root.allocated_width() - sidebar_width;
-    available.clamp(0, CONTEXT_RAIL_EXPANDED_WIDTH)
-}
-
-fn update_context_rail_toggle_button(button: &gtk::Button, expanded: bool) {
-    let icon_name = if expanded {
-        "go-next-symbolic"
-    } else {
-        "go-previous-symbolic"
-    };
-    let tooltip = if expanded {
-        "Hide lyrics panel"
-    } else {
-        "Show lyrics panel"
-    };
-    button.set_icon_name(icon_name);
-    button.set_tooltip_text(Some(tooltip));
-}
-
 fn nav_list(state: Rc<RefCell<UiState>>) -> gtk::ListBox {
     let list = gtk::ListBox::new();
     list.add_css_class("nav-list");
@@ -5540,12 +5249,6 @@ fn label(text: &str, class_name: &str) -> gtk::Label {
     label
 }
 
-fn pill(text: &str) -> gtk::Label {
-    let pill = label(text, "wave-marker");
-    pill.set_xalign(0.5);
-    pill
-}
-
 fn icon_button(icon_name: &str, tooltip: &str) -> gtk::Button {
     let button = gtk::Button::builder()
         .icon_name(icon_name)
@@ -5617,6 +5320,7 @@ fn update_playback_position(state: &Rc<RefCell<UiState>>) {
             area.queue_draw();
         }
     }
+
 }
 
 fn take_playback_event(state: &Rc<RefCell<UiState>>) -> Option<PlaybackEvent> {

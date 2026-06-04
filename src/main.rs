@@ -2,7 +2,6 @@ mod app;
 mod cache;
 mod config;
 mod jellyfin;
-mod lyrics;
 mod playback;
 mod ui;
 mod waveform;
