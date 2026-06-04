@@ -212,11 +212,8 @@ impl JellyfinClient {
         let mut total_record_count = None;
 
         loop {
-            let response = self.music_track_summaries_page(
-                user_id,
-                start_index,
-                MUSIC_TRACK_PAGE_SIZE,
-            )?;
+            let response =
+                self.music_track_summaries_page(user_id, start_index, MUSIC_TRACK_PAGE_SIZE)?;
             let page_len = response.items.len();
 
             if total_record_count.is_none() {
@@ -364,11 +361,8 @@ impl JellyfinClient {
         let mut total_record_count = None;
 
         loop {
-            let response = self.music_playlist_summaries_page(
-                user_id,
-                start_index,
-                PLAYLIST_PAGE_SIZE,
-            )?;
+            let response =
+                self.music_playlist_summaries_page(user_id, start_index, PLAYLIST_PAGE_SIZE)?;
             let page_len = response.items.len();
 
             if total_record_count.is_none() {

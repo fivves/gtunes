@@ -4456,10 +4456,7 @@ fn merge_incremental_playlists(
         changed_summary_ids(&playlist_summaries, &cached_playlists_by_id, |playlist| {
             playlist.date_last_saved.as_deref()
         });
-    let changed_playlist_id_set = changed_playlist_ids
-        .iter()
-        .cloned()
-        .collect::<HashSet<_>>();
+    let changed_playlist_id_set = changed_playlist_ids.iter().cloned().collect::<HashSet<_>>();
 
     let all_playlists = client
         .music_playlists(&session.user_id)
@@ -4472,7 +4469,10 @@ fn merge_incremental_playlists(
     if !changed_playlist_ids.is_empty() {
         send_connection_status(
             sender,
-            &format!("Refreshing {} changed playlists", changed_playlist_ids.len()),
+            &format!(
+                "Refreshing {} changed playlists",
+                changed_playlist_ids.len()
+            ),
         );
     }
 
@@ -4517,7 +4517,9 @@ fn merge_incremental_playlists(
 }
 
 fn summaries_missing_change_stamps(summaries: &[JellyfinItemSummary]) -> bool {
-    summaries.iter().any(|summary| summary.date_last_saved.is_none())
+    summaries
+        .iter()
+        .any(|summary| summary.date_last_saved.is_none())
 }
 
 fn changed_summary_ids<T>(
@@ -4528,9 +4530,7 @@ fn changed_summary_ids<T>(
     summaries
         .iter()
         .filter(|summary| {
-            cached_by_id
-                .get(&summary.id)
-                .and_then(&cached_stamp)
+            cached_by_id.get(&summary.id).and_then(&cached_stamp)
                 != summary.date_last_saved.as_deref()
         })
         .map(|summary| summary.id.clone())
@@ -5116,13 +5116,7 @@ fn show_reconnect_dialog(parent: &gtk::Window, state: Rc<RefCell<UiState>>) {
         let username = session_for_response.username.clone();
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
-            reconnect_and_fetch(
-                &server_url,
-                &username,
-                &password_text,
-                sender,
-                generation,
-            );
+            reconnect_and_fetch(&server_url, &username, &password_text, sender, generation);
         });
 
         poll_reconnect_result(
@@ -6287,8 +6281,9 @@ mod tests {
             },
         ];
 
-        let changed_ids =
-            changed_summary_ids(&summaries, &cached, |track| track.date_last_saved.as_deref());
+        let changed_ids = changed_summary_ids(&summaries, &cached, |track| {
+            track.date_last_saved.as_deref()
+        });
 
         assert_eq!(changed_ids, vec!["changed".to_string(), "new".to_string()]);
     }
