@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Mutex, mpsc};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::cache::{CacheDatabase, JellyfinSession};
 use crate::config;
@@ -195,6 +195,12 @@ struct UiState {
     mpris: Option<MediaControls>,
 }
 
+#[derive(Debug)]
+struct InvisibleSearchState {
+    query: String,
+    last_input_at: Instant,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TrackFilterSignature {
     album_filter: Option<String>,
@@ -269,6 +275,7 @@ const COLLECTION_ARTWORK_STAGGER_MS: u64 = 8;
 const COLLECTION_ARTWORK_MAX_STAGGERED_ITEMS: usize = 160;
 const COLLECTION_TILE_INITIAL_BATCH: usize = 24;
 const COLLECTION_TILE_IDLE_BATCH: usize = 24;
+const INVISIBLE_SEARCH_TIMEOUT: Duration = Duration::from_millis(1_200);
 static CONNECTION_GENERATION: AtomicU64 = AtomicU64::new(0);
 static CACHE_RESET_LOCK: Mutex<()> = Mutex::new(());
 
@@ -562,27 +569,342 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
 fn connect_app_shortcuts(root: &gtk::Box, state: Rc<RefCell<UiState>>) {
     let controller = gtk::EventControllerKey::new();
     controller.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let invisible_search = Rc::new(RefCell::new(InvisibleSearchState {
+        query: String::new(),
+        last_input_at: Instant::now(),
+    }));
     controller.connect_key_pressed(move |_, key, _, modifiers| {
-        if !modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+        if modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+            match key {
+                gtk::gdk::Key::_1 => set_library_page(&state, LibraryPage::Tracks),
+                gtk::gdk::Key::_2 => set_library_page(&state, LibraryPage::Albums),
+                gtk::gdk::Key::_3 => set_library_page(&state, LibraryPage::Artists),
+                gtk::gdk::Key::_4 => set_library_page(&state, LibraryPage::Playlists),
+                gtk::gdk::Key::f | gtk::gdk::Key::F => {
+                    if let Some(search) = state.borrow().search_entry.as_ref() {
+                        search.grab_focus();
+                    }
+                }
+                _ => return gtk::glib::Propagation::Proceed,
+            }
+
+            return gtk::glib::Propagation::Stop;
+        }
+
+        if modifiers.intersects(
+            gtk::gdk::ModifierType::ALT_MASK
+                | gtk::gdk::ModifierType::SUPER_MASK
+                | gtk::gdk::ModifierType::META_MASK,
+        ) || text_input_has_focus(&state)
+        {
             return gtk::glib::Propagation::Proceed;
         }
 
         match key {
-            gtk::gdk::Key::_1 => set_library_page(&state, LibraryPage::Tracks),
-            gtk::gdk::Key::_2 => set_library_page(&state, LibraryPage::Albums),
-            gtk::gdk::Key::_3 => set_library_page(&state, LibraryPage::Artists),
-            gtk::gdk::Key::_4 => set_library_page(&state, LibraryPage::Playlists),
-            gtk::gdk::Key::f | gtk::gdk::Key::F => {
-                if let Some(search) = state.borrow().search_entry.as_ref() {
-                    search.grab_focus();
+            gtk::gdk::Key::Escape => {
+                invisible_search.borrow_mut().query.clear();
+                gtk::glib::Propagation::Proceed
+            }
+            gtk::gdk::Key::BackSpace => {
+                let query = {
+                    let mut search = invisible_search.borrow_mut();
+                    search.query.pop();
+                    search.last_input_at = Instant::now();
+                    search.query.clone()
+                };
+                if query.is_empty() || !navigate_invisible_search(&state, &query) {
+                    gtk::glib::Propagation::Proceed
+                } else {
+                    gtk::glib::Propagation::Stop
                 }
             }
-            _ => return gtk::glib::Propagation::Proceed,
-        }
+            _ => {
+                let Some(character) = key.to_unicode().filter(|character| !character.is_control())
+                else {
+                    return gtk::glib::Propagation::Proceed;
+                };
 
-        gtk::glib::Propagation::Stop
+                let query = {
+                    let mut search = invisible_search.borrow_mut();
+                    let now = Instant::now();
+                    if now.duration_since(search.last_input_at) > INVISIBLE_SEARCH_TIMEOUT {
+                        search.query.clear();
+                    }
+                    search.query.push(character);
+                    search.last_input_at = now;
+                    search.query.clone()
+                };
+
+                if navigate_invisible_search(&state, &query) {
+                    gtk::glib::Propagation::Stop
+                } else {
+                    gtk::glib::Propagation::Proceed
+                }
+            }
+        }
     });
     root.add_controller(controller);
+}
+
+fn text_input_has_focus(state: &Rc<RefCell<UiState>>) -> bool {
+    let ui = state.borrow();
+    ui.search_entry
+        .as_ref()
+        .is_some_and(|entry| entry.has_focus())
+        || ui
+            .connection_server_entry
+            .as_ref()
+            .is_some_and(|entry| entry.has_focus())
+        || ui
+            .connection_username_entry
+            .as_ref()
+            .is_some_and(|entry| entry.has_focus())
+        || ui
+            .connection_password_entry
+            .as_ref()
+            .is_some_and(|entry| entry.has_focus())
+}
+
+fn navigate_invisible_search(state: &Rc<RefCell<UiState>>, query: &str) -> bool {
+    let normalized_query = query.trim().to_lowercase();
+    if normalized_query.is_empty() {
+        return false;
+    }
+
+    let (visible_content, target) = {
+        let ui = state.borrow();
+        let visible_content = visible_library_content(&ui);
+        let target = match visible_content {
+            VisibleLibraryContent::Tracks => ui
+                .tracks
+                .iter()
+                .enumerate()
+                .filter_map(|(index, track)| {
+                    invisible_track_search_rank(track, &normalized_query).map(|rank| (index, rank))
+                })
+                .min_by(|(_, left), (_, right)| left.cmp(right))
+                .map(|(index, _)| index),
+            VisibleLibraryContent::Albums => visible_album_summaries(&ui)
+                .iter()
+                .enumerate()
+                .filter_map(|(index, album)| {
+                    invisible_search_rank(
+                        [album.name.as_str(), album.artist.as_str()],
+                        &normalized_query,
+                    )
+                    .map(|rank| (index, rank))
+                })
+                .min_by(|(_, left), (_, right)| left.cmp(right))
+                .map(|(index, _)| index),
+            VisibleLibraryContent::Artists => {
+                filter_artist_summaries(&ui.library_artists, &ui.search_query)
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, artist)| {
+                        invisible_search_rank([artist.name.as_str()], &normalized_query)
+                            .map(|rank| (index, rank))
+                    })
+                    .min_by(|(_, left), (_, right)| left.cmp(right))
+                    .map(|(index, _)| index)
+            }
+            VisibleLibraryContent::Playlists => filter_playlists(&ui.playlists, &ui.search_query)
+                .iter()
+                .enumerate()
+                .filter_map(|(index, playlist)| {
+                    invisible_search_rank([playlist.name.as_str()], &normalized_query)
+                        .map(|rank| (index, rank))
+                })
+                .min_by(|(_, left), (_, right)| left.cmp(right))
+                .map(|(index, _)| index),
+        };
+        (visible_content, target)
+    };
+
+    let Some(index) = target else {
+        return false;
+    };
+
+    match visible_content {
+        VisibleLibraryContent::Tracks => select_track_for_navigation(state, index),
+        VisibleLibraryContent::Albums
+        | VisibleLibraryContent::Artists
+        | VisibleLibraryContent::Playlists => focus_collection_item(state, index),
+    }
+
+    true
+}
+
+#[derive(Clone, Copy, Debug)]
+enum VisibleLibraryContent {
+    Tracks,
+    Albums,
+    Artists,
+    Playlists,
+}
+
+fn visible_library_content(ui: &UiState) -> VisibleLibraryContent {
+    let show_detail =
+        ui.album_filter.is_some() || ui.artist_filter.is_some() || ui.playlist_filter.is_some();
+    match (ui.active_page, show_detail) {
+        (LibraryPage::Tracks, _) => VisibleLibraryContent::Tracks,
+        (LibraryPage::Albums, false) => VisibleLibraryContent::Albums,
+        (LibraryPage::Albums, true) => VisibleLibraryContent::Tracks,
+        (LibraryPage::Artists, false) => VisibleLibraryContent::Artists,
+        (LibraryPage::Artists, true) if ui.album_filter.is_none() => VisibleLibraryContent::Albums,
+        (LibraryPage::Artists, true) => VisibleLibraryContent::Tracks,
+        (LibraryPage::Playlists, false) => VisibleLibraryContent::Playlists,
+        (LibraryPage::Playlists, true) => VisibleLibraryContent::Tracks,
+    }
+}
+
+fn visible_album_summaries(ui: &UiState) -> Vec<AlbumSummary> {
+    if ui.active_page == LibraryPage::Artists {
+        ui.artist_filter
+            .as_deref()
+            .map(|selected_artist_key| {
+                album_summaries_for_artist_from(
+                    &ui.library_albums,
+                    selected_artist_key,
+                    &ui.search_query,
+                )
+            })
+            .unwrap_or_else(|| filter_album_summaries(&ui.library_albums, &ui.search_query))
+    } else {
+        filter_album_summaries(&ui.library_albums, &ui.search_query)
+    }
+}
+
+fn invisible_track_search_rank(track: &UiTrack, query: &str) -> Option<(u8, u8, usize)> {
+    [
+        (track.title.as_str(), 0),
+        (track.artist.as_str(), 1),
+        (track.album.as_str(), 2),
+    ]
+    .into_iter()
+    .filter_map(|(text, field_rank)| {
+        invisible_text_search_rank(text, query)
+            .map(|(match_rank, match_index)| (match_rank, field_rank, match_index))
+    })
+    .min()
+}
+
+fn invisible_search_rank<'a>(
+    texts: impl IntoIterator<Item = &'a str>,
+    query: &str,
+) -> Option<(u8, u8, usize)> {
+    texts
+        .into_iter()
+        .enumerate()
+        .filter_map(|(field_rank, text)| {
+            invisible_text_search_rank(text, query)
+                .map(|(match_rank, match_index)| (match_rank, field_rank as u8, match_index))
+        })
+        .min()
+}
+
+fn invisible_text_search_rank(text: &str, query: &str) -> Option<(u8, usize)> {
+    let normalized_text = text.to_lowercase();
+    let full_match_index = normalized_text.find(query)?;
+    let word_match_index = normalized_text
+        .match_indices(query)
+        .find_map(|(index, _)| is_word_boundary(&normalized_text, index).then_some(index));
+
+    let rank = if normalized_text.starts_with(query) {
+        0
+    } else if let Some(index) = word_match_index {
+        return Some((1, index));
+    } else {
+        2
+    };
+
+    Some((rank, full_match_index))
+}
+
+fn is_word_boundary(text: &str, index: usize) -> bool {
+    if index == 0 {
+        return true;
+    }
+
+    text[..index]
+        .chars()
+        .next_back()
+        .is_none_or(|character| !character.is_alphanumeric())
+}
+
+fn select_track_for_navigation(state: &Rc<RefCell<UiState>>, index: usize) {
+    let selected_index = {
+        let mut ui = state.borrow_mut();
+        if ui.tracks.is_empty() {
+            return;
+        }
+        ui.selected_index = index.min(ui.tracks.len() - 1);
+        let selected_index = ui.selected_index;
+        rebuild_playback_order(&mut ui, selected_index);
+        update_now_playing_labels(&ui);
+        update_play_button(&ui);
+        selected_index
+    };
+
+    select_track_model_row(state, selected_index);
+    scroll_track_list_to_index(state, selected_index);
+    rebuild_queue_list(state);
+    load_selected_cover_art(state);
+    load_selected_waveform(state);
+}
+
+fn scroll_track_list_to_index(state: &Rc<RefCell<UiState>>, index: usize) {
+    let (stack, track_count) = {
+        let ui = state.borrow();
+        (ui.track_stack.clone(), ui.tracks.len())
+    };
+    if track_count == 0 {
+        return;
+    }
+
+    let scroll = stack
+        .as_ref()
+        .and_then(|s| s.child_by_name("list"))
+        .and_then(|c| c.downcast::<gtk::ScrolledWindow>().ok());
+
+    if let Some(scroll) = scroll {
+        let adj = scroll.vadjustment();
+        let row_height = adj.upper() / track_count as f64;
+        let target = index as f64 * row_height;
+        adj.set_value(target.clamp(0.0, adj.upper() - adj.page_size()));
+    }
+}
+
+fn focus_collection_item(state: &Rc<RefCell<UiState>>, index: usize) {
+    let (grid, visible_content) = {
+        let ui = state.borrow();
+        let grid = match visible_library_content(&ui) {
+            VisibleLibraryContent::Albums => ui.album_grid.clone(),
+            VisibleLibraryContent::Artists => ui.artist_grid.clone(),
+            VisibleLibraryContent::Playlists => ui.playlist_grid.clone(),
+            VisibleLibraryContent::Tracks => None,
+        };
+        (grid, visible_library_content(&ui))
+    };
+    if matches!(visible_content, VisibleLibraryContent::Tracks) {
+        select_track_for_navigation(state, index);
+        return;
+    }
+
+    let Some(grid) = grid else {
+        return;
+    };
+    let Some(child) = grid.child_at_index(index as i32) else {
+        return;
+    };
+
+    if let Some(button) = child
+        .first_child()
+        .and_then(|widget| widget.downcast::<gtk::Button>().ok())
+    {
+        button.grab_focus();
+    } else {
+        child.grab_focus();
+    }
 }
 
 fn setup_mpris(state: Rc<RefCell<UiState>>) {
@@ -5320,7 +5642,6 @@ fn update_playback_position(state: &Rc<RefCell<UiState>>) {
             area.queue_draw();
         }
     }
-
 }
 
 fn take_playback_event(state: &Rc<RefCell<UiState>>) -> Option<PlaybackEvent> {
@@ -5799,6 +6120,35 @@ mod tests {
             album_position: Some(album_position),
             ..test_track()
         }
+    }
+
+    #[test]
+    fn invisible_search_prioritizes_leading_word_matches() {
+        let soundtrack_track = UiTrack {
+            title: "I Don't Give".to_string(),
+            album: "American Wedding Original Soundtrack".to_string(),
+            artist: "Avril Lavigne".to_string(),
+            ..test_track()
+        };
+        let title_track = UiTrack {
+            title: "American Idiot".to_string(),
+            album: "American Idiot".to_string(),
+            artist: "Green Day".to_string(),
+            ..test_track()
+        };
+
+        assert!(
+            invisible_track_search_rank(&title_track, "american")
+                < invisible_track_search_rank(&soundtrack_track, "american")
+        );
+    }
+
+    #[test]
+    fn invisible_search_prioritizes_word_boundaries_over_substrings() {
+        assert!(
+            invisible_text_search_rank("Made in America", "america")
+                < invisible_text_search_rank("Panamericana", "america")
+        );
     }
 
     #[test]
