@@ -611,8 +611,12 @@ fn connect_app_shortcuts(root: &gtk::Box, state: Rc<RefCell<UiState>>) {
             gtk::gdk::ModifierType::ALT_MASK
                 | gtk::gdk::ModifierType::SUPER_MASK
                 | gtk::gdk::ModifierType::META_MASK,
-        ) || text_input_has_focus(&state)
-        {
+        ) {
+            return gtk::glib::Propagation::Proceed;
+        }
+
+        if text_input_has_focus(&state) {
+            invisible_search.borrow_mut().query.clear();
             return gtk::glib::Propagation::Proceed;
         }
 
@@ -699,19 +703,28 @@ fn text_input_has_focus(state: &Rc<RefCell<UiState>>) -> bool {
     let ui = state.borrow();
     ui.search_entry
         .as_ref()
-        .is_some_and(|entry| entry.has_focus())
+        .is_some_and(widget_has_focus_within)
         || ui
             .connection_server_entry
             .as_ref()
-            .is_some_and(|entry| entry.has_focus())
+            .is_some_and(widget_has_focus_within)
         || ui
             .connection_username_entry
             .as_ref()
-            .is_some_and(|entry| entry.has_focus())
+            .is_some_and(widget_has_focus_within)
         || ui
             .connection_password_entry
             .as_ref()
-            .is_some_and(|entry| entry.has_focus())
+            .is_some_and(widget_has_focus_within)
+}
+
+fn widget_has_focus_within(widget: &impl IsA<gtk::Widget>) -> bool {
+    let widget = widget.as_ref();
+    widget.has_focus()
+        || widget.is_focus()
+        || widget
+            .focus_child()
+            .is_some_and(|child| widget_has_focus_within(&child))
 }
 
 fn navigate_invisible_search(state: &Rc<RefCell<UiState>>, query: &str) -> bool {
