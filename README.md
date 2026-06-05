@@ -2,7 +2,7 @@
 
 <img width="1896" height="1017" alt="image" src="https://github.com/user-attachments/assets/f2f18885-e19c-4a74-8bd0-6ed74932a98e" />
 
-</br></br>
+</br>
 
 gTunes is a native Linux desktop music client for Jellyfin-hosted music
 libraries. Version 1.0 focuses on fast library browsing, reliable Jellyfin
