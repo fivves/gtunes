@@ -605,6 +605,33 @@ fn connect_app_shortcuts(root: &gtk::Box, state: Rc<RefCell<UiState>>) {
                 invisible_search.borrow_mut().query.clear();
                 gtk::glib::Propagation::Proceed
             }
+            gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter => {
+                if invisible_search_is_active(&invisible_search) {
+                    if state.borrow().is_track_list_visible() {
+                        play_track_at_selected_index(&state);
+                    }
+                    gtk::glib::Propagation::Stop
+                } else {
+                    gtk::glib::Propagation::Proceed
+                }
+            }
+            gtk::gdk::Key::space => {
+                let query = {
+                    let mut search = invisible_search.borrow_mut();
+                    let now = Instant::now();
+                    if now.duration_since(search.last_input_at) > INVISIBLE_SEARCH_TIMEOUT {
+                        search.query.clear();
+                    }
+                    if search.query.is_empty() {
+                        return gtk::glib::Propagation::Proceed;
+                    }
+                    search.query.push(' ');
+                    search.last_input_at = now;
+                    search.query.clone()
+                };
+                navigate_invisible_search(&state, &query);
+                gtk::glib::Propagation::Stop
+            }
             gtk::gdk::Key::BackSpace => {
                 let query = {
                     let mut search = invisible_search.borrow_mut();
@@ -644,6 +671,12 @@ fn connect_app_shortcuts(root: &gtk::Box, state: Rc<RefCell<UiState>>) {
         }
     });
     root.add_controller(controller);
+}
+
+fn invisible_search_is_active(search: &Rc<RefCell<InvisibleSearchState>>) -> bool {
+    let search = search.borrow();
+    !search.query.is_empty()
+        && Instant::now().duration_since(search.last_input_at) <= INVISIBLE_SEARCH_TIMEOUT
 }
 
 fn text_input_has_focus(state: &Rc<RefCell<UiState>>) -> bool {
