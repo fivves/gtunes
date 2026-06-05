@@ -146,6 +146,7 @@ struct UiState {
     jellyfin_connected: bool,
     sort_column: SortColumn,
     sort_ascending: bool,
+    keep_playing_while_closed: bool,
     shuffle_enabled: bool,
     now_playing_key: Option<String>,
     track_indicators: HashMap<usize, gtk::Image>,
@@ -474,6 +475,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
     window.set_content(Some(&root));
 
     let view_settings = load_library_view_settings();
+    let keep_playing_while_closed = load_keep_playing_while_closed();
     let state = Rc::new(RefCell::new(UiState {
         all_tracks: Vec::new(),
         tracks: Vec::new(),
@@ -501,6 +503,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         jellyfin_connected: false,
         sort_column: view_settings.sort_column,
         sort_ascending: view_settings.sort_ascending,
+        keep_playing_while_closed,
         shuffle_enabled: false,
         now_playing_key: None,
         track_indicators: HashMap::new(),
@@ -560,10 +563,23 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
     root.append(&build_body(state.clone()));
     root.append(&build_bottom_bar(state.clone()));
     connect_app_shortcuts(&root, state.clone());
+    connect_window_close_request(&window, state.clone());
     load_selected_waveform(&state);
     start_playback_timer(&state);
 
     window
+}
+
+fn connect_window_close_request(window: &adw::ApplicationWindow, state: Rc<RefCell<UiState>>) {
+    window.connect_close_request(move |window| {
+        if state.borrow().keep_playing_while_closed {
+            window.set_visible(false);
+            gtk::glib::Propagation::Stop
+        } else {
+            stop_playback(&mut state.borrow_mut());
+            gtk::glib::Propagation::Proceed
+        }
+    });
 }
 
 fn connect_app_shortcuts(root: &gtk::Box, state: Rc<RefCell<UiState>>) {
@@ -1245,20 +1261,7 @@ fn build_player_bar(state: Rc<RefCell<UiState>>) -> gtk::Box {
     state.borrow_mut().shuffle_button = Some(shuffle.clone());
     utility_row.append(&shuffle);
 
-    let settings = icon_button("emblem-system-symbolic", "Settings");
-    settings.add_css_class("toolbar-button");
-    settings.set_tooltip_text(Some("Reset database and cache"));
-    {
-        let state = state.clone();
-        settings.connect_clicked(move |button| {
-            if let Some(window) = button
-                .root()
-                .and_then(|root| root.downcast::<gtk::Window>().ok())
-            {
-                confirm_database_reset(&window, state.clone());
-            }
-        });
-    }
+    let settings = settings_menu_button(state.clone());
     utility_row.append(&settings);
 
     actions.add_overlay(&utility_row);
@@ -1267,6 +1270,250 @@ fn build_player_bar(state: Rc<RefCell<UiState>>) -> gtk::Box {
     connect_player_bar_responsive_layout(&player, &actions, &state.borrow().playback_status);
 
     player
+}
+
+fn settings_menu_button(state: Rc<RefCell<UiState>>) -> gtk::MenuButton {
+    let settings = gtk::MenuButton::builder()
+        .icon_name("emblem-system-symbolic")
+        .tooltip_text("Settings")
+        .build();
+    settings.add_css_class("icon-button");
+    settings.add_css_class("toolbar-button");
+    settings.add_css_class("settings-menu-button");
+
+    let popover = gtk::Popover::new();
+    popover.add_css_class("settings-popover");
+    let menu = gtk::Box::new(Orientation::Vertical, 4);
+    menu.add_css_class("settings-popover-menu");
+    menu.set_margin_top(10);
+    menu.set_margin_bottom(10);
+    menu.set_margin_start(10);
+    menu.set_margin_end(10);
+    menu.set_width_request(280);
+
+    let keep_row = gtk::Box::new(Orientation::Horizontal, 12);
+    keep_row.add_css_class("settings-switch-row");
+    keep_row.set_margin_top(2);
+    keep_row.set_margin_bottom(6);
+    keep_row.set_margin_start(6);
+    keep_row.set_margin_end(6);
+    let keep_label = label("Keep playing while closed", "settings-menu-label");
+    keep_label.set_hexpand(true);
+    keep_label.set_halign(Align::Start);
+    let keep_switch = gtk::Switch::builder()
+        .active(state.borrow().keep_playing_while_closed)
+        .valign(Align::Center)
+        .build();
+    {
+        let state = state.clone();
+        keep_switch.connect_active_notify(move |switch| {
+            set_keep_playing_while_closed(&state, switch.is_active());
+        });
+    }
+    keep_row.append(&keep_label);
+    keep_row.append(&keep_switch);
+    menu.append(&keep_row);
+    menu.append(&gtk::Separator::new(Orientation::Horizontal));
+
+    let shortcuts = menu_item_button(
+        "preferences-desktop-keyboard-shortcuts-symbolic",
+        "Keyboard shortcuts",
+    );
+    {
+        let popover = popover.clone();
+        let settings = settings.clone();
+        shortcuts.connect_clicked(move |_| {
+            popover.popdown();
+            if let Some(window) = settings
+                .root()
+                .and_then(|root| root.downcast::<gtk::Window>().ok())
+            {
+                show_keyboard_shortcuts(&window);
+            }
+        });
+    }
+    menu.append(&shortcuts);
+
+    let about = menu_item_button("help-about-symbolic", "About gTunes");
+    {
+        let popover = popover.clone();
+        let settings = settings.clone();
+        about.connect_clicked(move |_| {
+            popover.popdown();
+            if let Some(window) = settings
+                .root()
+                .and_then(|root| root.downcast::<gtk::Window>().ok())
+            {
+                show_about_window(&window);
+            }
+        });
+    }
+    menu.append(&about);
+
+    let reset = menu_item_button("edit-delete-symbolic", "Reset database and cache");
+    {
+        let state = state.clone();
+        let popover = popover.clone();
+        let settings = settings.clone();
+        reset.connect_clicked(move |_| {
+            popover.popdown();
+            if let Some(window) = settings
+                .root()
+                .and_then(|root| root.downcast::<gtk::Window>().ok())
+            {
+                confirm_database_reset(&window, state.clone());
+            }
+        });
+    }
+    menu.append(&reset);
+    menu.append(&gtk::Separator::new(Orientation::Horizontal));
+
+    let quit = menu_item_button("application-exit-symbolic", "Quit");
+    quit.add_css_class("destructive-action");
+    {
+        let state = state.clone();
+        let settings = settings.clone();
+        quit.connect_clicked(move |_| {
+            if let Some(window) = settings
+                .root()
+                .and_then(|root| root.downcast::<gtk::Window>().ok())
+            {
+                quit_application(&window, &state);
+            }
+        });
+    }
+    menu.append(&quit);
+
+    popover.set_child(Some(&menu));
+    settings.set_popover(Some(&popover));
+    settings
+}
+
+fn menu_item_button(icon_name: &str, title: &str) -> gtk::Button {
+    let button = gtk::Button::new();
+    button.add_css_class("flat");
+    button.add_css_class("settings-menu-item");
+    button.set_halign(Align::Fill);
+
+    let row = gtk::Box::new(Orientation::Horizontal, 12);
+    row.set_margin_top(7);
+    row.set_margin_bottom(7);
+    row.set_margin_start(8);
+    row.set_margin_end(8);
+    row.set_halign(Align::Fill);
+    row.append(&gtk::Image::from_icon_name(icon_name));
+    let title = label(title, "settings-menu-label");
+    title.set_hexpand(true);
+    title.set_halign(Align::Start);
+    row.append(&title);
+    button.set_child(Some(&row));
+    button
+}
+
+#[allow(deprecated)]
+fn show_keyboard_shortcuts(parent: &gtk::Window) {
+    let shortcuts = gtk::Window::builder()
+        .transient_for(parent)
+        .modal(true)
+        .title("Keyboard Shortcuts")
+        .default_width(420)
+        .resizable(false)
+        .build();
+
+    let content = gtk::Box::new(Orientation::Vertical, 0);
+    content.add_css_class("shortcuts-dialog");
+    content.set_margin_top(18);
+    content.set_margin_bottom(18);
+    content.set_margin_start(18);
+    content.set_margin_end(18);
+
+    let header = gtk::Box::new(Orientation::Horizontal, 12);
+    header.add_css_class("shortcuts-header");
+    header.set_halign(Align::Fill);
+
+    let group_title = label("Library", "shortcuts-group-title");
+    group_title.set_hexpand(true);
+    group_title.set_halign(Align::Start);
+    header.append(&group_title);
+
+    let close = icon_button("window-close-symbolic", "Close keyboard shortcuts");
+    close.add_css_class("toolbar-button");
+    {
+        let shortcuts = shortcuts.clone();
+        close.connect_clicked(move |_| {
+            shortcuts.close();
+        });
+    }
+    header.append(&close);
+    content.append(&header);
+
+    let list = gtk::ListBox::new();
+    list.add_css_class("boxed-list");
+    list.set_selection_mode(gtk::SelectionMode::None);
+    for (title, accelerator) in [
+        ("Search library", "<Control>F"),
+        ("Tracks", "<Control>1"),
+        ("Albums", "<Control>2"),
+        ("Artists", "<Control>3"),
+        ("Playlists", "<Control>4"),
+        ("Play selected search result", "Return"),
+    ] {
+        list.append(&shortcut_row(title, accelerator));
+    }
+    content.append(&list);
+
+    shortcuts.set_child(Some(&content));
+    shortcuts.present();
+}
+
+#[allow(deprecated)]
+fn shortcut_row(title: &str, accelerator: &str) -> gtk::ListBoxRow {
+    let row = gtk::ListBoxRow::new();
+    row.set_activatable(false);
+    row.set_selectable(false);
+
+    let content = gtk::Box::new(Orientation::Horizontal, 12);
+    content.set_margin_top(10);
+    content.set_margin_bottom(10);
+    content.set_margin_start(12);
+    content.set_margin_end(12);
+
+    let title = label(title, "");
+    title.set_hexpand(true);
+    title.set_halign(Align::Start);
+    content.append(&title);
+
+    let shortcut = gtk::ShortcutLabel::new(accelerator);
+    shortcut.set_halign(Align::End);
+    content.append(&shortcut);
+
+    row.set_child(Some(&content));
+    row
+}
+
+fn show_about_window(parent: &gtk::Window) {
+    let about = gtk::AboutDialog::builder()
+        .transient_for(parent)
+        .modal(true)
+        .logo_icon_name(config::APP_ID)
+        .program_name(config::APP_NAME)
+        .authors([config::DEVELOPER_NAME])
+        .version(config::VERSION)
+        .comments("A GTK4/Libadwaita Jellyfin music streaming client for Linux.")
+        .license_type(gtk::License::MitX11)
+        .website("https://github.com/fivves/gtunes")
+        .website_label("GitHub")
+        .build();
+    about.present();
+}
+
+fn quit_application(parent: &gtk::Window, state: &Rc<RefCell<UiState>>) {
+    stop_playback(&mut state.borrow_mut());
+    if let Some(app) = parent.application() {
+        app.quit();
+    } else {
+        parent.close();
+    }
 }
 
 fn connect_player_bar_responsive_layout(
@@ -2706,7 +2953,7 @@ struct TrackColumn {
 
 const TRACK_COLUMNS: [TrackColumn; 4] = [
     TrackColumn {
-        header: "TITLE",
+        header: "Title",
         width: TITLE_WIDTH,
         expand: true,
         xalign: 0.0,
@@ -2714,7 +2961,7 @@ const TRACK_COLUMNS: [TrackColumn; 4] = [
         class_name: Some("track-title"),
     },
     TrackColumn {
-        header: "ARTIST",
+        header: "Artist",
         width: ARTIST_WIDTH,
         expand: true,
         xalign: 0.0,
@@ -2722,7 +2969,7 @@ const TRACK_COLUMNS: [TrackColumn; 4] = [
         class_name: None,
     },
     TrackColumn {
-        header: "ALBUM",
+        header: "Album",
         width: ALBUM_WIDTH,
         expand: true,
         xalign: 0.0,
@@ -2730,7 +2977,7 @@ const TRACK_COLUMNS: [TrackColumn; 4] = [
         class_name: None,
     },
     TrackColumn {
-        header: "TIME",
+        header: "Time",
         width: DURATION_WIDTH,
         expand: false,
         xalign: 1.0,
@@ -3148,6 +3395,32 @@ fn save_library_view_settings(settings: LibraryViewSettings) {
 }
 
 const LIBRARY_VIEW_SETTINGS_KEY: &str = "library.view.settings";
+const KEEP_PLAYING_WHILE_CLOSED_KEY: &str = "player.keep_playing_while_closed";
+
+fn load_keep_playing_while_closed() -> bool {
+    match CacheDatabase::open_default()
+        .and_then(|cache| cache.get_setting(KEEP_PLAYING_WHILE_CLOSED_KEY))
+    {
+        Ok(Some(value)) => value == "true",
+        Ok(None) => false,
+        Err(error) => {
+            tracing::warn!(%error, "failed to load close behavior setting");
+            false
+        }
+    }
+}
+
+fn set_keep_playing_while_closed(state: &Rc<RefCell<UiState>>, enabled: bool) {
+    state.borrow_mut().keep_playing_while_closed = enabled;
+    if let Err(error) = CacheDatabase::open_default().and_then(|cache| {
+        cache.set_setting(
+            KEEP_PLAYING_WHILE_CLOSED_KEY,
+            if enabled { "true" } else { "false" },
+        )
+    }) {
+        tracing::warn!(%error, "failed to save close behavior setting");
+    }
+}
 
 fn sort_track_slice(
     tracks: &mut [UiTrack],
@@ -3880,15 +4153,9 @@ fn update_now_playing_labels(state: &UiState) {
             gtk::glib::markup_escape_text(&track.artist),
             gtk::glib::markup_escape_text(&track.album)
         ));
-        if track.stream_url.is_some() {
-            state
-                .playback_status
-                .set_text(&format!("Ready to stream | {}", track.quality));
-        } else {
-            state
-                .playback_status
-                .set_text("Track is missing a Jellyfin stream URL");
-        }
+        state
+            .playback_status
+            .set_text(&playback_status_text(state, track));
     } else {
         state.now_title.set_text("No track selected");
         if state.search_query.is_empty() {
@@ -3900,6 +4167,27 @@ fn update_now_playing_labels(state: &UiState) {
             state.now_meta.set_text("No search results");
             state.playback_status.set_text("Search returned no tracks");
         }
+    }
+}
+
+fn playback_status_text(state: &UiState, track: &UiTrack) -> String {
+    match state.playback.as_ref().map(PlaybackEngine::state) {
+        Some(PlaybackState::Playing) => {
+            if state
+                .playback
+                .as_ref()
+                .and_then(|playback| playback.current_stream_kind())
+                == Some(PlaybackStreamKind::Transcode)
+            {
+                format!("Playing transcoded stream | {}", track.quality)
+            } else {
+                format!("Playing | {}", track.quality)
+            }
+        }
+        Some(PlaybackState::Paused) => "Paused".to_string(),
+        Some(PlaybackState::Error(error)) => format!("Playback failed: {error}"),
+        _ if track.stream_url.is_some() => format!("Ready to stream | {}", track.quality),
+        _ => "Track is missing a Jellyfin stream URL".to_string(),
     }
 }
 

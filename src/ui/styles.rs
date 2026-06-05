@@ -73,6 +73,67 @@ window {
   min-height: 28px;
 }
 
+.settings-menu-button,
+.settings-menu-button > button {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  box-shadow: none;
+  color: @window_fg_color;
+}
+
+.settings-menu-button:hover,
+.settings-menu-button > button:hover {
+  background: alpha(@window_fg_color, .08);
+}
+
+.settings-menu-button:checked,
+.settings-menu-button > button:checked,
+.settings-menu-button:active,
+.settings-menu-button > button:active {
+  background: alpha(@window_fg_color, .13);
+  box-shadow: none;
+}
+
+.settings-popover-menu {
+  background: transparent;
+}
+
+.settings-switch-row {
+  min-height: 36px;
+}
+
+.settings-menu-item {
+  min-height: 38px;
+  padding: 0;
+  border-radius: 6px;
+}
+
+.settings-menu-item image {
+  color: alpha(@window_fg_color, .72);
+}
+
+.settings-menu-label {
+  font-size: 13px;
+}
+
+.shortcuts-dialog {
+  background: @window_bg_color;
+}
+
+.shortcuts-header {
+  margin-bottom: 10px;
+}
+
+.shortcuts-group-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: alpha(@window_fg_color, .72);
+}
+
 .shuffle-toggle.shuffle-off {
   color: alpha(@window_fg_color, .72);
 }
@@ -429,13 +490,28 @@ window {
 }
 
 .track-list header button {
-  min-height: 32px;
-  padding: 0 12px;
-  color: alpha(@window_fg_color, .66);
-  font-size: 10px;
-  font-weight: 700;
+  min-height: 36px;
+  padding: 5px 12px 6px;
+  color: alpha(@window_fg_color, .62);
+  font-size: 11px;
+  font-weight: 800;
   background: @window_bg_color;
   border-bottom: 1px solid @borders;
+}
+
+.track-list header button label {
+  padding-top: 1px;
+  letter-spacing: 0;
+}
+
+.track-list header button:hover {
+  color: alpha(@window_fg_color, .82);
+  background: alpha(@window_fg_color, .04);
+}
+
+.track-list header button:checked {
+  color: @window_fg_color;
+  background: alpha(@accent_bg_color, .07);
 }
 
 .track-list row {

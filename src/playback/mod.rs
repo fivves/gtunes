@@ -135,6 +135,10 @@ impl PlaybackEngine {
         self.current_item_id.as_deref()
     }
 
+    pub fn current_stream_kind(&self) -> Option<PlaybackStreamKind> {
+        self.current_stream_kind
+    }
+
     pub fn play(&mut self, request: PlaybackRequest) -> Result<(), PlaybackError> {
         tracing::info!(
             item_id = %request.item_id,

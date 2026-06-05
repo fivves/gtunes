@@ -14,6 +14,11 @@ pub fn run() -> glib::ExitCode {
     });
 
     app.connect_activate(|app| {
+        if let Some(window) = app.windows().first() {
+            window.present();
+            return;
+        }
+
         let window = ui::window::build(app);
         window.present();
     });
