@@ -1,24 +1,25 @@
 # Security Policy
 
-gTunes is pre-release software and is not yet packaged for general distribution.
-Security work should prioritize protecting Jellyfin credentials, access tokens,
-local cache data, and playback URLs.
+Security work for gTunes prioritizes protecting Jellyfin credentials, access
+tokens, private server URLs, playback stream URLs, local cache data, and personal
+library metadata.
 
 ## Supported Versions
 
-Only the `dev` branch is currently supported. Tagged releases and release
-branches will be added when packaging begins.
+The 1.0 release line and the active development branch are supported for
+security fixes.
 
 ## Reporting a Vulnerability
 
-For now, report security concerns privately to the repository owner instead of
-opening a public issue. Include:
+Report security concerns privately to the repository owner instead of opening a
+public issue. Include:
 
 - A concise description of the issue.
 - Steps to reproduce it.
-- Whether credentials, Jellyfin access tokens, stream URLs, local databases, or
-  personal library metadata may be exposed.
-- The commit hash tested.
+- The version or commit hash tested.
+- Whether credentials, Jellyfin access tokens, stream URLs, local databases,
+  logs, screenshots, or personal library metadata may be exposed.
+- Any relevant operating system, desktop environment, and Jellyfin version.
 
 ## Secret Handling
 
@@ -28,16 +29,24 @@ opening a public issue. Include:
 - The app stores Jellyfin access tokens in its local SQLite database.
 - Passwords are used to authenticate with Jellyfin and are not intentionally
   persisted by the app.
-- Local development databases are ignored by git and should stay local.
+- Direct and transcoded playback URLs can grant access to private media while
+  valid and should be treated as sensitive.
+- Local development databases and cache files should stay local.
 
 ## Local Data
 
-Development builds store app data under the platform data directory resolved by
-the `directories` crate. On Linux, that is typically:
+gTunes stores app data through the platform directories resolved by the
+`directories` crate. On Linux, local development data is typically under:
 
 ```text
 ~/.local/share/dev/fivves/gTunes/
+~/.cache/dev/fivves/gTunes/
 ```
 
-Delete that directory to remove cached sessions and library data during local
-testing.
+Temporary artwork cache files are written to the system temporary directory with
+names starting with `gtunes-artwork-`.
+
+Use Settings > Reset database and cache to clear saved Jellyfin login, cached
+library data, artwork, and waveform files from the app. For manual development
+cleanup, remove the data and cache directories and matching temporary artwork
+files.

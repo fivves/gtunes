@@ -1,64 +1,77 @@
 # Roadmap
 
-gTunes is moving from MVP toward a reliable V1 Jellyfin music client. This file
-tracks the intended development direction for contributors.
+gTunes 1.0 has shipped as a Jellyfin music client for Linux desktops. This file
+tracks likely post-1.0 work and documents boundaries that should stay clear for
+contributors.
 
-## Current MVP Baseline
+## 1.0 Release Baseline
 
 - Native GTK4/Libadwaita application shell.
-- Jellyfin login form.
-- Saved Jellyfin session loading.
-- Library sync for Jellyfin audio items.
-- Track, album, and artist views.
-- Search, sort, and queue controls.
-- Album artwork loading.
-- GStreamer-backed playback.
-- MPRIS media control integration.
-- SQLite cache for settings, sessions, library JSON, and waveform records.
-- Waveform and lyrics UI placeholders.
+- Jellyfin username/password authentication.
+- Saved Jellyfin sessions.
+- Cached library startup.
+- Incremental Jellyfin refreshes when change timestamps are available.
+- Tracks, albums, artists, and playlists.
+- Search, sort, type-to-jump navigation, and collection detail views.
+- Album artwork, artist images, playlist artwork, and full-size cover art.
+- GStreamer playback with direct streams and transcoded fallback.
+- Previous, play/pause, next, shuffle, and queue preview controls.
+- Generated waveform summaries with local caching and waveform scrubbing.
+- Elapsed and remaining playback time.
+- MPRIS desktop media controls and metadata.
+- Reconnect flow for expired or revoked Jellyfin sessions.
+- Settings for library refresh, close behavior, shortcuts, cache reset, and
+  quitting the app.
+- AppImage build script.
 
-## Completed V1 Reliability Work
+Lyrics are not part of the 1.0 release.
 
-1. Harden playback.
-   - Prefer direct play where possible.
-   - Fall back to Jellyfin transcoding when direct playback fails.
-   - Surface clear playback errors in the UI.
-   - Keep queue and now-playing state coherent after failures.
+## Near-Term Priorities
 
-2. Finish waveform behavior.
-   - Generate real waveform summaries consistently.
-   - Cache summaries safely.
-   - Support scrubbing without blocking the UI.
-   - Recover cleanly from interrupted waveform generation.
+1. Improve release packaging.
+   - Decide the first fully supported distribution target.
+   - Add maintained desktop metadata and icon assets outside the AppImage script.
+   - Document runtime GStreamer plugin expectations per distribution.
+   - Define the tagged release process.
 
-3. Improve library reliability.
-   - Handle expired or revoked Jellyfin tokens.
-   - Improve offline and slow-server states.
-   - Make cache migration failures actionable.
-   - Add focused tests around cache and Jellyfin model handling.
+2. Broaden automated coverage.
+   - Add tests for Jellyfin model mapping.
+   - Add tests for cache migration and legacy cache loading.
+   - Add tests for playlist merge behavior.
+   - Add tests for playback-order and shuffle behavior.
 
-## Remaining V1 Priorities
+3. Improve runtime diagnostics.
+   - Make playback fallback events easier to inspect.
+   - Improve user-facing messages for missing codecs and plugins.
+   - Consider a small diagnostic export that redacts private server data.
 
-1. Add lyrics support.
-   - Display Jellyfin-provided lyrics where available.
-   - Support embedded unsynced lyrics when practical.
-   - Add `.lrc` synced lyrics support after playback timing is stable.
+4. Refine large-library behavior.
+   - Continue reducing first-refresh latency.
+   - Review memory use for large playlist sets.
+   - Evaluate persistent artwork indexing instead of temporary artwork files.
 
-2. Prepare packaging.
-   - Decide initial package target.
-   - Add desktop metadata and icons.
-   - Document runtime plugin requirements.
-   - Create a versioned release process.
+## Later Candidates
 
-## Out of Scope for V1
+- Persist queue state across app restarts.
+- Add multiple saved Jellyfin servers or accounts.
+- Add richer album and artist detail metadata.
+- Add distribution-native packages after the release process is stable.
+- Add optional advanced playback controls if they fit the desktop UI.
 
-- Replacing Jellyfin with local-first library management.
+## Out of Scope
+
+- Live lyrics, synced lyrics, unsynced lyrics, embedded lyrics, and Jellyfin
+  lyrics display.
+- Local-first library management.
+- Editing Jellyfin metadata.
+- Replacing Jellyfin with a separate music library backend.
 - Rebuilding the app as an iTunes clone.
-- Mobile or web clients.
-- Multi-server account management beyond what is needed for a reliable first
-  desktop release.
+- Mobile and web clients.
+- DRM-protected streaming services.
 
 ## Contribution Candidates
 
-- Improve empty, loading, and error states in the connection panel.
-- Document confirmed distribution-specific dependency names.
+- Confirm dependency package names on additional distributions.
+- Improve empty, loading, and error states.
+- Improve documentation for AppImage runtime requirements.
+- Add focused tests around cache, Jellyfin, waveform, and playback helpers.
