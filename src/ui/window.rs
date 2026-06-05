@@ -264,7 +264,7 @@ enum ConnectionMessage {
     Finished(Result<ConnectionPayload, String>),
 }
 
-const CONTEXT_RAIL_EDGE_INSET: i32 = 18;
+const PLAYER_ACTION_EDGE_INSET: i32 = 0;
 const LEFT_SIDEBAR_CONTENT_WIDTH: i32 = 220;
 const LEFT_SIDEBAR_WIDTH: i32 = LEFT_SIDEBAR_CONTENT_WIDTH + 20;
 const ACTION_PANEL_WIDTH: i32 = 130;
@@ -1234,19 +1234,7 @@ fn build_player_bar(state: Rc<RefCell<UiState>>) -> gtk::Box {
     let utility_row = gtk::Box::new(Orientation::Horizontal, 4);
     utility_row.set_halign(Align::End);
     utility_row.set_valign(Align::Start);
-    utility_row.set_margin_end(CONTEXT_RAIL_EDGE_INSET);
-
-    let refresh = icon_button("view-refresh-symbolic", "Refresh library from Jellyfin");
-    refresh.add_css_class("toolbar-button");
-    refresh.set_sensitive(false);
-    {
-        let state = state.clone();
-        refresh.connect_clicked(move |button| {
-            refresh_jellyfin_library(state.clone(), button.clone());
-        });
-    }
-    state.borrow_mut().refresh_button = Some(refresh.clone());
-    utility_row.append(&refresh);
+    utility_row.set_margin_end(PLAYER_ACTION_EDGE_INSET);
 
     let shuffle = icon_button("media-playlist-shuffle-symbolic", "Shuffle");
     shuffle.add_css_class("toolbar-button");
@@ -1314,6 +1302,19 @@ fn settings_menu_button(state: Rc<RefCell<UiState>>) -> gtk::MenuButton {
     keep_row.append(&keep_switch);
     menu.append(&keep_row);
     menu.append(&gtk::Separator::new(Orientation::Horizontal));
+
+    let refresh = menu_item_button("view-refresh-symbolic", "Refresh library");
+    refresh.set_sensitive(false);
+    {
+        let state = state.clone();
+        let popover = popover.clone();
+        refresh.connect_clicked(move |button| {
+            popover.popdown();
+            refresh_jellyfin_library(state.clone(), button.clone());
+        });
+    }
+    state.borrow_mut().refresh_button = Some(refresh.clone());
+    menu.append(&refresh);
 
     let shortcuts = menu_item_button(
         "preferences-desktop-keyboard-shortcuts-symbolic",
