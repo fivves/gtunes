@@ -4049,6 +4049,21 @@ fn track_key(track: &UiTrack) -> String {
         .unwrap_or_else(|| format!("{}\u{1f}{}\u{1f}{}", track.title, track.artist, track.album))
 }
 
+fn preferred_refresh_track_key(
+    tracks: &[UiTrack],
+    now_playing_key: Option<&str>,
+    selected_key: Option<&str>,
+) -> Option<String> {
+    now_playing_key
+        .filter(|key| tracks.iter().any(|track| track_key(track) == *key))
+        .map(|key| key.to_string())
+        .or_else(|| {
+            selected_key
+                .filter(|key| tracks.iter().any(|track| track_key(track) == *key))
+                .map(|key| key.to_string())
+        })
+}
+
 fn current_display_track(state: &UiState) -> Option<&UiTrack> {
     state
         .now_playing_key
@@ -4115,21 +4130,36 @@ fn duration_seconds(duration: &str) -> i32 {
 }
 
 fn apply_connection_payload(state: &Rc<RefCell<UiState>>, payload: ConnectionPayload) {
+    let (now_playing_key, selected_key) = {
+        let ui = state.borrow();
+        (
+            ui.now_playing_key.clone(),
+            ui.tracks.get(ui.selected_index).map(track_key),
+        )
+    };
+
     {
         let mut ui = state.borrow_mut();
         ui.all_tracks = payload.tracks;
         ui.playlists = payload.playlists;
         rebuild_library_summaries(&mut ui);
-        ui.selected_index = 0;
         ui.jellyfin_connected = true;
-        ui.now_playing_key = None;
         ui.active_page = LibraryPage::Tracks;
         ui.album_filter = None;
         ui.artist_filter = None;
         ui.playlist_filter = None;
         ui.collection_detail_title = None;
         ui.collection_detail_subtitle = None;
-        apply_track_filter(&mut ui, None);
+        let selected_key = preferred_refresh_track_key(
+            &ui.all_tracks,
+            now_playing_key.as_deref(),
+            selected_key.as_deref(),
+        );
+        ui.now_playing_key = now_playing_key
+            .as_deref()
+            .filter(|key| ui.all_tracks.iter().any(|track| track_key(track) == *key))
+            .map(|key| key.to_string());
+        apply_track_filter(&mut ui, selected_key.as_deref());
         update_now_playing_labels(&ui);
         update_play_button(&ui);
         update_page_summary(&ui);
@@ -6601,6 +6631,34 @@ mod tests {
         };
 
         assert!(library_needs_album_order_refresh(&library));
+    }
+
+    #[test]
+    fn refresh_prefers_currently_playing_track_when_it_still_exists() {
+        let tracks = vec![
+            test_track_with("track-1", "album-1", "First", "Alpha", "Artist A", "Artist A"),
+            test_track_with("track-2", "album-2", "Second", "Beta", "Artist B", "Artist B"),
+        ];
+
+        let selected_key = preferred_refresh_track_key(
+            &tracks,
+            Some("track-2"),
+            Some("track-1"),
+        );
+
+        assert_eq!(selected_key.as_deref(), Some("track-2"));
+    }
+
+    #[test]
+    fn refresh_falls_back_to_previous_selection_when_playing_track_is_missing() {
+        let tracks = vec![
+            test_track_with("track-1", "album-1", "First", "Alpha", "Artist A", "Artist A"),
+            test_track_with("track-2", "album-2", "Second", "Beta", "Artist B", "Artist B"),
+        ];
+
+        let selected_key = preferred_refresh_track_key(&tracks, Some("missing"), Some("track-1"));
+
+        assert_eq!(selected_key.as_deref(), Some("track-1"));
     }
 
     #[test]
