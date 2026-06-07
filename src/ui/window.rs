@@ -3561,6 +3561,11 @@ fn set_library_page(state: &Rc<RefCell<UiState>>, page: LibraryPage) {
 }
 
 fn show_album_tracks(state: &Rc<RefCell<UiState>>, album: &AlbumSummary) {
+    let selected_key = {
+        let ui = state.borrow();
+        current_display_track(&ui).and_then(|track| track_key_if_same_album(track, &album.key))
+    };
+
     {
         let mut ui = state.borrow_mut();
         let selected_artist = if ui.active_page == LibraryPage::Artists {
@@ -3582,8 +3587,7 @@ fn show_album_tracks(state: &Rc<RefCell<UiState>>, album: &AlbumSummary) {
             album.artist,
             count_text(album.song_count, "song", "songs")
         ));
-        ui.selected_index = 0;
-        apply_track_filter(&mut ui, None);
+        apply_track_filter(&mut ui, selected_key.as_deref());
         update_now_playing_labels(&ui);
         update_play_button(&ui);
         update_page_summary(&ui);
@@ -4047,6 +4051,10 @@ fn track_key(track: &UiTrack) -> String {
         .item_id
         .clone()
         .unwrap_or_else(|| format!("{}\u{1f}{}\u{1f}{}", track.title, track.artist, track.album))
+}
+
+fn track_key_if_same_album(track: &UiTrack, album_key_value: &str) -> Option<String> {
+    (album_key(track) == album_key_value).then(|| track_key(track))
 }
 
 fn preferred_refresh_track_key(
@@ -6663,6 +6671,28 @@ mod tests {
         let selected_key = preferred_refresh_track_key(&tracks, Some("missing"), Some("track-1"));
 
         assert_eq!(selected_key.as_deref(), Some("track-1"));
+    }
+
+    #[test]
+    fn album_navigation_preserves_current_track_when_it_belongs_to_that_album() {
+        let track = test_track_with(
+            "track-2", "album-1", "Second", "Alpha", "Artist A", "Artist A",
+        );
+
+        let selected_key = track_key_if_same_album(&track, "album-1");
+
+        assert_eq!(selected_key.as_deref(), Some("track-2"));
+    }
+
+    #[test]
+    fn album_navigation_does_not_force_selection_for_other_albums() {
+        let track = test_track_with(
+            "track-2", "album-1", "Second", "Alpha", "Artist A", "Artist A",
+        );
+
+        let selected_key = track_key_if_same_album(&track, "album-2");
+
+        assert!(selected_key.is_none());
     }
 
     #[test]
