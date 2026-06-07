@@ -3727,8 +3727,8 @@ fn navigate_to_now_playing_artist(state: &Rc<RefCell<UiState>>) {
         let key = artist_key(&track.artist);
         ui.library_artists
             .iter()
-            .cloned()
             .find(|artist| artist.key == key)
+            .cloned()
     };
 
     if let Some(artist) = artist {
@@ -3745,8 +3745,8 @@ fn navigate_to_now_playing_album(state: &Rc<RefCell<UiState>>) {
         let key = album_key(track);
         ui.library_albums
             .iter()
-            .cloned()
             .find(|album| album.key == key)
+            .cloned()
     };
 
     if let Some(album) = album {
@@ -6636,15 +6636,15 @@ mod tests {
     #[test]
     fn refresh_prefers_currently_playing_track_when_it_still_exists() {
         let tracks = vec![
-            test_track_with("track-1", "album-1", "First", "Alpha", "Artist A", "Artist A"),
-            test_track_with("track-2", "album-2", "Second", "Beta", "Artist B", "Artist B"),
+            test_track_with(
+                "track-1", "album-1", "First", "Alpha", "Artist A", "Artist A",
+            ),
+            test_track_with(
+                "track-2", "album-2", "Second", "Beta", "Artist B", "Artist B",
+            ),
         ];
 
-        let selected_key = preferred_refresh_track_key(
-            &tracks,
-            Some("track-2"),
-            Some("track-1"),
-        );
+        let selected_key = preferred_refresh_track_key(&tracks, Some("track-2"), Some("track-1"));
 
         assert_eq!(selected_key.as_deref(), Some("track-2"));
     }
@@ -6652,8 +6652,12 @@ mod tests {
     #[test]
     fn refresh_falls_back_to_previous_selection_when_playing_track_is_missing() {
         let tracks = vec![
-            test_track_with("track-1", "album-1", "First", "Alpha", "Artist A", "Artist A"),
-            test_track_with("track-2", "album-2", "Second", "Beta", "Artist B", "Artist B"),
+            test_track_with(
+                "track-1", "album-1", "First", "Alpha", "Artist A", "Artist A",
+            ),
+            test_track_with(
+                "track-2", "album-2", "Second", "Beta", "Artist B", "Artist B",
+            ),
         ];
 
         let selected_key = preferred_refresh_track_key(&tracks, Some("missing"), Some("track-1"));
