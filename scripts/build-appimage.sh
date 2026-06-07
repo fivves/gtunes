@@ -147,7 +147,7 @@ Comment=A GTK4/Libadwaita Jellyfin music streaming client
 Exec=$BIN_NAME
 Icon=$APP_ID
 Terminal=false
-Categories=Audio;Music;Player;GTK;
+Categories=AudioVideo;Music;Player;GTK;
 StartupWMClass=$APP_ID
 EOF
 

@@ -6,7 +6,7 @@ library metadata.
 
 ## Supported Versions
 
-The 1.0 release line and the active development branch are supported for
+The 1.1 release line and the active development branch are supported for
 security fixes.
 
 ## Reporting a Vulnerability
