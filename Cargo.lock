@@ -763,11 +763,13 @@ name = "gtunes"
 version = "1.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "directories",
  "gstreamer",
  "gtk4",
  "libadwaita",
  "reqwest",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",

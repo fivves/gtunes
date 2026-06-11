@@ -5,6 +5,7 @@ mod jellyfin;
 mod playback;
 mod ui;
 mod waveform;
+mod youtube;
 
 fn main() -> gtk::glib::ExitCode {
     tracing_subscriber::fmt()

@@ -13,10 +13,12 @@ categories = ["multimedia::audio"]
 [dependencies]
 adw = { version = "0.9.1", package = "libadwaita" }
 anyhow = "1.0.102"
+base64 = "0.22.1"
 directories = "6.0.0"
 gst = { version = "0.25.2", package = "gstreamer" }
 gtk = { version = "0.11.3", package = "gtk4", features = ["v4_10"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "stream", "rustls"] }
+ring = "0.17.14"
 rusqlite = "0.40.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"

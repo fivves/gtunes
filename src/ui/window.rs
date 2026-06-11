@@ -24,6 +24,7 @@ use crate::playback::{
     PlaybackEngine, PlaybackEvent, PlaybackRequest, PlaybackState, PlaybackStreamKind,
 };
 use crate::waveform::{WaveformKey, WaveformSummary};
+use crate::youtube::{ResolvedYouTubeStream, YouTubeAuthSession, YouTubeClient, YouTubeMusicTrack};
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 struct UiTrack {
@@ -76,6 +77,31 @@ struct UiPlaylist {
     tracks: Vec<UiTrack>,
 }
 
+#[derive(Clone, Debug)]
+struct UiYouTubeTrack {
+    video_id: String,
+    title: String,
+    artist: String,
+    album: String,
+    duration: String,
+    quality: String,
+    thumbnail_url: Option<String>,
+}
+
+impl From<YouTubeMusicTrack> for UiYouTubeTrack {
+    fn from(track: YouTubeMusicTrack) -> Self {
+        Self {
+            video_id: track.video_id,
+            title: track.title,
+            artist: track.artist,
+            album: track.album,
+            duration: track.duration,
+            quality: track.quality,
+            thumbnail_url: track.thumbnail_url,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 enum SortColumn {
     Title,
@@ -90,6 +116,7 @@ enum LibraryPage {
     Albums,
     Artists,
     Playlists,
+    YouTubeMusic,
 }
 
 #[derive(Debug)]
@@ -130,6 +157,13 @@ struct UiState {
     all_tracks: Vec<UiTrack>,
     tracks: Vec<UiTrack>,
     playlists: Vec<UiPlaylist>,
+    youtube_session: Option<YouTubeAuthSession>,
+    youtube_results: Vec<UiYouTubeTrack>,
+    youtube_query: String,
+    youtube_selected_index: usize,
+    youtube_auth_generation: u64,
+    youtube_search_generation: u64,
+    youtube_playback_generation: u64,
     track_filter_signature: TrackFilterSignature,
     library_albums: Vec<AlbumSummary>,
     library_artists: Vec<ArtistSummary>,
@@ -161,15 +195,23 @@ struct UiState {
     detail_title_label: Option<gtk::Label>,
     detail_subtitle_label: Option<gtk::Label>,
     nav_list: Option<gtk::ListBox>,
+    streaming_nav_list: Option<gtk::ListBox>,
     nav_track_count: Option<gtk::Label>,
     nav_album_count: Option<gtk::Label>,
     nav_artist_count: Option<gtk::Label>,
     nav_playlist_count: Option<gtk::Label>,
+    nav_youtube_count: Option<gtk::Label>,
     track_model: gtk::StringList,
     track_selection: Option<gtk::SingleSelection>,
     track_stack: Option<gtk::Stack>,
     track_empty: Option<gtk::Label>,
     track_empty_detail: Option<gtk::Label>,
+    youtube_result_model: gtk::StringList,
+    youtube_result_selection: Option<gtk::SingleSelection>,
+    youtube_result_stack: Option<gtk::Stack>,
+    youtube_result_empty: Option<gtk::Label>,
+    youtube_result_empty_detail: Option<gtk::Label>,
+    youtube_result_indicators: HashMap<usize, gtk::Image>,
     now_title: gtk::Label,
     now_meta: gtk::Label,
     playback_status: gtk::Label,
@@ -183,6 +225,12 @@ struct UiState {
     connection_username_entry: Option<gtk::Entry>,
     connection_password_entry: Option<gtk::PasswordEntry>,
     search_entry: Option<gtk::SearchEntry>,
+    youtube_client_id_entry: Option<gtk::Entry>,
+    youtube_client_secret_entry: Option<gtk::PasswordEntry>,
+    youtube_auth_status: Option<gtk::Label>,
+    youtube_search_entry: Option<gtk::SearchEntry>,
+    youtube_search_button: Option<gtk::Button>,
+    youtube_search_status: Option<gtk::Label>,
     cover_art: Option<gtk::Image>,
     play_button: Option<gtk::Button>,
     shuffle_button: Option<gtk::Button>,
@@ -478,10 +526,18 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
 
     let view_settings = load_library_view_settings();
     let keep_playing_while_closed = load_keep_playing_while_closed();
+    let youtube_session = load_youtube_session();
     let state = Rc::new(RefCell::new(UiState {
         all_tracks: Vec::new(),
         tracks: Vec::new(),
         playlists: Vec::new(),
+        youtube_session,
+        youtube_results: Vec::new(),
+        youtube_query: String::new(),
+        youtube_selected_index: 0,
+        youtube_auth_generation: 0,
+        youtube_search_generation: 0,
+        youtube_playback_generation: 0,
         track_filter_signature: TrackFilterSignature {
             album_filter: None,
             artist_filter: None,
@@ -520,15 +576,23 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         detail_title_label: None,
         detail_subtitle_label: None,
         nav_list: None,
+        streaming_nav_list: None,
         nav_track_count: None,
         nav_album_count: None,
         nav_artist_count: None,
         nav_playlist_count: None,
+        nav_youtube_count: None,
         track_model: gtk::StringList::new(&[]),
         track_selection: None,
         track_stack: None,
         track_empty: None,
         track_empty_detail: None,
+        youtube_result_model: gtk::StringList::new(&[]),
+        youtube_result_selection: None,
+        youtube_result_stack: None,
+        youtube_result_empty: None,
+        youtube_result_empty_detail: None,
+        youtube_result_indicators: HashMap::new(),
         now_title: label("No track selected", "now-title"),
         now_meta: label("Connect to Jellyfin to load music", "meta"),
         playback_status: label("Jellyfin stream | Not playing", "meta"),
@@ -542,6 +606,12 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         connection_username_entry: None,
         connection_password_entry: None,
         search_entry: None,
+        youtube_client_id_entry: None,
+        youtube_client_secret_entry: None,
+        youtube_auth_status: None,
+        youtube_search_entry: None,
+        youtube_search_button: None,
+        youtube_search_status: None,
         cover_art: None,
         play_button: None,
         shuffle_button: None,
@@ -600,8 +670,14 @@ fn connect_app_shortcuts(root: &gtk::Box, state: Rc<RefCell<UiState>>) {
                 gtk::gdk::Key::_2 => set_library_page(&state, LibraryPage::Albums),
                 gtk::gdk::Key::_3 => set_library_page(&state, LibraryPage::Artists),
                 gtk::gdk::Key::_4 => set_library_page(&state, LibraryPage::Playlists),
+                gtk::gdk::Key::_5 => set_library_page(&state, LibraryPage::YouTubeMusic),
                 gtk::gdk::Key::f | gtk::gdk::Key::F => {
-                    if let Some(search) = state.borrow().search_entry.as_ref() {
+                    let ui = state.borrow();
+                    if ui.active_page == LibraryPage::YouTubeMusic {
+                        if let Some(search) = ui.youtube_search_entry.as_ref() {
+                            search.grab_focus();
+                        }
+                    } else if let Some(search) = ui.search_entry.as_ref() {
                         search.grab_focus();
                     }
                 }
@@ -720,6 +796,18 @@ fn text_input_has_focus(state: &Rc<RefCell<UiState>>) -> bool {
             .connection_password_entry
             .as_ref()
             .is_some_and(widget_has_focus_within)
+        || ui
+            .youtube_client_id_entry
+            .as_ref()
+            .is_some_and(widget_has_focus_within)
+        || ui
+            .youtube_client_secret_entry
+            .as_ref()
+            .is_some_and(widget_has_focus_within)
+        || ui
+            .youtube_search_entry
+            .as_ref()
+            .is_some_and(widget_has_focus_within)
 }
 
 fn widget_has_focus_within(widget: &impl IsA<gtk::Widget>) -> bool {
@@ -734,6 +822,9 @@ fn widget_has_focus_within(widget: &impl IsA<gtk::Widget>) -> bool {
 fn navigate_invisible_search(state: &Rc<RefCell<UiState>>, query: &str) -> bool {
     let normalized_query = query.trim().to_lowercase();
     if normalized_query.is_empty() {
+        return false;
+    }
+    if state.borrow().active_page == LibraryPage::YouTubeMusic {
         return false;
     }
 
@@ -820,6 +911,7 @@ fn visible_library_content(ui: &UiState) -> VisibleLibraryContent {
         (LibraryPage::Artists, true) => VisibleLibraryContent::Tracks,
         (LibraryPage::Playlists, false) => VisibleLibraryContent::Playlists,
         (LibraryPage::Playlists, true) => VisibleLibraryContent::Tracks,
+        (LibraryPage::YouTubeMusic, _) => VisibleLibraryContent::Tracks,
     }
 }
 
@@ -1476,6 +1568,7 @@ fn show_keyboard_shortcuts(parent: &gtk::Window) {
         ("Albums", "<Control>2"),
         ("Artists", "<Control>3"),
         ("Playlists", "<Control>4"),
+        ("YouTube Music", "<Control>5"),
         ("Play selected search result", "Return"),
     ] {
         list.append(&shortcut_row(title, accelerator));
@@ -1683,6 +1776,10 @@ fn apply_first_time_setup_state(state: &Rc<RefCell<UiState>>) {
         ui.all_tracks.clear();
         ui.tracks.clear();
         ui.playlists.clear();
+        ui.youtube_session = None;
+        ui.youtube_results.clear();
+        ui.youtube_query.clear();
+        ui.youtube_selected_index = 0;
         ui.track_filter_signature = TrackFilterSignature {
             album_filter: None,
             artist_filter: None,
@@ -1730,12 +1827,21 @@ fn apply_first_time_setup_state(state: &Rc<RefCell<UiState>>) {
         ui.elapsed_label.set_text("0:00");
         ui.remaining_label.set_text("--:--");
         ui.waveform_status.set_text("Select a Jellyfin track");
+        if let Some(status) = ui.youtube_auth_status.as_ref() {
+            status.set_text("Not signed in");
+        }
+        if let Some(status) = ui.youtube_search_status.as_ref() {
+            status.set_text("Ready");
+        }
         update_play_button(&ui);
         update_shuffle_button(&ui);
         update_mpris_status(&mut ui);
     }
 
     if let Some(entry) = search_entry.as_ref() {
+        entry.set_text("");
+    }
+    if let Some(entry) = state.borrow().youtube_search_entry.as_ref() {
         entry.set_text("");
     }
     if let Some(entry) = server_entry.as_ref() {
@@ -1770,6 +1876,8 @@ fn apply_first_time_setup_state(state: &Rc<RefCell<UiState>>) {
     }
 
     refresh_track_model(state);
+    refresh_youtube_result_model(state);
+    refresh_youtube_auth_status(state);
     refresh_collection_grids(state);
     update_content_view(state);
 }
@@ -1796,6 +1904,8 @@ fn build_sidebar(state: Rc<RefCell<UiState>>) -> (gtk::Box, gtk::Box, gtk::Box) 
 
     sidebar.append(&label("Library", "section-title"));
     sidebar.append(&nav_list(state.clone()));
+    sidebar.append(&label("Streaming", "section-label"));
+    sidebar.append(&streaming_nav_list(state.clone()));
 
     let spacer = gtk::Box::new(Orientation::Vertical, 0);
     spacer.set_vexpand(true);
@@ -1850,6 +1960,7 @@ fn build_content(state: Rc<RefCell<UiState>>) -> gtk::Box {
     stack.add_named(&album_grid_page(state.clone()), Some("albums"));
     stack.add_named(&artist_grid_page(state.clone()), Some("artists"));
     stack.add_named(&playlist_grid_page(state.clone()), Some("playlists"));
+    stack.add_named(&youtube_music_page(state.clone()), Some("youtube-music"));
     stack.set_visible_child_name("tracks");
     state.borrow_mut().library_stack = Some(stack.clone());
 
@@ -3112,6 +3223,263 @@ fn track_table(state: Rc<RefCell<UiState>>) -> gtk::Box {
     wrapper
 }
 
+fn youtube_music_page(state: Rc<RefCell<UiState>>) -> gtk::Box {
+    let wrapper = gtk::Box::new(Orientation::Vertical, 0);
+    wrapper.set_hexpand(true);
+    wrapper.set_vexpand(true);
+
+    wrapper.append(&youtube_music_controls(state.clone()));
+    wrapper.append(&youtube_results_table(state));
+    wrapper
+}
+
+fn youtube_music_controls(state: Rc<RefCell<UiState>>) -> gtk::Box {
+    let controls = gtk::Box::new(Orientation::Vertical, 10);
+    controls.add_css_class("connection-card");
+
+    let header = gtk::Box::new(Orientation::Horizontal, 12);
+    let text = gtk::Box::new(Orientation::Vertical, 2);
+    text.set_hexpand(true);
+    text.append(&label("YouTube Music", "rail-title"));
+    text.append(&label(
+        "Sign in with a YouTube Music Premium Google account to search and launch playback.",
+        "meta",
+    ));
+    header.append(&text);
+    let auth_status = label("", "meta");
+    auth_status.set_xalign(1.0);
+    header.append(&auth_status);
+    controls.append(&header);
+
+    let auth_row = gtk::Box::new(Orientation::Horizontal, 8);
+    auth_row.set_halign(Align::Fill);
+    let client_id = gtk::Entry::new();
+    client_id.set_placeholder_text(Some("Google OAuth client ID"));
+    client_id.set_hexpand(true);
+    if let Some(session) = state.borrow().youtube_session.as_ref() {
+        client_id.set_text(&session.client_id);
+    }
+    auth_row.append(&client_id);
+    controls.append(&auth_row);
+
+    let secret_row = gtk::Box::new(Orientation::Horizontal, 8);
+    secret_row.set_halign(Align::Fill);
+    let client_secret = gtk::PasswordEntry::new();
+    client_secret.set_placeholder_text(Some("Google OAuth client secret"));
+    client_secret.set_hexpand(true);
+    client_secret.set_width_chars(22);
+    if let Some(secret) = state
+        .borrow()
+        .youtube_session
+        .as_ref()
+        .and_then(|session| session.client_secret.as_deref())
+    {
+        client_secret.set_text(secret);
+    }
+    secret_row.append(&client_secret);
+    let sign_in = gtk::Button::with_label("Sign in");
+    sign_in.add_css_class("connection-button");
+    {
+        let state = state.clone();
+        sign_in.connect_clicked(move |_| {
+            start_youtube_sign_in(&state);
+        });
+    }
+    secret_row.append(&sign_in);
+    controls.append(&secret_row);
+
+    let search_row = gtk::Box::new(Orientation::Horizontal, 8);
+    search_row.set_halign(Align::Fill);
+    let search = gtk::SearchEntry::new();
+    search.add_css_class("search");
+    search.set_placeholder_text(Some("Search YouTube Music"));
+    search.set_hexpand(true);
+    {
+        let state = state.clone();
+        search.connect_search_changed(move |entry| {
+            set_youtube_query(&state, entry.text().trim());
+        });
+    }
+    {
+        let state = state.clone();
+        search.connect_activate(move |_| {
+            search_youtube_music(&state);
+        });
+    }
+    search_row.append(&search);
+    let search_button = gtk::Button::with_label("Search");
+    search_button.add_css_class("connection-button");
+    {
+        let state = state.clone();
+        search_button.connect_clicked(move |_| {
+            search_youtube_music(&state);
+        });
+    }
+    search_row.append(&search_button);
+    controls.append(&search_row);
+
+    let search_status = label("Ready", "meta");
+    controls.append(&search_status);
+
+    {
+        let mut ui = state.borrow_mut();
+        ui.youtube_client_id_entry = Some(client_id);
+        ui.youtube_client_secret_entry = Some(client_secret);
+        ui.youtube_auth_status = Some(auth_status);
+        ui.youtube_search_entry = Some(search);
+        ui.youtube_search_button = Some(search_button);
+        ui.youtube_search_status = Some(search_status);
+    }
+    refresh_youtube_auth_status(&state);
+
+    controls
+}
+
+fn youtube_results_table(state: Rc<RefCell<UiState>>) -> gtk::Box {
+    let wrapper = gtk::Box::new(Orientation::Vertical, 0);
+    wrapper.set_hexpand(true);
+    wrapper.set_vexpand(true);
+
+    let stack = gtk::Stack::new();
+    stack.set_hexpand(true);
+    stack.set_vexpand(true);
+
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.add_css_class("track-scroll");
+    scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    scroll.set_overlay_scrolling(true);
+    scroll.set_hexpand(true);
+    scroll.set_vexpand(true);
+
+    let model = state.borrow().youtube_result_model.clone();
+    let selection = gtk::SingleSelection::new(Some(model));
+    selection.set_autoselect(false);
+    selection.set_can_unselect(false);
+
+    let list = gtk::ColumnView::new(Some(selection.clone()));
+    list.add_css_class("track-list");
+    list.set_single_click_activate(true);
+    list.set_hexpand(true);
+    list.set_vexpand(true);
+    list.set_show_column_separators(false);
+    list.set_show_row_separators(true);
+    for column in TRACK_COLUMNS {
+        list.append_column(&youtube_result_column_view(column, state.clone()));
+    }
+    {
+        let state = state.clone();
+        list.connect_activate(move |_, position| {
+            play_youtube_track_at(&state, position as usize);
+        });
+    }
+
+    scroll.set_child(Some(&list));
+    stack.add_named(&scroll, Some("list"));
+
+    let empty_state = gtk::Box::new(Orientation::Vertical, 8);
+    empty_state.add_css_class("track-empty-state");
+    empty_state.set_valign(Align::Start);
+    let empty_icon = gtk::Image::from_icon_name("folder-music-symbolic");
+    empty_icon.add_css_class("placeholder-icon");
+    empty_icon.set_pixel_size(28);
+    empty_icon.set_halign(Align::Start);
+    let empty = label("Search YouTube Music", "rail-title");
+    let empty_detail = label("Results appear here after a signed-in search.", "meta");
+    empty_detail.set_wrap(true);
+    empty_detail.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    empty_state.append(&empty_icon);
+    empty_state.append(&empty);
+    empty_state.append(&empty_detail);
+    stack.add_named(&empty_state, Some("empty"));
+    stack.set_visible_child_name("empty");
+
+    {
+        let mut ui = state.borrow_mut();
+        ui.youtube_result_selection = Some(selection);
+        ui.youtube_result_stack = Some(stack.clone());
+        ui.youtube_result_empty = Some(empty);
+        ui.youtube_result_empty_detail = Some(empty_detail);
+    }
+    refresh_youtube_result_model(&state);
+
+    wrapper.append(&stack);
+    wrapper
+}
+
+fn youtube_result_column_view(
+    column: TrackColumn,
+    state: Rc<RefCell<UiState>>,
+) -> gtk::ColumnViewColumn {
+    let factory = gtk::SignalListItemFactory::new();
+
+    factory.connect_setup(move |_, list_item| {
+        let Some(list_item) = list_item.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        if column.sort_column == SortColumn::Title {
+            let (cell, _) = track_title_cell(false);
+            list_item.set_child(Some(&cell));
+        } else {
+            let cell = track_cell_label(column);
+            list_item.set_child(Some(&cell));
+        }
+    });
+
+    let state_bind = state.clone();
+    factory.connect_bind(move |_, list_item| {
+        let Some(list_item) = list_item.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let position = list_item.position() as usize;
+        let (track, is_now_playing) = {
+            let ui = state_bind.borrow();
+            let Some(track) = ui.youtube_results.get(position).cloned() else {
+                return;
+            };
+            let key = youtube_track_key(&track);
+            let is_now_playing = ui.now_playing_key.as_deref() == Some(key.as_str());
+            (track, is_now_playing)
+        };
+
+        if column.sort_column == SortColumn::Title {
+            bind_title_cell(list_item, &track.title, is_now_playing);
+            if let Some(indicator) = get_indicator_image(list_item) {
+                state_bind
+                    .borrow_mut()
+                    .youtube_result_indicators
+                    .insert(position, indicator);
+            }
+        } else if let Some(label) = list_item
+            .child()
+            .and_then(|child| child.downcast::<gtk::Label>().ok())
+        {
+            label.set_text(youtube_track_value(&track, column.sort_column));
+        }
+    });
+
+    if column.sort_column == SortColumn::Title {
+        let state = state.clone();
+        factory.connect_unbind(move |_, list_item| {
+            let Some(list_item) = list_item.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
+            let position = list_item.position() as usize;
+            state
+                .borrow_mut()
+                .youtube_result_indicators
+                .remove(&position);
+        });
+    }
+
+    let view_column = gtk::ColumnViewColumn::new(Some(column.header), Some(factory));
+    view_column.set_resizable(true);
+    view_column.set_expand(column.expand);
+    if column.width > 0 {
+        view_column.set_fixed_width(column.width);
+    }
+    view_column
+}
+
 fn track_column_view(column: TrackColumn, state: Rc<RefCell<UiState>>) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
 
@@ -3339,6 +3707,531 @@ fn refresh_track_model(state: &Rc<RefCell<UiState>>) {
     rebuild_queue_list(state);
 }
 
+fn set_youtube_query(state: &Rc<RefCell<UiState>>, query: &str) {
+    let mut refresh = false;
+    {
+        let mut ui = state.borrow_mut();
+        if ui.youtube_query == query {
+            return;
+        }
+        ui.youtube_query = query.to_string();
+        if ui.youtube_query.is_empty() {
+            ui.youtube_results.clear();
+            ui.youtube_selected_index = 0;
+            refresh = true;
+        }
+        update_page_summary(&ui);
+    }
+    if refresh {
+        refresh_youtube_result_model(state);
+        update_nav_counts(state);
+    }
+}
+
+fn refresh_youtube_result_model(state: &Rc<RefCell<UiState>>) {
+    {
+        let mut ui = state.borrow_mut();
+        ui.youtube_result_indicators.clear();
+    }
+    let (
+        model,
+        selection,
+        stack,
+        empty,
+        empty_detail,
+        result_count,
+        selected_index,
+        empty_text,
+        empty_detail_text,
+    ) = {
+        let ui = state.borrow();
+        let (empty_text, empty_detail_text) = if ui.youtube_query.is_empty() {
+            (
+                "Search YouTube Music".to_string(),
+                "Results appear here after a signed-in search.".to_string(),
+            )
+        } else {
+            (
+                format!("No YouTube Music results for \"{}\"", ui.youtube_query),
+                "Try a different search or sign in again.".to_string(),
+            )
+        };
+        (
+            ui.youtube_result_model.clone(),
+            ui.youtube_result_selection.clone(),
+            ui.youtube_result_stack.clone(),
+            ui.youtube_result_empty.clone(),
+            ui.youtube_result_empty_detail.clone(),
+            ui.youtube_results.len(),
+            ui.youtube_selected_index,
+            empty_text,
+            empty_detail_text,
+        )
+    };
+
+    let additions = vec![""; result_count];
+    model.splice(0, model.n_items(), &additions);
+
+    if let Some(empty) = empty.as_ref() {
+        empty.set_text(&empty_text);
+    }
+    if let Some(empty_detail) = empty_detail.as_ref() {
+        empty_detail.set_text(&empty_detail_text);
+    }
+    if let Some(stack) = stack.as_ref() {
+        stack.set_visible_child_name(if result_count == 0 { "empty" } else { "list" });
+    }
+
+    gtk::glib::idle_add_local(move || {
+        if let Some(selection) = selection.as_ref()
+            && result_count > 0
+        {
+            selection.set_selected(selected_index.min(result_count.saturating_sub(1)) as u32);
+        }
+        gtk::glib::ControlFlow::Break
+    });
+}
+
+fn refresh_youtube_result_indicators(state: &Rc<RefCell<UiState>>) {
+    let ui = state.borrow();
+    let now_playing_key = ui.now_playing_key.clone();
+
+    for (pos, indicator) in &ui.youtube_result_indicators {
+        let is_playing = ui
+            .youtube_results
+            .get(*pos)
+            .map(|track| Some(youtube_track_key(track)) == now_playing_key)
+            .unwrap_or(false);
+        indicator.set_opacity(if is_playing { 1.0 } else { 0.0 });
+    }
+}
+
+fn youtube_track_key(track: &UiYouTubeTrack) -> String {
+    format!("youtube:{}", track.video_id)
+}
+
+fn youtube_track_value(track: &UiYouTubeTrack, column: SortColumn) -> &str {
+    match column {
+        SortColumn::Title => &track.title,
+        SortColumn::Artist => &track.artist,
+        SortColumn::Album => &track.album,
+        SortColumn::Duration => &track.duration,
+    }
+}
+
+fn refresh_youtube_auth_status(state: &Rc<RefCell<UiState>>) {
+    let (status, search_sensitive) = {
+        let ui = state.borrow();
+        if ui.youtube_session.is_some() {
+            ("Signed in".to_string(), true)
+        } else {
+            ("Not signed in".to_string(), false)
+        }
+    };
+    let ui = state.borrow();
+    if let Some(label) = ui.youtube_auth_status.as_ref() {
+        label.set_text(&status);
+    }
+    if let Some(button) = ui.youtube_search_button.as_ref() {
+        button.set_sensitive(search_sensitive);
+    }
+}
+
+fn start_youtube_sign_in(state: &Rc<RefCell<UiState>>) {
+    let (client_id, client_secret, status, generation) = {
+        let mut ui = state.borrow_mut();
+        let client_id = ui
+            .youtube_client_id_entry
+            .as_ref()
+            .map(|entry| entry.text().trim().to_string())
+            .unwrap_or_default();
+        let client_secret = ui
+            .youtube_client_secret_entry
+            .as_ref()
+            .map(|entry| entry.text().trim().to_string())
+            .unwrap_or_default();
+        if client_id.is_empty() {
+            if let Some(status) = ui.youtube_auth_status.as_ref() {
+                status.set_text("Enter a Google OAuth client ID");
+            }
+            return;
+        }
+        if client_secret.is_empty() {
+            if let Some(status) = ui.youtube_auth_status.as_ref() {
+                status.set_text("Enter the Google OAuth client secret");
+            }
+            return;
+        }
+        ui.youtube_auth_generation = ui.youtube_auth_generation.wrapping_add(1);
+        if let Some(status) = ui.youtube_auth_status.as_ref() {
+            status.set_text("Opening Google sign-in");
+        }
+        (
+            client_id,
+            client_secret,
+            ui.youtube_auth_status.clone(),
+            ui.youtube_auth_generation,
+        )
+    };
+
+    let pending = match YouTubeClient::begin_installed_auth(client_id, client_secret) {
+        Ok(pending) => pending,
+        Err(error) => {
+            if let Some(status) = status.as_ref() {
+                status.set_text(&format!("Sign-in failed: {error}"));
+            }
+            return;
+        }
+    };
+
+    if let Err(error) = open_external_uri(&pending.auth_url) {
+        if let Some(status) = status.as_ref() {
+            status.set_text(&format!("Open browser failed: {error}"));
+        }
+    } else if let Some(status) = status.as_ref() {
+        status.set_text("Waiting for Google sign-in");
+    }
+
+    let receiver = pending.receiver;
+    let state = state.clone();
+    gtk::glib::timeout_add_local(Duration::from_millis(150), move || {
+        match receiver.try_recv() {
+            Ok(Ok(session)) => {
+                save_youtube_session(&session);
+                {
+                    let mut ui = state.borrow_mut();
+                    if ui.youtube_auth_generation != generation {
+                        return gtk::glib::ControlFlow::Break;
+                    }
+                    ui.youtube_session = Some(session);
+                    if let Some(status) = ui.youtube_auth_status.as_ref() {
+                        status.set_text("Signed in");
+                    }
+                    if let Some(search_button) = ui.youtube_search_button.as_ref() {
+                        search_button.set_sensitive(true);
+                    }
+                    ui.page_summary.set_text("YouTube Music | Ready");
+                }
+                gtk::glib::ControlFlow::Break
+            }
+            Ok(Err(error)) => {
+                let ui = state.borrow();
+                if let Some(status) = ui.youtube_auth_status.as_ref() {
+                    status.set_text(&format!("Sign-in failed: {error}"));
+                }
+                gtk::glib::ControlFlow::Break
+            }
+            Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                let ui = state.borrow();
+                if let Some(status) = ui.youtube_auth_status.as_ref() {
+                    status.set_text("Sign-in stopped unexpectedly");
+                }
+                gtk::glib::ControlFlow::Break
+            }
+        }
+    });
+}
+
+fn search_youtube_music(state: &Rc<RefCell<UiState>>) {
+    let (query, session, generation) = {
+        let mut ui = state.borrow_mut();
+        let query = ui
+            .youtube_search_entry
+            .as_ref()
+            .map(|entry| entry.text().trim().to_string())
+            .unwrap_or_else(|| ui.youtube_query.clone());
+        if query.is_empty() {
+            if let Some(status) = ui.youtube_search_status.as_ref() {
+                status.set_text("Enter a search");
+            }
+            return;
+        }
+        let Some(session) = ui.youtube_session.clone() else {
+            if let Some(status) = ui.youtube_search_status.as_ref() {
+                status.set_text("Sign in to YouTube Music first");
+            }
+            return;
+        };
+        ui.youtube_query = query.clone();
+        ui.youtube_search_generation = ui.youtube_search_generation.wrapping_add(1);
+        if let Some(status) = ui.youtube_search_status.as_ref() {
+            status.set_text("Searching YouTube Music");
+        }
+        if let Some(button) = ui.youtube_search_button.as_ref() {
+            button.set_sensitive(false);
+        }
+        (query, session, ui.youtube_search_generation)
+    };
+
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = YouTubeClient::new().and_then(|client| {
+            let mut session = session;
+            client
+                .search_music(&mut session, &query)
+                .map(|tracks| (session, tracks))
+        });
+        let _ = sender.send(result);
+    });
+
+    let state = state.clone();
+    gtk::glib::timeout_add_local(Duration::from_millis(100), move || {
+        match receiver.try_recv() {
+            Ok(Ok((session, tracks))) => {
+                {
+                    let mut ui = state.borrow_mut();
+                    if ui.youtube_search_generation != generation {
+                        return gtk::glib::ControlFlow::Break;
+                    }
+                    save_youtube_session(&session);
+                    ui.youtube_session = Some(session);
+                    ui.youtube_results = tracks.into_iter().map(UiYouTubeTrack::from).collect();
+                    ui.youtube_selected_index = 0;
+                    if let Some(status) = ui.youtube_search_status.as_ref() {
+                        status.set_text(&format!("{} results", ui.youtube_results.len()));
+                    }
+                    if let Some(button) = ui.youtube_search_button.as_ref() {
+                        button.set_sensitive(true);
+                    }
+                    update_page_summary(&ui);
+                }
+                refresh_youtube_result_model(&state);
+                update_nav_counts(&state);
+                gtk::glib::ControlFlow::Break
+            }
+            Ok(Err(error)) => {
+                {
+                    let ui = state.borrow();
+                    if let Some(status) = ui.youtube_search_status.as_ref() {
+                        status.set_text(&format!("Search failed: {error}"));
+                    }
+                    if let Some(button) = ui.youtube_search_button.as_ref() {
+                        button.set_sensitive(true);
+                    }
+                }
+                gtk::glib::ControlFlow::Break
+            }
+            Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                {
+                    let ui = state.borrow();
+                    if let Some(status) = ui.youtube_search_status.as_ref() {
+                        status.set_text("Search stopped unexpectedly");
+                    }
+                    if let Some(button) = ui.youtube_search_button.as_ref() {
+                        button.set_sensitive(true);
+                    }
+                }
+                gtk::glib::ControlFlow::Break
+            }
+        }
+    });
+}
+
+fn play_youtube_track_at(state: &Rc<RefCell<UiState>>, index: usize) {
+    let (track, generation) = {
+        let mut ui = state.borrow_mut();
+        let Some(track) = ui.youtube_results.get(index).cloned() else {
+            return;
+        };
+        ui.youtube_playback_generation = ui.youtube_playback_generation.wrapping_add(1);
+        let generation = ui.youtube_playback_generation;
+        ui.youtube_selected_index = index;
+        stop_playback(&mut ui);
+        ui.now_playing_key = Some(youtube_track_key(&track));
+        ui.now_title.set_text(&track.title);
+        ui.now_meta.set_text(&track.artist);
+        ui.playback_status.set_text(&format!(
+            "Resolving YouTube Music stream | {}",
+            track.quality
+        ));
+        ui.elapsed_label.set_text("0:00");
+        ui.remaining_label.set_text("--:--");
+        ui.waveform_status.set_text("Resolving YouTube stream");
+        update_play_button(&ui);
+        (track, generation)
+    };
+
+    refresh_youtube_result_indicators(state);
+    load_youtube_cover_art(state, track.thumbnail_url.clone());
+
+    let (sender, receiver) = mpsc::channel();
+    let resolve_track = track.clone();
+    std::thread::spawn(move || {
+        let result = YouTubeClient::resolve_music_stream(&resolve_track.video_id);
+        let _ = sender.send((resolve_track, result));
+    });
+
+    let state = state.clone();
+    gtk::glib::timeout_add_local(Duration::from_millis(100), move || {
+        match receiver.try_recv() {
+            Ok((track, Ok(stream))) => {
+                play_resolved_youtube_stream(&state, track, stream, generation);
+                gtk::glib::ControlFlow::Break
+            }
+            Ok((track, Err(error))) => {
+                let mut ui = state.borrow_mut();
+                if ui.youtube_playback_generation == generation
+                    && ui.now_playing_key.as_deref() == Some(youtube_track_key(&track).as_str())
+                {
+                    ui.playback_status
+                        .set_text(&format!("YouTube stream resolve failed: {error}"));
+                    ui.waveform_status.set_text("YouTube stream unavailable");
+                    ui.now_playing_key = None;
+                    update_play_button(&ui);
+                    update_mpris_status(&mut ui);
+                }
+                drop(ui);
+                refresh_youtube_result_indicators(&state);
+                gtk::glib::ControlFlow::Break
+            }
+            Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                let mut ui = state.borrow_mut();
+                if ui.youtube_playback_generation == generation {
+                    ui.playback_status
+                        .set_text("YouTube stream resolver stopped unexpectedly");
+                    ui.waveform_status.set_text("YouTube stream unavailable");
+                    ui.now_playing_key = None;
+                    update_play_button(&ui);
+                    update_mpris_status(&mut ui);
+                }
+                drop(ui);
+                refresh_youtube_result_indicators(&state);
+                gtk::glib::ControlFlow::Break
+            }
+        }
+    });
+}
+
+fn play_resolved_youtube_stream(
+    state: &Rc<RefCell<UiState>>,
+    track: UiYouTubeTrack,
+    stream: ResolvedYouTubeStream,
+    generation: u64,
+) {
+    let key = youtube_track_key(&track);
+    let stream_url = match stream.stream_url.parse() {
+        Ok(stream_url) => stream_url,
+        Err(error) => {
+            state
+                .borrow()
+                .playback_status
+                .set_text(&format!("Invalid YouTube stream URL: {error}"));
+            return;
+        }
+    };
+
+    let mut ui = state.borrow_mut();
+    if ui.youtube_playback_generation != generation
+        || ui.now_playing_key.as_deref() != Some(key.as_str())
+    {
+        return;
+    }
+    let Some(playback) = ui.playback.as_mut() else {
+        ui.now_playing_key = None;
+        ui.playback_status
+            .set_text("GStreamer playbin is unavailable");
+        update_play_button(&ui);
+        return;
+    };
+
+    let request = PlaybackRequest {
+        item_id: key.clone(),
+        stream_url,
+        http_headers: stream.http_headers,
+        stream_kind: PlaybackStreamKind::Direct,
+        title: track.title.clone(),
+    };
+
+    match playback.play(request) {
+        Ok(()) => {
+            ui.now_playing_key = Some(key);
+            ui.now_title.set_text(&track.title);
+            ui.now_meta.set_text(&track.artist);
+            ui.playback_status.set_text(&format!(
+                "Playing YouTube Music natively | {}",
+                track.quality
+            ));
+            ui.waveform_status.set_text("YouTube Music stream");
+            update_play_button(&ui);
+            update_mpris_status(&mut ui);
+        }
+        Err(error) => {
+            ui.now_playing_key = None;
+            ui.playback_status
+                .set_text(&format!("YouTube playback failed: {error}"));
+            ui.waveform_status.set_text("YouTube stream unavailable");
+            update_play_button(&ui);
+            update_mpris_status(&mut ui);
+        }
+    }
+    drop(ui);
+    refresh_youtube_result_indicators(state);
+}
+
+fn load_youtube_cover_art(state: &Rc<RefCell<UiState>>, url: Option<String>) {
+    let cover = state.borrow().cover_art.clone();
+    let Some(cover) = cover else {
+        return;
+    };
+    let Some(url) = url else {
+        cover.set_paintable(Option::<&gtk::gdk::Paintable>::None);
+        cover.set_icon_name(Some("audio-x-generic-symbolic"));
+        return;
+    };
+
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = fetch_cached_image_file(&url).map(|path| (url, path));
+        let _ = sender.send(result);
+    });
+
+    let state = state.clone();
+    gtk::glib::timeout_add_local(Duration::from_millis(100), move || {
+        match receiver.try_recv() {
+            Ok(Ok((loaded_url, path))) => {
+                let displayed_url = {
+                    let ui = state.borrow();
+                    ui.now_playing_key
+                        .as_deref()
+                        .and_then(|key| key.strip_prefix("youtube:"))
+                        .and_then(|video_id| {
+                            ui.youtube_results
+                                .iter()
+                                .find(|track| track.video_id == video_id)
+                                .and_then(|track| track.thumbnail_url.as_deref())
+                        })
+                        .map(str::to_string)
+                };
+                if displayed_url.as_deref() == Some(loaded_url.as_str()) {
+                    let file = gtk::gio::File::for_path(path);
+                    match gtk::gdk::Texture::from_file(&file) {
+                        Ok(texture) => {
+                            if let Some(cover) = state.borrow().cover_art.as_ref() {
+                                cover.set_paintable(Some(&texture));
+                            }
+                        }
+                        Err(error) => tracing::warn!(%error, "failed to decode YouTube artwork"),
+                    }
+                }
+                gtk::glib::ControlFlow::Break
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "failed to fetch YouTube artwork");
+                gtk::glib::ControlFlow::Break
+            }
+            Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
+            Err(mpsc::TryRecvError::Disconnected) => gtk::glib::ControlFlow::Break,
+        }
+    });
+}
+
+fn open_external_uri(uri: &str) -> Result<(), gtk::glib::Error> {
+    gtk::gio::AppInfo::launch_default_for_uri(uri, None::<&gtk::gio::AppLaunchContext>)
+}
+
 fn update_list_indicators(state: &Rc<RefCell<UiState>>) {
     let ui = state.borrow();
     let now_playing_key = ui.now_playing_key.clone();
@@ -3418,6 +4311,7 @@ fn save_library_view_settings(settings: LibraryViewSettings) {
 
 const LIBRARY_VIEW_SETTINGS_KEY: &str = "library.view.settings";
 const KEEP_PLAYING_WHILE_CLOSED_KEY: &str = "player.keep_playing_while_closed";
+const YOUTUBE_SESSION_KEY: &str = "youtube.session";
 
 fn load_keep_playing_while_closed() -> bool {
     match CacheDatabase::open_default()
@@ -3441,6 +4335,35 @@ fn set_keep_playing_while_closed(state: &Rc<RefCell<UiState>>, enabled: bool) {
         )
     }) {
         tracing::warn!(%error, "failed to save close behavior setting");
+    }
+}
+
+fn load_youtube_session() -> Option<YouTubeAuthSession> {
+    let result = CacheDatabase::open_default()
+        .and_then(|cache| cache.get_setting(YOUTUBE_SESSION_KEY))
+        .and_then(|json| {
+            json.map(|json| serde_json::from_str(&json).map_err(crate::cache::CacheError::from))
+                .transpose()
+        });
+
+    match result {
+        Ok(session) => session,
+        Err(error) => {
+            tracing::warn!(%error, "failed to load YouTube Music session");
+            None
+        }
+    }
+}
+
+fn save_youtube_session(session: &YouTubeAuthSession) {
+    let result = serde_json::to_string(session)
+        .map_err(crate::cache::CacheError::from)
+        .and_then(|json| {
+            CacheDatabase::open_default()
+                .and_then(|cache| cache.set_setting(YOUTUBE_SESSION_KEY, &json))
+        });
+    if let Err(error) = result {
+        tracing::warn!(%error, "failed to save YouTube Music session");
     }
 }
 
@@ -3790,6 +4713,7 @@ fn update_content_view(state: &Rc<RefCell<UiState>>) {
             (LibraryPage::Artists, true) => "tracks",
             (LibraryPage::Playlists, false) => "playlists",
             (LibraryPage::Playlists, true) => "tracks",
+            (LibraryPage::YouTubeMusic, _) => "youtube-music",
         };
         (
             ui.library_stack.clone(),
@@ -3823,10 +4747,12 @@ fn update_nav_counts(state: &Rc<RefCell<UiState>>) {
         album_label,
         artist_label,
         playlist_label,
+        youtube_label,
         tracks,
         albums,
         artists,
         playlists,
+        youtube_results,
     ) = {
         let ui = state.borrow();
         (
@@ -3834,10 +4760,12 @@ fn update_nav_counts(state: &Rc<RefCell<UiState>>) {
             ui.nav_album_count.clone(),
             ui.nav_artist_count.clone(),
             ui.nav_playlist_count.clone(),
+            ui.nav_youtube_count.clone(),
             ui.all_tracks.len(),
             ui.library_albums.len(),
             ui.library_artists.len(),
             ui.playlists.len(),
+            ui.youtube_results.len(),
         )
     };
 
@@ -3853,14 +4781,38 @@ fn update_nav_counts(state: &Rc<RefCell<UiState>>) {
     if let Some(label) = playlist_label.as_ref() {
         label.set_text(&playlists.to_string());
     }
+    if let Some(label) = youtube_label.as_ref() {
+        label.set_text(&youtube_results.to_string());
+    }
 }
 
 fn update_nav_selection(state: &Rc<RefCell<UiState>>) {
-    let (list, active_page) = {
+    let (library_list, streaming_list, active_page) = {
         let ui = state.borrow();
-        (ui.nav_list.clone(), ui.active_page)
+        (
+            ui.nav_list.clone(),
+            ui.streaming_nav_list.clone(),
+            ui.active_page,
+        )
     };
-    let Some(list) = list else {
+
+    if active_page == LibraryPage::YouTubeMusic {
+        if let Some(list) = library_list.as_ref() {
+            list.unselect_all();
+        }
+        if let Some(list) = streaming_list.as_ref()
+            && list.selected_row().is_none()
+            && let Some(row) = list.row_at_index(0)
+        {
+            list.select_row(Some(&row));
+        }
+        return;
+    }
+
+    if let Some(list) = streaming_list.as_ref() {
+        list.unselect_all();
+    }
+    let Some(list) = library_list else {
         return;
     };
 
@@ -3869,11 +4821,11 @@ fn update_nav_selection(state: &Rc<RefCell<UiState>>) {
         LibraryPage::Albums => 1,
         LibraryPage::Artists => 2,
         LibraryPage::Playlists => 3,
+        LibraryPage::YouTubeMusic => return,
     };
-    if list.selected_row().as_ref().map(gtk::ListBoxRow::index) == Some(row_index) {
-        return;
-    }
-    if let Some(row) = list.row_at_index(row_index) {
+    if list.selected_row().as_ref().map(gtk::ListBoxRow::index) != Some(row_index)
+        && let Some(row) = list.row_at_index(row_index)
+    {
         list.select_row(Some(&row));
     }
 }
@@ -3972,6 +4924,12 @@ fn update_page_summary(ui: &UiState) {
         LibraryPage::Playlists => {
             ui.page_summary
                 .set_text(&format!("Playlists | {} playlists", ui.playlists.len()));
+        }
+        LibraryPage::YouTubeMusic => {
+            ui.page_summary.set_text(&format!(
+                "YouTube Music | {} results",
+                ui.youtube_results.len()
+            ));
         }
     }
 }
@@ -4104,6 +5062,13 @@ fn preferred_refresh_track_key(
 }
 
 fn current_display_track(state: &UiState) -> Option<&UiTrack> {
+    if state
+        .now_playing_key
+        .as_deref()
+        .is_some_and(|key| key.starts_with("youtube:"))
+    {
+        return None;
+    }
     state
         .now_playing_key
         .as_deref()
@@ -4169,11 +5134,14 @@ fn duration_seconds(duration: &str) -> i32 {
 }
 
 fn apply_connection_payload(state: &Rc<RefCell<UiState>>, payload: ConnectionPayload) {
-    let (now_playing_key, selected_key) = {
+    let (now_playing_key, selected_key, now_playing_youtube) = {
         let ui = state.borrow();
         (
             ui.now_playing_key.clone(),
             ui.tracks.get(ui.selected_index).map(track_key),
+            ui.now_playing_key
+                .as_deref()
+                .is_some_and(|key| key.starts_with("youtube:")),
         )
     };
 
@@ -4194,10 +5162,14 @@ fn apply_connection_payload(state: &Rc<RefCell<UiState>>, payload: ConnectionPay
             now_playing_key.as_deref(),
             selected_key.as_deref(),
         );
-        ui.now_playing_key = now_playing_key
-            .as_deref()
-            .filter(|key| ui.all_tracks.iter().any(|track| track_key(track) == *key))
-            .map(|key| key.to_string());
+        ui.now_playing_key = if now_playing_youtube {
+            now_playing_key.clone()
+        } else {
+            now_playing_key
+                .as_deref()
+                .filter(|key| ui.all_tracks.iter().any(|track| track_key(track) == *key))
+                .map(|key| key.to_string())
+        };
         if ui.now_playing_key.is_some() && !ui.playback_tracks.is_empty() {
             ui.playback_tracks = ui
                 .playback_tracks
@@ -4247,6 +5219,25 @@ fn apply_connection_payload(state: &Rc<RefCell<UiState>>, payload: ConnectionPay
 }
 
 fn update_now_playing_labels(state: &UiState) {
+    if let Some(video_id) = state
+        .now_playing_key
+        .as_deref()
+        .and_then(|key| key.strip_prefix("youtube:"))
+    {
+        if let Some(track) = state
+            .youtube_results
+            .iter()
+            .find(|track| track.video_id == video_id)
+        {
+            state.now_title.set_text(&track.title);
+            state.now_meta.set_text(&track.artist);
+            state
+                .playback_status
+                .set_text("YouTube Music | Native playback");
+            return;
+        }
+    }
+
     if let Some(track) = current_display_track(state) {
         state.now_title.set_text(&track.title);
         state.now_meta.set_markup(&format!(
@@ -4399,9 +5390,57 @@ fn toggle_play_pause(state: &Rc<RefCell<UiState>>) {
         }
         _ => {
             drop(ui);
-            play_track_at_selected_index(state);
+            if let Some(index) = selected_youtube_index(&state.borrow()) {
+                play_youtube_track_at(state, index);
+            } else {
+                play_track_at_selected_index(state);
+            }
         }
     }
+}
+
+fn selected_youtube_index(ui: &UiState) -> Option<usize> {
+    if ui.active_page != LibraryPage::YouTubeMusic
+        && !ui
+            .now_playing_key
+            .as_deref()
+            .is_some_and(|key| key.starts_with("youtube:"))
+    {
+        return None;
+    }
+
+    ui.youtube_result_selection
+        .as_ref()
+        .map(|selection| selection.selected() as usize)
+        .filter(|index| *index < ui.youtube_results.len())
+        .or_else(|| {
+            (ui.youtube_selected_index < ui.youtube_results.len())
+                .then_some(ui.youtube_selected_index)
+        })
+}
+
+fn current_youtube_playback_index(ui: &UiState) -> Option<usize> {
+    ui.now_playing_key
+        .as_deref()
+        .and_then(|key| key.strip_prefix("youtube:"))
+        .and_then(|video_id| {
+            ui.youtube_results
+                .iter()
+                .position(|track| track.video_id == video_id)
+        })
+        .or_else(|| selected_youtube_index(ui))
+}
+
+fn previous_youtube_index(ui: &UiState) -> Option<usize> {
+    let index = current_youtube_playback_index(ui)?;
+    let len = ui.youtube_results.len();
+    (len > 0).then_some(if index == 0 { len - 1 } else { index - 1 })
+}
+
+fn next_youtube_index(ui: &UiState) -> Option<usize> {
+    let index = current_youtube_playback_index(ui)?;
+    let len = ui.youtube_results.len();
+    (len > 0).then_some((index + 1) % len)
 }
 
 fn play_track_at_selected_index(state: &Rc<RefCell<UiState>>) {
@@ -4410,6 +5449,11 @@ fn play_track_at_selected_index(state: &Rc<RefCell<UiState>>) {
 }
 
 fn play_previous_track(state: &Rc<RefCell<UiState>>) {
+    if let Some(previous_index) = previous_youtube_index(&state.borrow()) {
+        play_youtube_track_at(state, previous_index);
+        return;
+    }
+
     let previous_index = {
         let ui = state.borrow();
         previous_playback_index(&ui)
@@ -4419,6 +5463,11 @@ fn play_previous_track(state: &Rc<RefCell<UiState>>) {
 }
 
 fn play_next_track(state: &Rc<RefCell<UiState>>) {
+    if let Some(next_index) = next_youtube_index(&state.borrow()) {
+        play_youtube_track_at(state, next_index);
+        return;
+    }
+
     let next_index = {
         let ui = state.borrow();
         next_playback_index(&ui).unwrap_or_else(|| ui.playback_index.unwrap_or(ui.selected_index))
@@ -4613,6 +5662,23 @@ fn stop_playback(ui: &mut UiState) {
 }
 
 fn load_selected_cover_art(state: &Rc<RefCell<UiState>>) {
+    let youtube_url = {
+        let ui = state.borrow();
+        ui.now_playing_key
+            .as_deref()
+            .and_then(|key| key.strip_prefix("youtube:"))
+            .and_then(|video_id| {
+                ui.youtube_results
+                    .iter()
+                    .find(|track| track.video_id == video_id)
+                    .and_then(|track| track.thumbnail_url.clone())
+            })
+    };
+    if youtube_url.is_some() {
+        load_youtube_cover_art(state, youtube_url);
+        return;
+    }
+
     let (url, cover) = {
         let ui = state.borrow();
         let url = current_display_track(&ui).and_then(|track| track.thumbnail_artwork_url.clone());
@@ -5625,6 +6691,33 @@ fn load_picture_art(url: String, image: gtk::Image) {
 }
 
 fn scroll_to_now_playing(state: &Rc<RefCell<UiState>>) {
+    let youtube_video_id = {
+        let ui = state.borrow();
+        ui.now_playing_key
+            .as_deref()
+            .and_then(|key| key.strip_prefix("youtube:"))
+            .map(str::to_string)
+    };
+    if let Some(video_id) = youtube_video_id {
+        set_library_page(state, LibraryPage::YouTubeMusic);
+        let index = {
+            let ui = state.borrow();
+            ui.youtube_results
+                .iter()
+                .position(|track| track.video_id == video_id)
+        };
+        if let Some(index) = index {
+            {
+                let mut ui = state.borrow_mut();
+                ui.youtube_selected_index = index;
+            }
+            if let Some(selection) = state.borrow().youtube_result_selection.as_ref() {
+                selection.set_selected(index as u32);
+            }
+        }
+        return;
+    }
+
     let needs_tracks_page = {
         let ui = state.borrow();
         ui.active_page != LibraryPage::Tracks
@@ -6014,6 +7107,40 @@ fn nav_list(state: Rc<RefCell<UiState>>) -> gtk::ListBox {
     list
 }
 
+fn streaming_nav_list(state: Rc<RefCell<UiState>>) -> gtk::ListBox {
+    let list = gtk::ListBox::new();
+    list.add_css_class("nav-list");
+    list.set_selection_mode(gtk::SelectionMode::Single);
+    state.borrow_mut().streaming_nav_list = Some(list.clone());
+
+    let row = gtk::ListBoxRow::new();
+    let line = gtk::Box::new(Orientation::Horizontal, 9);
+    line.set_valign(Align::Center);
+    line.append(&gtk::Image::from_icon_name("folder-music-symbolic"));
+    line.append(&label("YouTube Music", ""));
+    let spacer = gtk::Box::new(Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    line.append(&spacer);
+    let count = label("-", "count");
+    state.borrow_mut().nav_youtube_count = Some(count.clone());
+    line.append(&count);
+    row.set_child(Some(&line));
+    row.set_selectable(true);
+    row.set_activatable(true);
+    list.append(&row);
+
+    let nav_state = state.clone();
+    list.connect_row_selected(move |_, row| {
+        if row.is_some() {
+            set_library_page(&nav_state, LibraryPage::YouTubeMusic);
+        }
+    });
+
+    update_nav_counts(&state);
+
+    list
+}
+
 fn label(text: &str, class_name: &str) -> gtk::Label {
     let label = gtk::Label::new(Some(text));
     label.set_xalign(0.0);
@@ -6123,6 +7250,22 @@ fn handle_playback_error(
     stream_kind: Option<PlaybackStreamKind>,
     message: String,
 ) {
+    if item_id
+        .as_deref()
+        .is_some_and(|item_id| item_id.starts_with("youtube:"))
+    {
+        {
+            let mut ui = state.borrow_mut();
+            ui.playback_status
+                .set_text(&format!("YouTube playback failed: {message}"));
+            ui.now_playing_key = None;
+            update_play_button(&ui);
+            update_mpris_status(&mut ui);
+        }
+        refresh_youtube_result_indicators(state);
+        return;
+    }
+
     let fallback = {
         let ui = state.borrow();
         let track = item_id
@@ -6182,6 +7325,7 @@ fn handle_playback_error(
         update_mpris_status(&mut ui);
     }
     update_list_indicators(state);
+    refresh_youtube_result_indicators(state);
 }
 
 fn apply_gapless_transition(state: &Rc<RefCell<UiState>>) -> bool {
@@ -6244,6 +7388,19 @@ fn apply_gapless_transition(state: &Rc<RefCell<UiState>>) -> bool {
 }
 
 fn advance_after_track_end(state: &Rc<RefCell<UiState>>) {
+    let youtube_next_index = {
+        let ui = state.borrow();
+        ui.now_playing_key
+            .as_deref()
+            .is_some_and(|key| key.starts_with("youtube:"))
+            .then(|| next_youtube_index(&ui))
+            .flatten()
+    };
+    if let Some(next_index) = youtube_next_index {
+        play_youtube_track_at(state, next_index);
+        return;
+    }
+
     let next_index = {
         let ui = state.borrow();
         next_playback_index(&ui)
@@ -6269,6 +7426,25 @@ fn advance_after_track_end(state: &Rc<RefCell<UiState>>) {
 fn load_selected_waveform(state: &Rc<RefCell<UiState>>) {
     let (key, stream_url, stream_http_headers, area, status, waveform) = {
         let ui = state.borrow();
+        if ui
+            .now_playing_key
+            .as_deref()
+            .is_some_and(|key| key.starts_with("youtube:"))
+        {
+            let waveform = ui.waveform.clone();
+            {
+                let mut visual = waveform.borrow_mut();
+                visual.peaks.clear();
+                visual.progress = 0.0;
+                visual.loaded_key = None;
+                visual.loading_key = None;
+            }
+            ui.waveform_status.set_text("YouTube Music stream");
+            if let Some(area) = ui.wave_area.as_ref() {
+                area.queue_draw();
+            }
+            return;
+        }
         let track = current_display_track(&ui);
         let key = track.and_then(|track| {
             Some(WaveformKey {
