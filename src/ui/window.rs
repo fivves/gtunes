@@ -150,6 +150,8 @@ struct UiState {
     shuffle_enabled: bool,
     now_playing_key: Option<String>,
     track_indicators: HashMap<usize, gtk::Image>,
+    playback_tracks: Vec<UiTrack>,
+    playback_index: Option<usize>,
     playback_order: Vec<usize>,
     library_stack: Option<gtk::Stack>,
     album_grid: Option<gtk::FlowBox>,
@@ -507,6 +509,8 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         shuffle_enabled: false,
         now_playing_key: None,
         track_indicators: HashMap::new(),
+        playback_tracks: Vec::new(),
+        playback_index: None,
         playback_order: Vec::new(),
         library_stack: None,
         album_grid: None,
@@ -901,7 +905,9 @@ fn select_track_for_navigation(state: &Rc<RefCell<UiState>>, index: usize) {
         }
         ui.selected_index = index.min(ui.tracks.len() - 1);
         let selected_index = ui.selected_index;
-        rebuild_playback_order(&mut ui, selected_index);
+        if ui.playback_tracks.is_empty() {
+            rebuild_playback_order(&mut ui, selected_index);
+        }
         update_now_playing_labels(&ui);
         update_play_button(&ui);
         selected_index
@@ -1702,6 +1708,8 @@ fn apply_first_time_setup_state(state: &Rc<RefCell<UiState>>) {
         ui.shuffle_enabled = false;
         ui.now_playing_key = None;
         ui.track_indicators.clear();
+        ui.playback_tracks.clear();
+        ui.playback_index = None;
         ui.playback_order.clear();
         {
             let mut waveform = ui.waveform.borrow_mut();
@@ -3561,6 +3569,11 @@ fn set_library_page(state: &Rc<RefCell<UiState>>, page: LibraryPage) {
 }
 
 fn show_album_tracks(state: &Rc<RefCell<UiState>>, album: &AlbumSummary) {
+    let selected_key = {
+        let ui = state.borrow();
+        current_display_track(&ui).and_then(|track| track_key_if_same_album(track, &album.key))
+    };
+
     {
         let mut ui = state.borrow_mut();
         let selected_artist = if ui.active_page == LibraryPage::Artists {
@@ -3582,8 +3595,7 @@ fn show_album_tracks(state: &Rc<RefCell<UiState>>, album: &AlbumSummary) {
             album.artist,
             count_text(album.song_count, "song", "songs")
         ));
-        ui.selected_index = 0;
-        apply_track_filter(&mut ui, None);
+        apply_track_filter(&mut ui, selected_key.as_deref());
         update_now_playing_labels(&ui);
         update_play_button(&ui);
         update_page_summary(&ui);
@@ -3727,8 +3739,8 @@ fn navigate_to_now_playing_artist(state: &Rc<RefCell<UiState>>) {
         let key = artist_key(&track.artist);
         ui.library_artists
             .iter()
-            .cloned()
             .find(|artist| artist.key == key)
+            .cloned()
     };
 
     if let Some(artist) = artist {
@@ -3745,8 +3757,8 @@ fn navigate_to_now_playing_album(state: &Rc<RefCell<UiState>>) {
         let key = album_key(track);
         ui.library_albums
             .iter()
-            .cloned()
             .find(|album| album.key == key)
+            .cloned()
     };
 
     if let Some(album) = album {
@@ -3917,8 +3929,10 @@ fn apply_track_filter(ui: &mut UiState, selected_key: Option<&str>) {
         &mut ui.selected_index,
     );
     ui.track_filter_signature = ui.current_track_filter_signature();
-    let selected_index = ui.selected_index;
-    rebuild_playback_order(ui, selected_index);
+    if ui.playback_tracks.is_empty() {
+        let selected_index = ui.selected_index;
+        rebuild_playback_order(ui, selected_index);
+    }
 }
 
 fn update_page_summary(ui: &UiState) {
@@ -3963,20 +3977,26 @@ fn update_page_summary(ui: &UiState) {
 }
 
 fn rebuild_playback_order(ui: &mut UiState, start_index: usize) {
-    if ui.tracks.is_empty() {
+    let track_count = if ui.playback_tracks.is_empty() {
+        ui.tracks.len()
+    } else {
+        ui.playback_tracks.len()
+    };
+
+    if track_count == 0 {
         ui.playback_order.clear();
         return;
     }
 
-    let start_index = start_index.min(ui.tracks.len().saturating_sub(1));
+    let start_index = start_index.min(track_count.saturating_sub(1));
     if ui.shuffle_enabled {
-        let mut remaining = (0..ui.tracks.len())
+        let mut remaining = (0..track_count)
             .filter(|index| *index != start_index)
             .collect::<Vec<_>>();
         shuffle_indices(&mut remaining);
         ui.playback_order = std::iter::once(start_index).chain(remaining).collect();
     } else {
-        ui.playback_order = (0..ui.tracks.len()).collect();
+        ui.playback_order = (0..track_count).collect();
     }
 }
 
@@ -3994,37 +4014,52 @@ fn shuffle_indices(indices: &mut [usize]) {
 }
 
 fn next_playback_index(ui: &UiState) -> Option<usize> {
+    let current_index = ui.playback_index.unwrap_or(ui.selected_index);
     let order_position = ui
         .playback_order
         .iter()
-        .position(|index| *index == ui.selected_index)?;
+        .position(|index| *index == current_index)?;
     ui.playback_order.get(order_position + 1).copied()
 }
 
 fn previous_playback_index(ui: &UiState) -> Option<usize> {
+    let current_index = ui.playback_index.unwrap_or(ui.selected_index);
     let order_position = ui
         .playback_order
         .iter()
-        .position(|index| *index == ui.selected_index)?;
+        .position(|index| *index == current_index)?;
     order_position
         .checked_sub(1)
         .and_then(|position| ui.playback_order.get(position).copied())
 }
 
 fn queued_tracks(ui: &UiState) -> Vec<(usize, UiTrack)> {
-    let Some(order_position) = ui
-        .playback_order
+    let tracks = if ui.playback_tracks.is_empty() {
+        ui.tracks.as_slice()
+    } else {
+        ui.playback_tracks.as_slice()
+    };
+    let current_index = ui.playback_index.unwrap_or(ui.selected_index);
+    queued_tracks_from_order(tracks, &ui.playback_order, current_index)
+}
+
+fn queued_tracks_from_order(
+    tracks: &[UiTrack],
+    playback_order: &[usize],
+    current_index: usize,
+) -> Vec<(usize, UiTrack)> {
+    let Some(order_position) = playback_order
         .iter()
-        .position(|index| *index == ui.selected_index)
+        .position(|index| *index == current_index)
     else {
         return Vec::new();
     };
 
-    ui.playback_order
+    playback_order
         .iter()
         .skip(order_position + 1)
         .take(QUEUE_PREVIEW_LIMIT)
-        .filter_map(|index| ui.tracks.get(*index).cloned().map(|track| (*index, track)))
+        .filter_map(|index| tracks.get(*index).cloned().map(|track| (*index, track)))
         .collect()
 }
 
@@ -4047,6 +4082,25 @@ fn track_key(track: &UiTrack) -> String {
         .item_id
         .clone()
         .unwrap_or_else(|| format!("{}\u{1f}{}\u{1f}{}", track.title, track.artist, track.album))
+}
+
+fn track_key_if_same_album(track: &UiTrack, album_key_value: &str) -> Option<String> {
+    (album_key(track) == album_key_value).then(|| track_key(track))
+}
+
+fn preferred_refresh_track_key(
+    tracks: &[UiTrack],
+    now_playing_key: Option<&str>,
+    selected_key: Option<&str>,
+) -> Option<String> {
+    now_playing_key
+        .filter(|key| tracks.iter().any(|track| track_key(track) == *key))
+        .map(|key| key.to_string())
+        .or_else(|| {
+            selected_key
+                .filter(|key| tracks.iter().any(|track| track_key(track) == *key))
+                .map(|key| key.to_string())
+        })
 }
 
 fn current_display_track(state: &UiState) -> Option<&UiTrack> {
@@ -4115,21 +4169,54 @@ fn duration_seconds(duration: &str) -> i32 {
 }
 
 fn apply_connection_payload(state: &Rc<RefCell<UiState>>, payload: ConnectionPayload) {
+    let (now_playing_key, selected_key) = {
+        let ui = state.borrow();
+        (
+            ui.now_playing_key.clone(),
+            ui.tracks.get(ui.selected_index).map(track_key),
+        )
+    };
+
     {
         let mut ui = state.borrow_mut();
         ui.all_tracks = payload.tracks;
         ui.playlists = payload.playlists;
         rebuild_library_summaries(&mut ui);
-        ui.selected_index = 0;
         ui.jellyfin_connected = true;
-        ui.now_playing_key = None;
         ui.active_page = LibraryPage::Tracks;
         ui.album_filter = None;
         ui.artist_filter = None;
         ui.playlist_filter = None;
         ui.collection_detail_title = None;
         ui.collection_detail_subtitle = None;
-        apply_track_filter(&mut ui, None);
+        let selected_key = preferred_refresh_track_key(
+            &ui.all_tracks,
+            now_playing_key.as_deref(),
+            selected_key.as_deref(),
+        );
+        ui.now_playing_key = now_playing_key
+            .as_deref()
+            .filter(|key| ui.all_tracks.iter().any(|track| track_key(track) == *key))
+            .map(|key| key.to_string());
+        if ui.now_playing_key.is_some() && !ui.playback_tracks.is_empty() {
+            ui.playback_tracks = ui
+                .playback_tracks
+                .iter()
+                .map(|track| {
+                    let key = track_key(track);
+                    ui.all_tracks
+                        .iter()
+                        .find(|library_track| track_key(library_track) == key)
+                        .cloned()
+                        .unwrap_or_else(|| track.clone())
+                })
+                .collect();
+        } else if ui.now_playing_key.is_none() {
+            ui.playback_tracks.clear();
+            ui.playback_index = None;
+            ui.playback_order.clear();
+        }
+        apply_track_filter(&mut ui, selected_key.as_deref());
         update_now_playing_labels(&ui);
         update_play_button(&ui);
         update_page_summary(&ui);
@@ -4244,8 +4331,8 @@ fn toggle_shuffle(state: &Rc<RefCell<UiState>>) {
     {
         let mut ui = state.borrow_mut();
         ui.shuffle_enabled = !ui.shuffle_enabled;
-        let selected_index = ui.selected_index;
-        rebuild_playback_order(&mut ui, selected_index);
+        let playback_index = ui.playback_index.unwrap_or(ui.selected_index);
+        rebuild_playback_order(&mut ui, playback_index);
         arm_gapless_next(&mut ui);
         update_shuffle_button(&ui);
     }
@@ -4276,8 +4363,9 @@ fn resume_playback(state: &Rc<RefCell<UiState>>) {
             match result {
                 Ok(()) => {
                     let quality = ui
-                        .tracks
-                        .get(ui.selected_index)
+                        .now_playing_key
+                        .as_deref()
+                        .and_then(|key| find_track_by_key(&ui, key))
                         .map(|track| track.quality.as_str())
                         .unwrap_or("stream");
                     ui.playback_status.set_text(&format!("Playing | {quality}"));
@@ -4324,7 +4412,8 @@ fn play_track_at_selected_index(state: &Rc<RefCell<UiState>>) {
 fn play_previous_track(state: &Rc<RefCell<UiState>>) {
     let previous_index = {
         let ui = state.borrow();
-        previous_playback_index(&ui).unwrap_or(ui.selected_index)
+        previous_playback_index(&ui)
+            .unwrap_or_else(|| ui.playback_index.unwrap_or(ui.selected_index))
     };
     play_track_at_existing_order(state, previous_index);
 }
@@ -4332,7 +4421,7 @@ fn play_previous_track(state: &Rc<RefCell<UiState>>) {
 fn play_next_track(state: &Rc<RefCell<UiState>>) {
     let next_index = {
         let ui = state.borrow();
-        next_playback_index(&ui).unwrap_or(ui.selected_index)
+        next_playback_index(&ui).unwrap_or_else(|| ui.playback_index.unwrap_or(ui.selected_index))
     };
     play_track_at_existing_order(state, next_index);
 }
@@ -4346,18 +4435,40 @@ fn play_track_at_existing_order(state: &Rc<RefCell<UiState>>, index: usize) {
 }
 
 fn play_track_at_with_order(state: &Rc<RefCell<UiState>>, index: usize, rebuild_order: bool) {
-    let selected_index = {
+    let (selected_index, visible_index) = {
         let mut ui = state.borrow_mut();
-        ui.selected_index = index.min(ui.tracks.len().saturating_sub(1));
         if rebuild_order {
-            let selected_index = ui.selected_index;
-            rebuild_playback_order(&mut ui, selected_index);
+            ui.selected_index = index.min(ui.tracks.len().saturating_sub(1));
+            ui.playback_tracks = ui.tracks.clone();
+            ui.playback_index = Some(ui.selected_index);
+            let playback_index = ui.selected_index;
+            rebuild_playback_order(&mut ui, playback_index);
+        } else if !ui.playback_tracks.is_empty() {
+            ui.playback_index = Some(index.min(ui.playback_tracks.len().saturating_sub(1)));
+        } else {
+            ui.selected_index = index.min(ui.tracks.len().saturating_sub(1));
+            ui.playback_tracks = ui.tracks.clone();
+            ui.playback_index = Some(ui.selected_index);
+            let playback_index = ui.selected_index;
+            rebuild_playback_order(&mut ui, playback_index);
         }
+
+        let visible_index = ui
+            .playback_index
+            .and_then(|playback_index| ui.playback_tracks.get(playback_index))
+            .map(track_key)
+            .and_then(|key| ui.tracks.iter().position(|track| track_key(track) == key));
+        if let Some(visible_index) = visible_index {
+            ui.selected_index = visible_index;
+        }
+
         update_now_playing_labels(&ui);
         update_play_button(&ui);
-        ui.selected_index
+        (ui.selected_index, visible_index)
     };
-    select_track_model_row(state, selected_index);
+    if visible_index.is_some() {
+        select_track_model_row(state, selected_index);
+    }
     rebuild_queue_list(state);
     load_selected_cover_art(state);
     load_selected_waveform(state);
@@ -4379,7 +4490,11 @@ fn select_track_model_row(state: &Rc<RefCell<UiState>>, index: usize) {
 
 fn play_selected_track(state: &Rc<RefCell<UiState>>) {
     let mut ui = state.borrow_mut();
-    let Some(track) = ui.tracks.get(ui.selected_index).cloned() else {
+    let Some(track) = ui
+        .playback_index
+        .and_then(|index| ui.playback_tracks.get(index))
+        .cloned()
+    else {
         stop_playback(&mut ui);
         ui.playback_status.set_text("No track selected");
         update_play_button(&ui);
@@ -4445,6 +4560,7 @@ fn play_selected_track(state: &Rc<RefCell<UiState>>) {
     update_list_indicators(state);
     if refresh_now_playing {
         load_selected_cover_art(state);
+        load_selected_waveform(state);
     }
 }
 
@@ -4472,7 +4588,7 @@ fn playback_request_for_track_kind(
 
 fn next_gapless_request(ui: &UiState) -> Option<PlaybackRequest> {
     let next_index = next_playback_index(ui)?;
-    playback_request_for_track(ui.tracks.get(next_index)?)
+    playback_request_for_track(ui.playback_tracks.get(next_index)?)
 }
 
 fn arm_gapless_next(ui: &mut UiState) {
@@ -4484,6 +4600,9 @@ fn arm_gapless_next(ui: &mut UiState) {
 
 fn stop_playback(ui: &mut UiState) {
     ui.now_playing_key = None;
+    ui.playback_tracks.clear();
+    ui.playback_index = None;
+    ui.playback_order.clear();
     if let Some(playback) = ui.playback.as_mut()
         && let Err(error) = playback.stop()
     {
@@ -6012,6 +6131,11 @@ fn handle_playback_error(
                 ui.tracks
                     .iter()
                     .find(|track| track.item_id.as_deref() == Some(item_id))
+                    .or_else(|| {
+                        ui.playback_tracks
+                            .iter()
+                            .find(|track| track.item_id.as_deref() == Some(item_id))
+                    })
             })
             .or_else(|| current_display_track(&ui));
 
@@ -6074,18 +6198,29 @@ fn apply_gapless_transition(state: &Rc<RefCell<UiState>>) -> bool {
     {
         let mut ui = state.borrow_mut();
         let transition_index = ui
-            .tracks
+            .playback_tracks
             .iter()
             .position(|track| track.item_id.as_deref() == Some(transition.item_id.as_str()))
             .or_else(|| next_playback_index(&ui));
 
         if let Some(index) = transition_index {
-            ui.selected_index = index;
+            ui.playback_index = Some(index);
         }
 
-        if let Some(track) = ui.tracks.get(ui.selected_index).cloned() {
+        if let Some(track) = ui
+            .playback_index
+            .and_then(|index| ui.playback_tracks.get(index))
+            .cloned()
+        {
             let quality = track.quality.clone();
             ui.now_playing_key = Some(track_key(&track));
+            if let Some(visible_index) = ui
+                .tracks
+                .iter()
+                .position(|visible| track_key(visible) == track_key(&track))
+            {
+                ui.selected_index = visible_index;
+            }
             update_now_playing_labels(&ui);
             ui.playback_status.set_text(&format!("Playing | {quality}"));
         } else {
@@ -6120,6 +6255,9 @@ fn advance_after_track_end(state: &Rc<RefCell<UiState>>) {
         {
             let mut ui = state.borrow_mut();
             ui.now_playing_key = None;
+            ui.playback_tracks.clear();
+            ui.playback_index = None;
+            ui.playback_order.clear();
             ui.playback_status.set_text("Up Next finished");
             update_play_button(&ui);
             update_mpris_status(&mut ui);
@@ -6131,7 +6269,7 @@ fn advance_after_track_end(state: &Rc<RefCell<UiState>>) {
 fn load_selected_waveform(state: &Rc<RefCell<UiState>>) {
     let (key, stream_url, stream_http_headers, area, status, waveform) = {
         let ui = state.borrow();
-        let track = ui.tracks.get(ui.selected_index);
+        let track = current_display_track(&ui);
         let key = track.and_then(|track| {
             Some(WaveformKey {
                 item_id: track.item_id.clone()?,
@@ -6601,6 +6739,83 @@ mod tests {
         };
 
         assert!(library_needs_album_order_refresh(&library));
+    }
+
+    #[test]
+    fn refresh_prefers_currently_playing_track_when_it_still_exists() {
+        let tracks = vec![
+            test_track_with(
+                "track-1", "album-1", "First", "Alpha", "Artist A", "Artist A",
+            ),
+            test_track_with(
+                "track-2", "album-2", "Second", "Beta", "Artist B", "Artist B",
+            ),
+        ];
+
+        let selected_key = preferred_refresh_track_key(&tracks, Some("track-2"), Some("track-1"));
+
+        assert_eq!(selected_key.as_deref(), Some("track-2"));
+    }
+
+    #[test]
+    fn refresh_falls_back_to_previous_selection_when_playing_track_is_missing() {
+        let tracks = vec![
+            test_track_with(
+                "track-1", "album-1", "First", "Alpha", "Artist A", "Artist A",
+            ),
+            test_track_with(
+                "track-2", "album-2", "Second", "Beta", "Artist B", "Artist B",
+            ),
+        ];
+
+        let selected_key = preferred_refresh_track_key(&tracks, Some("missing"), Some("track-1"));
+
+        assert_eq!(selected_key.as_deref(), Some("track-1"));
+    }
+
+    #[test]
+    fn album_navigation_preserves_current_track_when_it_belongs_to_that_album() {
+        let track = test_track_with(
+            "track-2", "album-1", "Second", "Alpha", "Artist A", "Artist A",
+        );
+
+        let selected_key = track_key_if_same_album(&track, "album-1");
+
+        assert_eq!(selected_key.as_deref(), Some("track-2"));
+    }
+
+    #[test]
+    fn album_navigation_does_not_force_selection_for_other_albums() {
+        let track = test_track_with(
+            "track-2", "album-1", "Second", "Alpha", "Artist A", "Artist A",
+        );
+
+        let selected_key = track_key_if_same_album(&track, "album-2");
+
+        assert!(selected_key.is_none());
+    }
+
+    #[test]
+    fn queued_tracks_follow_playback_order_after_current_track() {
+        let tracks = vec![
+            test_track_with(
+                "track-1", "album-1", "First", "Alpha", "Artist A", "Artist A",
+            ),
+            test_track_with(
+                "track-2", "album-1", "Second", "Alpha", "Artist A", "Artist A",
+            ),
+            test_track_with(
+                "track-3", "album-1", "Third", "Alpha", "Artist A", "Artist A",
+            ),
+        ];
+
+        let queued = queued_tracks_from_order(&tracks, &[0, 1, 2], 1);
+
+        let queued_ids = queued
+            .iter()
+            .map(|(_, track)| track.item_id.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(queued_ids, vec![Some("track-3")]);
     }
 
     #[test]

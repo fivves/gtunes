@@ -1,6 +1,6 @@
 [package]
 name = "gtunes"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 authors = ["Eddie Lucitt <fivvestv@gmail.com>"]
 description = "A GTK4/Libadwaita Jellyfin music streaming client for Linux."
