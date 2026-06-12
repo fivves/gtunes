@@ -5,7 +5,7 @@
 </br>
 
 gTunes is a native Linux desktop music client for Jellyfin-hosted music
-libraries. Version 1.1 focuses on fast library browsing, reliable Jellyfin
+libraries. Version 1.1.1 focuses on fast library browsing, reliable Jellyfin
 streaming, cached sessions, album artwork, waveform scrubbing, queue control,
 and desktop media-key integration.
 
@@ -40,7 +40,7 @@ Souvlaki.
 - Reset saved login, cached library data, artwork, and waveform files from the
   settings menu.
 
-gTunes 1.1 does not include live, synced, unsynced, embedded, or Jellyfin lyrics
+gTunes 1.1.1 does not include live, synced, unsynced, embedded, or Jellyfin lyrics
 support.
 
 ## Requirements
