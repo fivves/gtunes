@@ -619,27 +619,43 @@ fn connect_app_shortcuts(root: &gtk::Box, state: Rc<RefCell<UiState>>) {
             return gtk::glib::Propagation::Proceed;
         }
 
-        if text_input_has_focus(&state) {
-            invisible_search.borrow_mut().query.clear();
-            return gtk::glib::Propagation::Proceed;
-        }
-
         match key {
             gtk::gdk::Key::Escape => {
                 invisible_search.borrow_mut().query.clear();
-                gtk::glib::Propagation::Proceed
+                if search_entry_has_focus(&state) {
+                    clear_search_entry(&state);
+                    focus_active_content(&state);
+                    gtk::glib::Propagation::Stop
+                } else if text_input_has_focus(&state) {
+                    gtk::glib::Propagation::Proceed
+                } else {
+                    escape_back_or_top(&state);
+                    gtk::glib::Propagation::Stop
+                }
             }
             gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter => {
-                if invisible_search_is_active(&invisible_search) {
+                if text_input_has_focus(&state) {
+                    invisible_search.borrow_mut().query.clear();
+                    return gtk::glib::Propagation::Proceed;
+                }
+                if let Some(query) = active_invisible_search_query(&invisible_search) {
                     if state.borrow().is_track_list_visible() {
                         play_track_at_selected_index(&state);
+                    } else {
+                        activate_invisible_collection_match(&state, &query);
                     }
+                    gtk::glib::Propagation::Stop
+                } else if activate_focused_collection_item(&state) {
                     gtk::glib::Propagation::Stop
                 } else {
                     gtk::glib::Propagation::Proceed
                 }
             }
             gtk::gdk::Key::space => {
+                if text_input_has_focus(&state) {
+                    invisible_search.borrow_mut().query.clear();
+                    return gtk::glib::Propagation::Proceed;
+                }
                 let query = {
                     let mut search = invisible_search.borrow_mut();
                     let now = Instant::now();
@@ -657,6 +673,10 @@ fn connect_app_shortcuts(root: &gtk::Box, state: Rc<RefCell<UiState>>) {
                 gtk::glib::Propagation::Stop
             }
             gtk::gdk::Key::BackSpace => {
+                if text_input_has_focus(&state) {
+                    invisible_search.borrow_mut().query.clear();
+                    return gtk::glib::Propagation::Proceed;
+                }
                 let query = {
                     let mut search = invisible_search.borrow_mut();
                     search.query.pop();
@@ -670,6 +690,10 @@ fn connect_app_shortcuts(root: &gtk::Box, state: Rc<RefCell<UiState>>) {
                 }
             }
             _ => {
+                if text_input_has_focus(&state) {
+                    invisible_search.borrow_mut().query.clear();
+                    return gtk::glib::Propagation::Proceed;
+                }
                 let Some(character) = key.to_unicode().filter(|character| !character.is_control())
                 else {
                     return gtk::glib::Propagation::Proceed;
@@ -697,10 +721,30 @@ fn connect_app_shortcuts(root: &gtk::Box, state: Rc<RefCell<UiState>>) {
     root.add_controller(controller);
 }
 
-fn invisible_search_is_active(search: &Rc<RefCell<InvisibleSearchState>>) -> bool {
+fn active_invisible_search_query(search: &Rc<RefCell<InvisibleSearchState>>) -> Option<String> {
     let search = search.borrow();
-    !search.query.is_empty()
-        && Instant::now().duration_since(search.last_input_at) <= INVISIBLE_SEARCH_TIMEOUT
+    if search.query.is_empty()
+        || Instant::now().duration_since(search.last_input_at) > INVISIBLE_SEARCH_TIMEOUT
+    {
+        return None;
+    }
+
+    Some(search.query.clone())
+}
+
+fn search_entry_has_focus(state: &Rc<RefCell<UiState>>) -> bool {
+    state
+        .borrow()
+        .search_entry
+        .as_ref()
+        .is_some_and(widget_has_focus_within)
+}
+
+fn clear_search_entry(state: &Rc<RefCell<UiState>>) {
+    let entry = state.borrow().search_entry.clone();
+    if let Some(entry) = entry {
+        entry.set_text("");
+    }
 }
 
 fn text_input_has_focus(state: &Rc<RefCell<UiState>>) -> bool {
@@ -798,6 +842,58 @@ fn navigate_invisible_search(state: &Rc<RefCell<UiState>>, query: &str) -> bool 
     }
 
     true
+}
+
+fn activate_invisible_collection_match(state: &Rc<RefCell<UiState>>, query: &str) -> bool {
+    let normalized_query = query.trim().to_lowercase();
+    if normalized_query.is_empty() {
+        return false;
+    }
+
+    enum CollectionMatch {
+        Album(AlbumSummary),
+        Artist(ArtistSummary),
+    }
+
+    let target = {
+        let ui = state.borrow();
+        match visible_library_content(&ui) {
+            VisibleLibraryContent::Albums => visible_album_summaries(&ui)
+                .into_iter()
+                .filter_map(|album| {
+                    invisible_search_rank(
+                        [album.name.as_str(), album.artist.as_str()],
+                        &normalized_query,
+                    )
+                    .map(|rank| (album, rank))
+                })
+                .min_by(|(_, left), (_, right)| left.cmp(right))
+                .map(|(album, _)| CollectionMatch::Album(album)),
+            VisibleLibraryContent::Artists => {
+                filter_artist_summaries(&ui.library_artists, &ui.search_query)
+                    .into_iter()
+                    .filter_map(|artist| {
+                        invisible_search_rank([artist.name.as_str()], &normalized_query)
+                            .map(|rank| (artist, rank))
+                    })
+                    .min_by(|(_, left), (_, right)| left.cmp(right))
+                    .map(|(artist, _)| CollectionMatch::Artist(artist))
+            }
+            VisibleLibraryContent::Tracks | VisibleLibraryContent::Playlists => None,
+        }
+    };
+
+    match target {
+        Some(CollectionMatch::Album(album)) => {
+            show_album_tracks(state, &album);
+            true
+        }
+        Some(CollectionMatch::Artist(artist)) => {
+            show_artist_albums(state, &artist);
+            true
+        }
+        None => false,
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -965,13 +1061,132 @@ fn focus_collection_item(state: &Rc<RefCell<UiState>>, index: usize) {
         return;
     };
 
-    if let Some(button) = child
-        .first_child()
-        .and_then(|widget| widget.downcast::<gtk::Button>().ok())
-    {
+    if let Some(button) = collection_child_button(&child) {
         button.grab_focus();
     } else {
         child.grab_focus();
+    }
+}
+
+fn escape_back_or_top(state: &Rc<RefCell<UiState>>) {
+    if has_collection_detail_open(state) {
+        return_to_collection_grid(state);
+    } else {
+        focus_active_content_top(state);
+    }
+}
+
+fn has_collection_detail_open(state: &Rc<RefCell<UiState>>) -> bool {
+    let ui = state.borrow();
+    ui.album_filter.is_some() || ui.artist_filter.is_some() || ui.playlist_filter.is_some()
+}
+
+fn focus_active_content(state: &Rc<RefCell<UiState>>) {
+    if state.borrow().is_track_list_visible() {
+        focus_track_list(state);
+    } else {
+        focus_active_collection_grid(state);
+    }
+}
+
+fn focus_active_content_top(state: &Rc<RefCell<UiState>>) {
+    if state.borrow().is_track_list_visible() {
+        let has_tracks = !state.borrow().tracks.is_empty();
+        if has_tracks {
+            select_track_for_navigation(state, 0);
+        } else {
+            scroll_track_list_to_top(state);
+            focus_track_list(state);
+        }
+    } else {
+        scroll_active_collection_grid_to_top(state);
+        focus_active_collection_grid(state);
+    }
+}
+
+fn focus_track_list(state: &Rc<RefCell<UiState>>) {
+    let Some(scroll) = track_list_scroll(state) else {
+        return;
+    };
+
+    if let Some(list) = scroll
+        .child()
+        .and_then(|widget| widget.downcast::<gtk::ColumnView>().ok())
+    {
+        list.grab_focus();
+    } else {
+        scroll.grab_focus();
+    }
+}
+
+fn scroll_track_list_to_top(state: &Rc<RefCell<UiState>>) {
+    if let Some(scroll) = track_list_scroll(state) {
+        scroll.vadjustment().set_value(0.0);
+    }
+}
+
+fn track_list_scroll(state: &Rc<RefCell<UiState>>) -> Option<gtk::ScrolledWindow> {
+    state
+        .borrow()
+        .track_stack
+        .as_ref()
+        .and_then(|stack| stack.child_by_name("list"))
+        .and_then(|child| child.downcast::<gtk::ScrolledWindow>().ok())
+}
+
+fn scroll_active_collection_grid_to_top(state: &Rc<RefCell<UiState>>) {
+    let Some(grid) = active_collection_grid(state) else {
+        return;
+    };
+
+    let mut parent = grid.parent();
+    while let Some(widget) = parent {
+        if let Ok(scroll) = widget.clone().downcast::<gtk::ScrolledWindow>() {
+            scroll.vadjustment().set_value(0.0);
+            return;
+        }
+        parent = widget.parent();
+    }
+}
+
+fn activate_focused_collection_item(state: &Rc<RefCell<UiState>>) -> bool {
+    let Some(grid) = active_collection_grid(state) else {
+        return false;
+    };
+
+    let mut child = grid.first_child();
+    while let Some(widget) = child {
+        if widget_has_focus_within(&widget) {
+            if let Some(button) = widget
+                .clone()
+                .downcast::<gtk::FlowBoxChild>()
+                .ok()
+                .and_then(|child| collection_child_button(&child))
+                .or_else(|| widget.clone().downcast::<gtk::Button>().ok())
+            {
+                button.emit_clicked();
+                return true;
+            }
+        }
+        child = widget.next_sibling();
+    }
+
+    false
+}
+
+fn collection_child_button(child: &gtk::FlowBoxChild) -> Option<gtk::Button> {
+    child
+        .first_child()
+        .and_then(|widget| widget.downcast::<gtk::Button>().ok())
+}
+
+fn active_collection_grid(state: &Rc<RefCell<UiState>>) -> Option<gtk::FlowBox> {
+    let ui = state.borrow();
+    match visible_library_content(&ui) {
+        VisibleLibraryContent::Albums => ui.album_grid.clone(),
+        VisibleLibraryContent::Artists => ui.artist_grid.clone(),
+        VisibleLibraryContent::Playlists => ui.playlist_grid.clone(),
+        VisibleLibraryContent::Tracks => None,
     }
 }
 
@@ -3728,6 +3943,7 @@ fn return_to_collection_grid(state: &Rc<RefCell<UiState>>) {
     }
     refresh_visible_collection_grid(state);
     update_content_view(state);
+    focus_active_content_top(state);
 }
 
 fn navigate_to_now_playing_artist(state: &Rc<RefCell<UiState>>) {
