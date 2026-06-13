@@ -557,6 +557,117 @@ window {
   transition: opacity 160ms ease-out;
 }
 
+.radio-page {
+  padding: 18px 18px 76px;
+  background: @view_bg_color;
+}
+
+.radio-header {
+  min-height: 46px;
+  padding: 0 2px 4px;
+}
+
+.radio-grid {
+  background: transparent;
+}
+
+.radio-station-card {
+  min-width: 154px;
+  min-height: 154px;
+  padding: 10px;
+  border: 1px solid @borders;
+  border-radius: 8px;
+  background: @card_bg_color;
+  box-shadow: 0 1px 2px alpha(@window_fg_color, .06);
+  transition: background-color 140ms ease-out, border-color 140ms ease-out, box-shadow 140ms ease-out;
+}
+
+.radio-station-card:hover {
+  border-color: alpha(@accent_bg_color, .44);
+  background: mix(@card_bg_color, @accent_bg_color, .04);
+  box-shadow: 0 2px 8px alpha(@window_fg_color, .10);
+}
+
+.radio-station-card-playing {
+  border-color: alpha(@accent_bg_color, .72);
+  background: mix(@card_bg_color, @accent_bg_color, .10);
+}
+
+.radio-receiver-icon {
+  color: @accent_bg_color;
+}
+
+.radio-card-icon {
+  margin-top: 2px;
+}
+
+.radio-station-title {
+  color: @window_fg_color;
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.radio-playing-badge {
+  min-height: 24px;
+  padding: 0 9px;
+  border-radius: 999px;
+  color: @accent_fg_color;
+  background: @accent_bg_color;
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.radio-add-popover {
+  background: transparent;
+}
+
+.radio-add-panel {
+  min-width: 284px;
+  padding: 14px 16px 16px;
+  border: 1px solid @borders;
+  border-radius: 8px;
+  background: @card_bg_color;
+  box-shadow: 0 1px 2px alpha(@window_fg_color, .06);
+}
+
+.radio-add-panel entry {
+  min-height: 34px;
+}
+
+.radio-add-panel .connection-button {
+  min-height: 36px;
+  padding: 0 16px;
+}
+
+.radio-add-fab,
+.radio-add-fab > button {
+  min-width: 42px;
+  min-height: 42px;
+  padding: 0;
+  border-radius: 999px;
+  color: @accent_fg_color;
+  background: @accent_bg_color;
+  box-shadow: 0 2px 8px alpha(@window_fg_color, .18);
+}
+
+.radio-add-fab:hover,
+.radio-add-fab > button:hover {
+  background: mix(@accent_bg_color, @accent_fg_color, .12);
+}
+
+.radio-remove-button {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  border-radius: 999px;
+  color: alpha(@window_fg_color, .72);
+}
+
+.radio-remove-button:hover {
+  color: @destructive_color;
+  background: alpha(@destructive_color, .10);
+}
+
 .quality {
   padding: 3px 8px;
   border-radius: 999px;

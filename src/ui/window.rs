@@ -2,7 +2,7 @@ use adw::prelude::*;
 use gtk::glib::object::IsA;
 use gtk::{Align, Orientation};
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, PlatformConfig};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
@@ -76,6 +76,16 @@ struct UiPlaylist {
     tracks: Vec<UiTrack>,
 }
 
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+struct RadioStation {
+    id: String,
+    name: String,
+    url: String,
+    source: String,
+    #[serde(default)]
+    built_in: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 enum SortColumn {
     Title,
@@ -90,6 +100,7 @@ enum LibraryPage {
     Albums,
     Artists,
     Playlists,
+    Radio,
 }
 
 #[derive(Debug)]
@@ -130,6 +141,7 @@ struct UiState {
     all_tracks: Vec<UiTrack>,
     tracks: Vec<UiTrack>,
     playlists: Vec<UiPlaylist>,
+    radio_stations: Vec<RadioStation>,
     track_filter_signature: TrackFilterSignature,
     library_albums: Vec<AlbumSummary>,
     library_artists: Vec<ArtistSummary>,
@@ -149,6 +161,7 @@ struct UiState {
     keep_playing_while_closed: bool,
     shuffle_enabled: bool,
     now_playing_key: Option<String>,
+    current_radio_station_id: Option<String>,
     track_indicators: HashMap<usize, gtk::Image>,
     playback_tracks: Vec<UiTrack>,
     playback_index: Option<usize>,
@@ -157,6 +170,8 @@ struct UiState {
     album_grid: Option<gtk::FlowBox>,
     artist_grid: Option<gtk::FlowBox>,
     playlist_grid: Option<gtk::FlowBox>,
+    radio_grid: Option<gtk::Grid>,
+    radio_grid_columns: usize,
     detail_header: Option<gtk::Box>,
     detail_title_label: Option<gtk::Label>,
     detail_subtitle_label: Option<gtk::Label>,
@@ -165,6 +180,7 @@ struct UiState {
     nav_album_count: Option<gtk::Label>,
     nav_artist_count: Option<gtk::Label>,
     nav_playlist_count: Option<gtk::Label>,
+    nav_radio_count: Option<gtk::Label>,
     track_model: gtk::StringList,
     track_selection: Option<gtk::SingleSelection>,
     track_stack: Option<gtk::Stack>,
@@ -182,6 +198,8 @@ struct UiState {
     connection_server_entry: Option<gtk::Entry>,
     connection_username_entry: Option<gtk::Entry>,
     connection_password_entry: Option<gtk::PasswordEntry>,
+    radio_name_entry: Option<gtk::Entry>,
+    radio_url_entry: Option<gtk::Entry>,
     search_entry: Option<gtk::SearchEntry>,
     cover_art: Option<gtk::Image>,
     play_button: Option<gtk::Button>,
@@ -279,6 +297,7 @@ const COLLECTION_ARTWORK_MAX_STAGGERED_ITEMS: usize = 160;
 const COLLECTION_TILE_INITIAL_BATCH: usize = 24;
 const COLLECTION_TILE_IDLE_BATCH: usize = 24;
 const INVISIBLE_SEARCH_TIMEOUT: Duration = Duration::from_millis(1_200);
+const RADIO_STATIONS_KEY: &str = "radio.stations";
 static CONNECTION_GENERATION: AtomicU64 = AtomicU64::new(0);
 static CACHE_RESET_LOCK: Mutex<()> = Mutex::new(());
 
@@ -294,6 +313,18 @@ struct QueueRow {
     artist: gtk::Label,
     track_index: Rc<RefCell<Option<usize>>>,
     artwork_url: Rc<RefCell<Option<String>>>,
+}
+
+impl RadioStation {
+    fn built_in(name: &str, url: &str) -> Self {
+        Self {
+            id: format!("built-in:{name}"),
+            name: name.to_string(),
+            url: url.to_string(),
+            source: "cliamp".to_string(),
+            built_in: true,
+        }
+    }
 }
 
 impl UiTrack {
@@ -482,6 +513,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         all_tracks: Vec::new(),
         tracks: Vec::new(),
         playlists: Vec::new(),
+        radio_stations: load_radio_stations(),
         track_filter_signature: TrackFilterSignature {
             album_filter: None,
             artist_filter: None,
@@ -508,6 +540,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         keep_playing_while_closed,
         shuffle_enabled: false,
         now_playing_key: None,
+        current_radio_station_id: None,
         track_indicators: HashMap::new(),
         playback_tracks: Vec::new(),
         playback_index: None,
@@ -516,6 +549,8 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         album_grid: None,
         artist_grid: None,
         playlist_grid: None,
+        radio_grid: None,
+        radio_grid_columns: 6,
         detail_header: None,
         detail_title_label: None,
         detail_subtitle_label: None,
@@ -524,6 +559,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         nav_album_count: None,
         nav_artist_count: None,
         nav_playlist_count: None,
+        nav_radio_count: None,
         track_model: gtk::StringList::new(&[]),
         track_selection: None,
         track_stack: None,
@@ -541,6 +577,8 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         connection_server_entry: None,
         connection_username_entry: None,
         connection_password_entry: None,
+        radio_name_entry: None,
+        radio_url_entry: None,
         search_entry: None,
         cover_art: None,
         play_button: None,
@@ -600,6 +638,7 @@ fn connect_app_shortcuts(root: &gtk::Box, state: Rc<RefCell<UiState>>) {
                 gtk::gdk::Key::_2 => set_library_page(&state, LibraryPage::Albums),
                 gtk::gdk::Key::_3 => set_library_page(&state, LibraryPage::Artists),
                 gtk::gdk::Key::_4 => set_library_page(&state, LibraryPage::Playlists),
+                gtk::gdk::Key::_5 => set_library_page(&state, LibraryPage::Radio),
                 gtk::gdk::Key::f | gtk::gdk::Key::F => {
                     if let Some(search) = state.borrow().search_entry.as_ref() {
                         search.grab_focus();
@@ -764,6 +803,14 @@ fn text_input_has_focus(state: &Rc<RefCell<UiState>>) -> bool {
             .connection_password_entry
             .as_ref()
             .is_some_and(widget_has_focus_within)
+        || ui
+            .radio_name_entry
+            .as_ref()
+            .is_some_and(widget_has_focus_within)
+        || ui
+            .radio_url_entry
+            .as_ref()
+            .is_some_and(widget_has_focus_within)
 }
 
 fn widget_has_focus_within(widget: &impl IsA<gtk::Widget>) -> bool {
@@ -826,6 +873,7 @@ fn navigate_invisible_search(state: &Rc<RefCell<UiState>>, query: &str) -> bool 
                 })
                 .min_by(|(_, left), (_, right)| left.cmp(right))
                 .map(|(index, _)| index),
+            VisibleLibraryContent::Radio => None,
         };
         (visible_content, target)
     };
@@ -838,7 +886,8 @@ fn navigate_invisible_search(state: &Rc<RefCell<UiState>>, query: &str) -> bool 
         VisibleLibraryContent::Tracks => select_track_for_navigation(state, index),
         VisibleLibraryContent::Albums
         | VisibleLibraryContent::Artists
-        | VisibleLibraryContent::Playlists => focus_collection_item(state, index),
+        | VisibleLibraryContent::Playlists
+        | VisibleLibraryContent::Radio => focus_collection_item(state, index),
     }
 
     true
@@ -880,6 +929,7 @@ fn activate_invisible_collection_match(state: &Rc<RefCell<UiState>>, query: &str
                     .map(|(artist, _)| CollectionMatch::Artist(artist))
             }
             VisibleLibraryContent::Tracks | VisibleLibraryContent::Playlists => None,
+            VisibleLibraryContent::Radio => None,
         }
     };
 
@@ -902,6 +952,7 @@ enum VisibleLibraryContent {
     Albums,
     Artists,
     Playlists,
+    Radio,
 }
 
 fn visible_library_content(ui: &UiState) -> VisibleLibraryContent {
@@ -916,6 +967,7 @@ fn visible_library_content(ui: &UiState) -> VisibleLibraryContent {
         (LibraryPage::Artists, true) => VisibleLibraryContent::Tracks,
         (LibraryPage::Playlists, false) => VisibleLibraryContent::Playlists,
         (LibraryPage::Playlists, true) => VisibleLibraryContent::Tracks,
+        (LibraryPage::Radio, _) => VisibleLibraryContent::Radio,
     }
 }
 
@@ -1045,6 +1097,7 @@ fn focus_collection_item(state: &Rc<RefCell<UiState>>, index: usize) {
             VisibleLibraryContent::Albums => ui.album_grid.clone(),
             VisibleLibraryContent::Artists => ui.artist_grid.clone(),
             VisibleLibraryContent::Playlists => ui.playlist_grid.clone(),
+            VisibleLibraryContent::Radio => None,
             VisibleLibraryContent::Tracks => None,
         };
         (grid, visible_library_content(&ui))
@@ -1186,6 +1239,7 @@ fn active_collection_grid(state: &Rc<RefCell<UiState>>) -> Option<gtk::FlowBox> 
         VisibleLibraryContent::Albums => ui.album_grid.clone(),
         VisibleLibraryContent::Artists => ui.artist_grid.clone(),
         VisibleLibraryContent::Playlists => ui.playlist_grid.clone(),
+        VisibleLibraryContent::Radio => None,
         VisibleLibraryContent::Tracks => None,
     }
 }
@@ -2065,6 +2119,7 @@ fn build_content(state: Rc<RefCell<UiState>>) -> gtk::Box {
     stack.add_named(&album_grid_page(state.clone()), Some("albums"));
     stack.add_named(&artist_grid_page(state.clone()), Some("artists"));
     stack.add_named(&playlist_grid_page(state.clone()), Some("playlists"));
+    stack.add_named(&radio_page(state.clone()), Some("radio"));
     stack.set_visible_child_name("tracks");
     state.borrow_mut().library_stack = Some(stack.clone());
 
@@ -2488,6 +2543,131 @@ fn playlist_grid_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
     scroll.set_child(Some(&flow));
 
     state.borrow_mut().playlist_grid = Some(flow);
+    scroll
+}
+
+fn radio_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.add_css_class("collection-scroll");
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_overlay_scrolling(true);
+    scroll.set_hexpand(true);
+    scroll.set_vexpand(true);
+
+    let overlay = gtk::Overlay::new();
+    overlay.set_hexpand(true);
+    overlay.set_vexpand(true);
+    scroll.set_child(Some(&overlay));
+
+    let page = gtk::Box::new(Orientation::Vertical, 14);
+    page.add_css_class("radio-page");
+    overlay.set_child(Some(&page));
+
+    let header = gtk::Box::new(Orientation::Horizontal, 10);
+    header.add_css_class("radio-header");
+    header.set_hexpand(true);
+    header.set_valign(Align::Center);
+    let header_icon = radio_icon(34);
+    header_icon.set_valign(Align::Center);
+    header.append(&header_icon);
+
+    let header_text = gtk::Box::new(Orientation::Vertical, 1);
+    header_text.set_hexpand(true);
+    header_text.set_valign(Align::Center);
+    header_text.append(&label("Internet Radio", "page-title"));
+    let station_count = radio_stations_for_display(&state).len();
+    header_text.append(&label(&format!("{station_count} stations"), "meta"));
+    header.append(&header_text);
+    page.append(&header);
+
+    let station_area = gtk::Box::new(Orientation::Vertical, 8);
+    station_area.set_hexpand(true);
+    station_area.set_vexpand(true);
+    station_area.append(&label("Stations", "section-title"));
+    {
+        let state = state.clone();
+        let last_columns = Rc::new(Cell::new(0usize));
+        let last_columns_for_tick = last_columns.clone();
+        station_area.add_tick_callback(move |area, _| {
+            let columns = radio_grid_columns_for_width(area.allocated_width());
+            if last_columns_for_tick.replace(columns) != columns {
+                state.borrow_mut().radio_grid_columns = columns;
+                refresh_radio_page(&state);
+            }
+            gtk::glib::ControlFlow::Continue
+        });
+    }
+
+    let grid = gtk::Grid::new();
+    grid.add_css_class("radio-grid");
+    grid.set_row_spacing(14);
+    grid.set_column_spacing(14);
+    grid.set_column_homogeneous(false);
+    grid.set_row_homogeneous(false);
+    grid.set_halign(Align::Start);
+    grid.set_valign(Align::Start);
+    station_area.append(&grid);
+    page.append(&station_area);
+
+    let add_popover = gtk::Popover::new();
+    add_popover.add_css_class("radio-add-popover");
+    let add_panel = gtk::Box::new(Orientation::Vertical, 10);
+    add_panel.add_css_class("radio-add-panel");
+    add_panel.append(&label("Add Stream", "rail-title"));
+
+    let name_entry = gtk::Entry::new();
+    name_entry.set_placeholder_text(Some("Station name"));
+    name_entry.set_hexpand(true);
+    add_panel.append(&name_entry);
+
+    let url_entry = gtk::Entry::new();
+    url_entry.set_placeholder_text(Some("Stream URL"));
+    url_entry.set_hexpand(true);
+    add_panel.append(&url_entry);
+
+    let add_button = gtk::Button::with_label("Add Station");
+    add_button.add_css_class("connection-button");
+    add_button.add_css_class("suggested-action");
+    add_panel.append(&add_button);
+    add_popover.set_child(Some(&add_panel));
+
+    let add_menu = gtk::MenuButton::new();
+    add_menu.add_css_class("radio-add-fab");
+    add_menu.set_icon_name("list-add-symbolic");
+    add_menu.set_tooltip_text(Some("Add station"));
+    add_menu.set_popover(Some(&add_popover));
+    add_menu.set_halign(Align::End);
+    add_menu.set_valign(Align::End);
+    add_menu.set_margin_bottom(18);
+    add_menu.set_margin_end(18);
+    overlay.add_overlay(&add_menu);
+
+    let radio_state = state.clone();
+    let add_name_entry = name_entry.clone();
+    let add_url_entry = url_entry.clone();
+    let add_popover_for_submit = add_popover.clone();
+    add_button.connect_clicked(move |_| {
+        let name = add_name_entry.text().trim().to_string();
+        let url = add_url_entry.text().trim().to_string();
+        if name.is_empty() || url.is_empty() {
+            return;
+        }
+        if !persist_custom_radio_station(&radio_state, &name, &url) {
+            return;
+        }
+        add_name_entry.set_text("");
+        add_url_entry.set_text("");
+        add_popover_for_submit.popdown();
+        refresh_radio_page(&radio_state);
+    });
+
+    {
+        let mut ui = state.borrow_mut();
+        ui.radio_name_entry = Some(name_entry);
+        ui.radio_url_entry = Some(url_entry);
+        ui.radio_grid = Some(grid);
+    }
+    refresh_radio_page(&state);
     scroll
 }
 
@@ -4006,6 +4186,7 @@ fn update_content_view(state: &Rc<RefCell<UiState>>) {
             (LibraryPage::Artists, true) => "tracks",
             (LibraryPage::Playlists, false) => "playlists",
             (LibraryPage::Playlists, true) => "tracks",
+            (LibraryPage::Radio, _) => "radio",
         };
         (
             ui.library_stack.clone(),
@@ -4039,10 +4220,12 @@ fn update_nav_counts(state: &Rc<RefCell<UiState>>) {
         album_label,
         artist_label,
         playlist_label,
+        radio_label,
         tracks,
         albums,
         artists,
         playlists,
+        radio_stations,
     ) = {
         let ui = state.borrow();
         (
@@ -4050,10 +4233,12 @@ fn update_nav_counts(state: &Rc<RefCell<UiState>>) {
             ui.nav_album_count.clone(),
             ui.nav_artist_count.clone(),
             ui.nav_playlist_count.clone(),
+            ui.nav_radio_count.clone(),
             ui.all_tracks.len(),
             ui.library_albums.len(),
             ui.library_artists.len(),
             ui.playlists.len(),
+            radio_stations_for_display_from(&ui.radio_stations).len(),
         )
     };
 
@@ -4068,6 +4253,9 @@ fn update_nav_counts(state: &Rc<RefCell<UiState>>) {
     }
     if let Some(label) = playlist_label.as_ref() {
         label.set_text(&playlists.to_string());
+    }
+    if let Some(label) = radio_label.as_ref() {
+        label.set_text(&radio_stations.to_string());
     }
 }
 
@@ -4085,12 +4273,298 @@ fn update_nav_selection(state: &Rc<RefCell<UiState>>) {
         LibraryPage::Albums => 1,
         LibraryPage::Artists => 2,
         LibraryPage::Playlists => 3,
+        LibraryPage::Radio => 4,
     };
     if list.selected_row().as_ref().map(gtk::ListBoxRow::index) == Some(row_index) {
         return;
     }
     if let Some(row) = list.row_at_index(row_index) {
         list.select_row(Some(&row));
+    }
+}
+
+fn built_in_radio_stations() -> Vec<RadioStation> {
+    vec![
+        RadioStation::built_in("Lofi", "http://radio.cliamp.stream/lofi/stream"),
+        RadioStation::built_in("Synthwave", "http://radio.cliamp.stream/synthwave/stream"),
+        RadioStation::built_in("EDM", "http://radio.cliamp.stream/edm/stream"),
+    ]
+}
+
+fn radio_stations_for_display(state: &Rc<RefCell<UiState>>) -> Vec<RadioStation> {
+    let ui = state.borrow();
+    radio_stations_for_display_from(&ui.radio_stations)
+}
+
+fn radio_stations_for_display_from(custom_stations: &[RadioStation]) -> Vec<RadioStation> {
+    let mut stations = built_in_radio_stations();
+    stations.extend(
+        custom_stations
+            .iter()
+            .filter(|station| !station.built_in)
+            .cloned(),
+    );
+    stations
+}
+
+fn load_radio_stations() -> Vec<RadioStation> {
+    match CacheDatabase::open_default().and_then(|cache| cache.get_setting(RADIO_STATIONS_KEY)) {
+        Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_else(|error| {
+            tracing::warn!(%error, "failed to parse radio stations");
+            Vec::new()
+        }),
+        Ok(None) => Vec::new(),
+        Err(error) => {
+            tracing::warn!(%error, "failed to load radio stations");
+            Vec::new()
+        }
+    }
+}
+
+fn save_radio_stations(stations: &[RadioStation]) {
+    let custom = stations
+        .iter()
+        .filter(|station| !station.built_in)
+        .cloned()
+        .collect::<Vec<_>>();
+    let result = serde_json::to_string(&custom)
+        .map_err(crate::cache::CacheError::from)
+        .and_then(|json| {
+            CacheDatabase::open_default()
+                .and_then(|cache| cache.set_setting(RADIO_STATIONS_KEY, &json))
+        });
+    if let Err(error) = result {
+        tracing::warn!(%error, "failed to save radio stations");
+    }
+}
+
+fn persist_custom_radio_station(state: &Rc<RefCell<UiState>>, name: &str, url: &str) -> bool {
+    if url.parse::<url::Url>().is_err() {
+        return false;
+    }
+
+    let mut ui = state.borrow_mut();
+    if ui
+        .radio_stations
+        .iter()
+        .any(|station| station.name.eq_ignore_ascii_case(name) || station.url == url)
+    {
+        return false;
+    }
+    let next_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let next_index = ui.radio_stations.len() + 1;
+    ui.radio_stations.push(RadioStation {
+        id: format!("custom:{next_id}:{next_index}"),
+        name: name.to_string(),
+        url: url.to_string(),
+        source: "local".to_string(),
+        built_in: false,
+    });
+    save_radio_stations(&ui.radio_stations);
+    true
+}
+
+fn refresh_radio_page(state: &Rc<RefCell<UiState>>) {
+    let Some(grid) = state.borrow().radio_grid.clone() else {
+        return;
+    };
+    while let Some(child) = grid.first_child() {
+        grid.remove(&child);
+    }
+
+    let stations = radio_stations_for_display(state);
+    let columns = state.borrow().radio_grid_columns.max(1);
+
+    for (index, station) in stations.into_iter().enumerate() {
+        grid.attach(
+            &radio_station_card(state.clone(), station),
+            (index % columns) as i32,
+            (index / columns) as i32,
+            1,
+            1,
+        );
+    }
+
+    update_nav_counts(state);
+    let ui = state.borrow();
+    if ui.active_page == LibraryPage::Radio {
+        update_page_summary(&ui);
+    }
+}
+
+fn radio_grid_columns_for_width(width: i32) -> usize {
+    const TILE_WIDTH: i32 = 154;
+    const COLUMN_GAP: i32 = 14;
+    const MAX_COLUMNS: usize = 6;
+
+    let width = width.max(TILE_WIDTH);
+    let columns = ((width + COLUMN_GAP) / (TILE_WIDTH + COLUMN_GAP)).max(1) as usize;
+    columns.min(MAX_COLUMNS)
+}
+
+fn radio_station_card(state: Rc<RefCell<UiState>>, station: RadioStation) -> gtk::Box {
+    let card = gtk::Box::new(Orientation::Vertical, 7);
+    card.add_css_class("radio-station-card");
+    card.set_width_request(154);
+    card.set_height_request(154);
+    card.set_halign(Align::Start);
+    card.set_valign(Align::Start);
+    card.set_hexpand(false);
+    card.set_vexpand(false);
+    card.set_tooltip_text(Some(&station.url));
+    card.set_cursor_from_name(Some("pointer"));
+    let is_current =
+        state.borrow().current_radio_station_id.as_deref() == Some(station.id.as_str());
+    if is_current {
+        card.add_css_class("radio-station-card-playing");
+    }
+
+    let click = gtk::GestureClick::new();
+    {
+        let state = state.clone();
+        let station = station.clone();
+        click.connect_released(move |_, _, _, _| {
+            play_radio_station(&state, &station);
+        });
+    }
+    card.add_controller(click);
+
+    let status_row = gtk::Box::new(Orientation::Horizontal, 0);
+    status_row.set_size_request(-1, 24);
+    status_row.set_hexpand(true);
+    if is_current {
+        status_row.append(&radio_status_badge("On Air"));
+    }
+    card.append(&status_row);
+
+    let icon = radio_icon(48);
+    icon.add_css_class("radio-card-icon");
+    icon.set_halign(Align::Center);
+    card.append(&icon);
+
+    let text = gtk::Box::new(Orientation::Vertical, 2);
+    text.set_halign(Align::Fill);
+    text.set_valign(Align::End);
+    text.set_vexpand(true);
+    let title = label(&station.name, "radio-station-title");
+    title.set_xalign(0.5);
+    title.set_justify(gtk::Justification::Center);
+    title.set_single_line_mode(true);
+    title.set_lines(1);
+    text.append(&title);
+    let subtitle = label(&radio_station_subtitle(&station), "meta");
+    subtitle.set_xalign(0.5);
+    subtitle.set_justify(gtk::Justification::Center);
+    subtitle.set_single_line_mode(true);
+    subtitle.set_lines(1);
+    text.append(&subtitle);
+    card.append(&text);
+
+    if !station.built_in {
+        let remove = icon_button("user-trash-symbolic", "Remove station");
+        remove.add_css_class("radio-remove-button");
+        let station_id = station.id.clone();
+        let state = state.clone();
+        remove.connect_clicked(move |_| {
+            let mut ui = state.borrow_mut();
+            ui.radio_stations
+                .retain(|candidate| candidate.id != station_id);
+            save_radio_stations(&ui.radio_stations);
+            drop(ui);
+            refresh_radio_page(&state);
+        });
+        card.append(&remove);
+    }
+
+    card
+}
+
+fn radio_station_subtitle(station: &RadioStation) -> String {
+    if station.built_in {
+        "cliamp preset".to_string()
+    } else {
+        "custom stream".to_string()
+    }
+}
+
+fn radio_status_badge(text: &str) -> gtk::Label {
+    let badge = label(text, "radio-playing-badge");
+    badge.set_halign(Align::End);
+    badge.set_valign(Align::Start);
+    badge
+}
+
+fn radio_icon(size: i32) -> gtk::DrawingArea {
+    let icon = gtk::DrawingArea::new();
+    icon.add_css_class("radio-receiver-icon");
+    icon.set_content_width(size);
+    icon.set_content_height(size);
+    icon.set_size_request(size, size);
+    icon.set_draw_func(move |area, context, width, height| {
+        let color = area.color();
+        context.set_source_rgba(
+            color.red() as f64,
+            color.green() as f64,
+            color.blue() as f64,
+            0.92,
+        );
+
+        let scale = f64::from(width.min(height)) / 48.0;
+        context.scale(scale, scale);
+        context.set_line_width(2.4);
+        context.set_line_cap(gtk::cairo::LineCap::Round);
+        context.set_line_join(gtk::cairo::LineJoin::Round);
+
+        context.move_to(13.0, 14.0);
+        context.line_to(34.0, 7.0);
+        let _ = context.stroke();
+
+        rounded_rect(context, 8.0, 17.0, 32.0, 23.0, 5.0);
+        let _ = context.stroke();
+
+        context.arc(18.0, 28.5, 5.3, 0.0, std::f64::consts::TAU);
+        let _ = context.stroke();
+
+        context.move_to(29.0, 25.0);
+        context.line_to(35.0, 25.0);
+        context.move_to(29.0, 31.0);
+        context.line_to(35.0, 31.0);
+        context.move_to(29.0, 37.0);
+        context.line_to(35.0, 37.0);
+        let _ = context.stroke();
+    });
+    icon
+}
+
+fn play_radio_station(state: &Rc<RefCell<UiState>>, station: &RadioStation) {
+    let Ok(stream_url) = station.url.parse() else {
+        return;
+    };
+    let request = PlaybackRequest {
+        item_id: station.id.clone(),
+        stream_url,
+        http_headers: Vec::new(),
+        stream_kind: PlaybackStreamKind::Direct,
+        title: station.name.clone(),
+    };
+    let played = {
+        let mut ui = state.borrow_mut();
+        ui.playback.as_mut().map(|playback| playback.play(request))
+    };
+    if matches!(played, Some(Ok(()))) {
+        let mut ui = state.borrow_mut();
+        ui.current_radio_station_id = Some(station.id.clone());
+        ui.now_playing_key = None;
+        ui.now_title.set_text(&station.name);
+        ui.now_meta
+            .set_text(&format!("{} | Radio stream", station.source));
+        ui.playback_status
+            .set_text(&format!("Playing | {}", station.name));
+        drop(ui);
+        refresh_radio_page(state);
     }
 }
 
@@ -4188,6 +4662,12 @@ fn update_page_summary(ui: &UiState) {
         LibraryPage::Playlists => {
             ui.page_summary
                 .set_text(&format!("Playlists | {} playlists", ui.playlists.len()));
+        }
+        LibraryPage::Radio => {
+            ui.page_summary.set_text(&format!(
+                "Radio | {} stations",
+                radio_stations_for_display_from(&ui.radio_stations).len()
+            ));
         }
     }
 }
@@ -4756,6 +5236,7 @@ fn play_selected_track(state: &Rc<RefCell<UiState>>) {
     match playback.play(request) {
         Ok(()) => {
             ui.now_playing_key = Some(track_key(&track));
+            ui.current_radio_station_id = None;
             arm_gapless_next(&mut ui);
             update_now_playing_labels(&ui);
             ui.playback_status
@@ -6166,7 +6647,12 @@ fn nav_list(state: Rc<RefCell<UiState>>) -> gtk::ListBox {
             LibraryPage::Tracks,
             true,
         ),
-        ("folder-music-symbolic", "Albums", LibraryPage::Albums, true),
+        (
+            "media-optical-cd-audio-symbolic",
+            "Albums",
+            LibraryPage::Albums,
+            true,
+        ),
         (
             "avatar-default-symbolic",
             "Artists",
@@ -6177,6 +6663,12 @@ fn nav_list(state: Rc<RefCell<UiState>>) -> gtk::ListBox {
             "media-playlist-consecutive-symbolic",
             "Playlists",
             LibraryPage::Playlists,
+            true,
+        ),
+        (
+            "network-wireless-symbolic",
+            "Radio",
+            LibraryPage::Radio,
             true,
         ),
     ];
@@ -6196,6 +6688,7 @@ fn nav_list(state: Rc<RefCell<UiState>>) -> gtk::ListBox {
             "Albums" => state.borrow_mut().nav_album_count = Some(count.clone()),
             "Artists" => state.borrow_mut().nav_artist_count = Some(count.clone()),
             "Playlists" => state.borrow_mut().nav_playlist_count = Some(count.clone()),
+            "Radio" => state.borrow_mut().nav_radio_count = Some(count.clone()),
             _ => count.set_text("-"),
         }
         line.append(&count);
@@ -6221,6 +6714,7 @@ fn nav_list(state: Rc<RefCell<UiState>>) -> gtk::ListBox {
             1 => set_library_page(&nav_state, LibraryPage::Albums),
             2 => set_library_page(&nav_state, LibraryPage::Artists),
             3 => set_library_page(&nav_state, LibraryPage::Playlists),
+            4 => set_library_page(&nav_state, LibraryPage::Radio),
             _ => {}
         }
     });
