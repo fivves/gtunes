@@ -1156,17 +1156,16 @@ fn activate_focused_collection_item(state: &Rc<RefCell<UiState>>) -> bool {
 
     let mut child = grid.first_child();
     while let Some(widget) = child {
-        if widget_has_focus_within(&widget) {
-            if let Some(button) = widget
+        if widget_has_focus_within(&widget)
+            && let Some(button) = widget
                 .clone()
                 .downcast::<gtk::FlowBoxChild>()
                 .ok()
                 .and_then(|child| collection_child_button(&child))
                 .or_else(|| widget.clone().downcast::<gtk::Button>().ok())
-            {
-                button.emit_clicked();
-                return true;
-            }
+        {
+            button.emit_clicked();
+            return true;
         }
         child = widget.next_sibling();
     }
@@ -3180,8 +3179,6 @@ fn normalized_artist_key(value: &str) -> String {
                 key.push(character);
             } else if is_ignored_artist_key_character(character) {
                 continue;
-            } else if character.is_whitespace() || is_artist_separator(character) {
-                push_key_separator(&mut key);
             } else {
                 push_key_separator(&mut key);
             }
@@ -3210,10 +3207,6 @@ fn push_key_separator(key: &mut String) {
     if !key.is_empty() && !key.ends_with(' ') {
         key.push(' ');
     }
-}
-
-fn is_artist_separator(character: char) -> bool {
-    character.is_ascii_punctuation() || is_dash_character(character)
 }
 
 fn is_dash_character(character: char) -> bool {
