@@ -2419,6 +2419,13 @@ struct ArtistVote {
     first_seen: usize,
 }
 
+struct ArtistNameVote {
+    key: String,
+    name: String,
+    count: usize,
+    first_seen: usize,
+}
+
 fn album_grid_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
     let scroll = gtk::ScrolledWindow::new();
     scroll.add_css_class("collection-scroll");
@@ -3015,9 +3022,17 @@ fn album_song_counts(albums: &[AlbumSummary]) -> (usize, usize) {
 }
 
 fn artist_summaries(tracks: &[UiTrack], query: &str) -> Vec<ArtistSummary> {
-    let mut artists = Vec::<ArtistSummary>::new();
+    struct ArtistAccumulator {
+        key: String,
+        image_url: Option<String>,
+        album_count: usize,
+        song_count: usize,
+        name_votes: Vec<ArtistNameVote>,
+    }
+
+    let mut artists = Vec::<ArtistAccumulator>::new();
     let mut artist_indexes = HashMap::<String, usize>::new();
-    for album in album_summaries(tracks, "") {
+    for (album_index, album) in album_summaries(tracks, "").into_iter().enumerate() {
         let key = artist_key(&album.artist);
         let image_url = artist_summary_image_url(&album);
         if let Some(artist_index) = artist_indexes.get(&key).copied() {
@@ -3027,18 +3042,44 @@ fn artist_summaries(tracks: &[UiTrack], query: &str) -> Vec<ArtistSummary> {
             if artist.image_url.is_none() {
                 artist.image_url = image_url;
             }
+            add_artist_name_vote(
+                &mut artist.name_votes,
+                &album.artist,
+                album.song_count,
+                album_index,
+            );
             continue;
         }
 
         artist_indexes.insert(key.clone(), artists.len());
-        artists.push(ArtistSummary {
+        let mut name_votes = Vec::new();
+        add_artist_name_vote(
+            &mut name_votes,
+            &album.artist,
+            album.song_count,
+            album_index,
+        );
+        artists.push(ArtistAccumulator {
             key,
-            name: album.artist,
             image_url,
             album_count: 1,
             song_count: album.song_count,
+            name_votes,
         });
     }
+
+    let mut artists = artists
+        .into_iter()
+        .map(|artist| ArtistSummary {
+            key: artist.key,
+            name: preferred_artist_name(&artist.name_votes)
+                .unwrap_or("Unknown Artist")
+                .to_string(),
+            image_url: artist.image_url,
+            album_count: artist.album_count,
+            song_count: artist.song_count,
+        })
+        .collect::<Vec<_>>();
 
     let query = query.trim().to_lowercase();
     if !query.is_empty() {
@@ -3110,11 +3151,101 @@ fn album_key(track: &UiTrack) -> String {
 }
 
 fn artist_key(artist: &str) -> String {
-    normalized_key(artist)
+    normalized_artist_key(artist)
 }
 
 fn normalized_key(value: &str) -> String {
-    value.trim().to_lowercase()
+    normalized_text_key(value)
+}
+
+fn normalized_text_key(value: &str) -> String {
+    let mut key = String::new();
+    for character in value.trim().chars() {
+        for character in character.to_lowercase() {
+            if character.is_whitespace() {
+                push_key_separator(&mut key);
+            } else {
+                key.push(character);
+            }
+        }
+    }
+    key.trim_end().to_string()
+}
+
+fn normalized_artist_key(value: &str) -> String {
+    let mut key = String::new();
+    for character in value.trim().chars() {
+        for character in character.to_lowercase() {
+            if character.is_alphanumeric() {
+                key.push(character);
+            } else if is_ignored_artist_key_character(character) {
+                continue;
+            } else if character.is_whitespace() || is_artist_separator(character) {
+                push_key_separator(&mut key);
+            } else {
+                push_key_separator(&mut key);
+            }
+        }
+    }
+    key.trim_end().to_string()
+}
+
+fn normalized_artist_display_key(value: &str) -> String {
+    let mut key = String::new();
+    for character in value.trim().chars() {
+        for character in character.to_lowercase() {
+            if character.is_whitespace() {
+                push_key_separator(&mut key);
+            } else if is_dash_character(character) {
+                key.push('-');
+            } else {
+                key.push(character);
+            }
+        }
+    }
+    key.trim_end().to_string()
+}
+
+fn push_key_separator(key: &mut String) {
+    if !key.is_empty() && !key.ends_with(' ') {
+        key.push(' ');
+    }
+}
+
+fn is_artist_separator(character: char) -> bool {
+    character.is_ascii_punctuation() || is_dash_character(character)
+}
+
+fn is_dash_character(character: char) -> bool {
+    matches!(
+        character,
+        '-' | '\u{2010}'
+            | '\u{2011}'
+            | '\u{2012}'
+            | '\u{2013}'
+            | '\u{2014}'
+            | '\u{2015}'
+            | '\u{2212}'
+            | '\u{FE58}'
+            | '\u{FE63}'
+            | '\u{FF0D}'
+    )
+}
+
+fn is_ignored_artist_key_character(character: char) -> bool {
+    matches!(
+        character,
+        '\'' | '"'
+            | '`'
+            | '\u{2018}'
+            | '\u{2019}'
+            | '\u{201C}'
+            | '\u{201D}'
+            | '\u{200B}'
+            | '\u{200C}'
+            | '\u{200D}'
+            | '\u{FEFF}'
+    )
 }
 
 fn add_artist_vote(
@@ -3142,6 +3273,42 @@ fn add_artist_vote(
         count: 1,
         first_seen,
     });
+}
+
+fn add_artist_name_vote(
+    votes: &mut Vec<ArtistNameVote>,
+    artist: &str,
+    count: usize,
+    first_seen: usize,
+) {
+    let artist = artist.trim();
+    if artist.is_empty() {
+        return;
+    }
+
+    let key = normalized_artist_display_key(artist);
+    if let Some(vote) = votes.iter_mut().find(|vote| vote.key == key) {
+        vote.count += count;
+        return;
+    }
+
+    votes.push(ArtistNameVote {
+        key,
+        name: artist.to_string(),
+        count,
+        first_seen,
+    });
+}
+
+fn preferred_artist_name(votes: &[ArtistNameVote]) -> Option<&str> {
+    votes
+        .iter()
+        .max_by(|left, right| {
+            left.count
+                .cmp(&right.count)
+                .then_with(|| right.first_seen.cmp(&left.first_seen))
+        })
+        .map(|vote| vote.name.as_str())
 }
 
 struct PreferredArtist {
@@ -6871,6 +7038,54 @@ mod tests {
             artist_album_song_counts_from(&albums, &artist_key("Artist B"), ""),
             (1, 2)
         );
+    }
+
+    #[test]
+    fn artist_summaries_merge_separator_variants() {
+        let tracks = vec![
+            test_track_with(
+                "track-1",
+                "album-1",
+                "First",
+                "Alpha",
+                "Blink 182",
+                "Blink 182",
+            ),
+            test_track_with(
+                "track-2",
+                "album-2",
+                "Second",
+                "Beta",
+                "blink-182",
+                "blink-182",
+            ),
+            test_track_with(
+                "track-3",
+                "album-2",
+                "Third",
+                "Beta",
+                "blink-182",
+                "blink-182",
+            ),
+            test_track_with(
+                "track-4",
+                "album-3",
+                "Fourth",
+                "Gamma",
+                "blink\u{2010}182",
+                "blink\u{2010}182",
+            ),
+        ];
+
+        assert_eq!(artist_key("Blink 182"), artist_key("blink-182"));
+        assert_eq!(artist_key("blink-182"), artist_key("blink\u{2010}182"));
+
+        let artists = artist_summaries(&tracks, "");
+
+        assert_eq!(artists.len(), 1);
+        assert_eq!(artists[0].name, "blink-182");
+        assert_eq!(artists[0].album_count, 3);
+        assert_eq!(artists[0].song_count, 4);
     }
 
     #[test]
