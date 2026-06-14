@@ -286,6 +286,7 @@ enum ConnectionMessage {
 
 const PLAYER_ACTION_EDGE_INSET: i32 = 0;
 const LEFT_SIDEBAR_CONTENT_WIDTH: i32 = 220;
+const SIDEBAR_COVER_ART_IMAGE_SIZE: u32 = LEFT_SIDEBAR_CONTENT_WIDTH as u32;
 const LEFT_SIDEBAR_WIDTH: i32 = LEFT_SIDEBAR_CONTENT_WIDTH + 20;
 const ACTION_PANEL_WIDTH: i32 = 130;
 const ALBUM_ART_SIZE: i32 = 168;
@@ -380,7 +381,11 @@ impl UiTrack {
             .ok()
             .map(|url| url.to_string());
         let thumbnail_artwork_url = client
-            .item_image_url_with_size(artwork_item_id, "Primary", Some(160))
+            .item_image_url_with_size(
+                artwork_item_id,
+                "Primary",
+                Some(SIDEBAR_COVER_ART_IMAGE_SIZE),
+            )
             .ok()
             .map(|url| url.to_string());
 
@@ -6308,9 +6313,67 @@ fn hydrate_stream_http_headers(tracks: &mut [UiTrack], session: &JellyfinSession
 
 fn hydrate_cached_library(library: &mut CachedLibrary, session: &JellyfinSession) {
     hydrate_stream_http_headers(&mut library.tracks, session);
+    hydrate_sidebar_cover_thumbnail_urls(&mut library.tracks);
     for playlist in &mut library.playlists {
+        normalize_sidebar_cover_thumbnail_url(&mut playlist.thumbnail_artwork_url);
         hydrate_stream_http_headers(&mut playlist.tracks, session);
+        hydrate_sidebar_cover_thumbnail_urls(&mut playlist.tracks);
     }
+}
+
+fn hydrate_sidebar_cover_thumbnail_urls(tracks: &mut [UiTrack]) {
+    for track in tracks {
+        normalize_sidebar_cover_thumbnail_url(&mut track.thumbnail_artwork_url);
+    }
+}
+
+fn normalize_sidebar_cover_thumbnail_url(url: &mut Option<String>) {
+    let Some(existing_url) = url.as_mut() else {
+        return;
+    };
+    if let Some(normalized_url) =
+        resized_jellyfin_image_url(existing_url, SIDEBAR_COVER_ART_IMAGE_SIZE)
+    {
+        *existing_url = normalized_url;
+    }
+}
+
+fn resized_jellyfin_image_url(url: &str, max_size: u32) -> Option<String> {
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return None;
+    };
+    if !parsed.path().contains("/Images/") {
+        return None;
+    }
+
+    let mut has_size_query = false;
+    let retained_pairs = parsed
+        .query_pairs()
+        .filter_map(|(key, value)| match key.as_ref() {
+            "maxWidth" | "maxHeight" | "quality" => {
+                has_size_query = true;
+                None
+            }
+            _ => Some((key.into_owned(), value.into_owned())),
+        })
+        .collect::<Vec<_>>();
+    if !has_size_query {
+        return None;
+    }
+
+    let max_size = max_size.to_string();
+    {
+        let mut query = parsed.query_pairs_mut();
+        query.clear();
+        for (key, value) in retained_pairs {
+            query.append_pair(&key, &value);
+        }
+        query
+            .append_pair("maxWidth", &max_size)
+            .append_pair("maxHeight", &max_size)
+            .append_pair("quality", "80");
+    }
+    Some(parsed.to_string())
 }
 
 fn library_needs_album_order_refresh(library: &CachedLibrary) -> bool {
@@ -7895,6 +7958,46 @@ mod tests {
         assert_eq!(
             loaded.tracks[0].stream_http_headers,
             vec![("X-Emby-Token".to_string(), "token".to_string())]
+        );
+    }
+
+    #[test]
+    fn cached_library_hydrates_sidebar_cover_thumbnail_size() {
+        let session = test_session();
+        let mut library = CachedLibrary {
+            tracks: vec![UiTrack {
+                thumbnail_artwork_url: Some(
+                    "https://jellyfin.example/Items/album-id/Images/Primary?maxWidth=160&maxHeight=160&quality=80&api_key=token"
+                        .to_string(),
+                ),
+                ..test_track()
+            }],
+            playlists: Vec::new(),
+        };
+
+        hydrate_cached_library(&mut library, &session);
+
+        let thumbnail_url = library.tracks[0]
+            .thumbnail_artwork_url
+            .as_deref()
+            .expect("thumbnail url");
+        let parsed = url::Url::parse(thumbnail_url).expect("valid thumbnail url");
+        let query = parsed.query_pairs().collect::<HashMap<_, _>>();
+        assert_eq!(
+            query.get("maxWidth").map(std::borrow::Cow::as_ref),
+            Some("220")
+        );
+        assert_eq!(
+            query.get("maxHeight").map(std::borrow::Cow::as_ref),
+            Some("220")
+        );
+        assert_eq!(
+            query.get("quality").map(std::borrow::Cow::as_ref),
+            Some("80")
+        );
+        assert_eq!(
+            query.get("api_key").map(std::borrow::Cow::as_ref),
+            Some("token")
         );
     }
 
