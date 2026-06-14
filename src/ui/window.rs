@@ -170,6 +170,9 @@ struct UiState {
     album_grid: Option<gtk::FlowBox>,
     artist_grid: Option<gtk::FlowBox>,
     playlist_grid: Option<gtk::FlowBox>,
+    album_grid_scroll_value: f64,
+    artist_grid_scroll_value: f64,
+    playlist_grid_scroll_value: f64,
     radio_grid: Option<gtk::Grid>,
     radio_grid_columns: usize,
     detail_header: Option<gtk::Box>,
@@ -554,6 +557,9 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         album_grid: None,
         artist_grid: None,
         playlist_grid: None,
+        album_grid_scroll_value: 0.0,
+        artist_grid_scroll_value: 0.0,
+        playlist_grid_scroll_value: 0.0,
         radio_grid: None,
         radio_grid_columns: 6,
         detail_header: None,
@@ -1197,14 +1203,20 @@ fn scroll_active_collection_grid_to_top(state: &Rc<RefCell<UiState>>) {
         return;
     };
 
+    if let Some(scroll) = collection_grid_scroll(&grid) {
+        scroll.vadjustment().set_value(0.0);
+    }
+}
+
+fn collection_grid_scroll(grid: &gtk::FlowBox) -> Option<gtk::ScrolledWindow> {
     let mut parent = grid.parent();
     while let Some(widget) = parent {
         if let Ok(scroll) = widget.clone().downcast::<gtk::ScrolledWindow>() {
-            scroll.vadjustment().set_value(0.0);
-            return;
+            return Some(scroll);
         }
         parent = widget.parent();
     }
+    None
 }
 
 fn activate_focused_collection_item(state: &Rc<RefCell<UiState>>) -> bool {
@@ -1246,6 +1258,82 @@ fn active_collection_grid(state: &Rc<RefCell<UiState>>) -> Option<gtk::FlowBox> 
         VisibleLibraryContent::Radio => None,
         VisibleLibraryContent::Tracks => None,
     }
+}
+
+fn active_collection_grid_and_content(
+    state: &Rc<RefCell<UiState>>,
+) -> Option<(VisibleLibraryContent, gtk::FlowBox)> {
+    let ui = state.borrow();
+    let content = visible_library_content(&ui);
+    let grid = match content {
+        VisibleLibraryContent::Albums => ui.album_grid.clone(),
+        VisibleLibraryContent::Artists => ui.artist_grid.clone(),
+        VisibleLibraryContent::Playlists => ui.playlist_grid.clone(),
+        VisibleLibraryContent::Radio => None,
+        VisibleLibraryContent::Tracks => None,
+    }?;
+    Some((content, grid))
+}
+
+fn save_active_collection_scroll_position(state: &Rc<RefCell<UiState>>) {
+    let Some((content, grid)) = active_collection_grid_and_content(state) else {
+        return;
+    };
+    let Some(scroll) = collection_grid_scroll(&grid) else {
+        return;
+    };
+    let value = scroll.vadjustment().value();
+    let mut ui = state.borrow_mut();
+    set_collection_scroll_value(&mut ui, content, value);
+}
+
+fn restore_active_collection_scroll_position(state: &Rc<RefCell<UiState>>) {
+    let Some((content, grid)) = active_collection_grid_and_content(state) else {
+        return;
+    };
+    let Some(scroll) = collection_grid_scroll(&grid) else {
+        return;
+    };
+    let value = {
+        let ui = state.borrow();
+        collection_scroll_value(&ui, content)
+    };
+    restore_collection_scroll(scroll, value);
+}
+
+fn set_collection_scroll_value(ui: &mut UiState, content: VisibleLibraryContent, value: f64) {
+    match content {
+        VisibleLibraryContent::Albums => ui.album_grid_scroll_value = value,
+        VisibleLibraryContent::Artists => ui.artist_grid_scroll_value = value,
+        VisibleLibraryContent::Playlists => ui.playlist_grid_scroll_value = value,
+        VisibleLibraryContent::Radio | VisibleLibraryContent::Tracks => {}
+    }
+}
+
+fn collection_scroll_value(ui: &UiState, content: VisibleLibraryContent) -> f64 {
+    match content {
+        VisibleLibraryContent::Albums => ui.album_grid_scroll_value,
+        VisibleLibraryContent::Artists => ui.artist_grid_scroll_value,
+        VisibleLibraryContent::Playlists => ui.playlist_grid_scroll_value,
+        VisibleLibraryContent::Radio | VisibleLibraryContent::Tracks => 0.0,
+    }
+}
+
+fn restore_collection_scroll(scroll: gtk::ScrolledWindow, value: f64) {
+    let attempts = Rc::new(Cell::new(0usize));
+    gtk::glib::idle_add_local(move || {
+        let adj = scroll.vadjustment();
+        let max = (adj.upper() - adj.page_size()).max(0.0);
+        adj.set_value(value.clamp(0.0, max));
+
+        let attempt = attempts.get() + 1;
+        attempts.set(attempt);
+        if value <= max || attempt >= 60 {
+            gtk::glib::ControlFlow::Break
+        } else {
+            gtk::glib::ControlFlow::Continue
+        }
+    });
 }
 
 fn setup_mpris(state: Rc<RefCell<UiState>>) {
@@ -4171,6 +4259,7 @@ fn show_album_tracks(state: &Rc<RefCell<UiState>>, album: &AlbumSummary) {
         let ui = state.borrow();
         current_display_track(&ui).and_then(|track| track_key_if_same_album(track, &album.key))
     };
+    save_active_collection_scroll_position(state);
 
     {
         let mut ui = state.borrow_mut();
@@ -4205,6 +4294,8 @@ fn show_album_tracks(state: &Rc<RefCell<UiState>>, album: &AlbumSummary) {
 }
 
 fn show_playlist_tracks(state: &Rc<RefCell<UiState>>, playlist: &UiPlaylist) {
+    save_active_collection_scroll_position(state);
+
     {
         let mut ui = state.borrow_mut();
         ui.active_page = LibraryPage::Playlists;
@@ -4226,6 +4317,8 @@ fn show_playlist_tracks(state: &Rc<RefCell<UiState>>, playlist: &UiPlaylist) {
 }
 
 fn show_artist_albums(state: &Rc<RefCell<UiState>>, artist: &ArtistSummary) {
+    save_active_collection_scroll_position(state);
+
     {
         let mut ui = state.borrow_mut();
         ui.active_page = LibraryPage::Artists;
@@ -4326,7 +4419,8 @@ fn return_to_collection_grid(state: &Rc<RefCell<UiState>>) {
     }
     refresh_visible_collection_grid(state);
     update_content_view(state);
-    focus_active_content_top(state);
+    focus_active_collection_grid(state);
+    restore_active_collection_scroll_position(state);
 }
 
 fn navigate_to_now_playing_artist(state: &Rc<RefCell<UiState>>) {
