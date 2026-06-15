@@ -152,6 +152,9 @@ struct UiState {
     playlist_filter: Option<String>,
     collection_detail_title: Option<String>,
     collection_detail_subtitle: Option<String>,
+    collection_detail_parent_search_query: Option<String>,
+    collection_return_target: Option<CollectionReturnTarget>,
+    collection_parent_return_target: Option<CollectionReturnTarget>,
     selected_index: usize,
     search_query: String,
     connection_generation: u64,
@@ -300,6 +303,7 @@ const COLLECTION_ARTWORK_STAGGER_MS: u64 = 8;
 const COLLECTION_ARTWORK_MAX_STAGGERED_ITEMS: usize = 160;
 const COLLECTION_TILE_INITIAL_BATCH: usize = 24;
 const COLLECTION_TILE_IDLE_BATCH: usize = 24;
+const COLLECTION_RETURN_HIGHLIGHT_MS: u64 = 850;
 const INVISIBLE_SEARCH_TIMEOUT: Duration = Duration::from_millis(1_200);
 const RADIO_STATIONS_KEY: &str = "radio.stations";
 static CONNECTION_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -539,6 +543,9 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         playlist_filter: None,
         collection_detail_title: None,
         collection_detail_subtitle: None,
+        collection_detail_parent_search_query: None,
+        collection_return_target: None,
+        collection_parent_return_target: None,
         selected_index: 0,
         search_query: String::new(),
         connection_generation: CONNECTION_GENERATION.load(AtomicOrdering::SeqCst),
@@ -957,13 +964,19 @@ fn activate_invisible_collection_match(state: &Rc<RefCell<UiState>>, query: &str
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum VisibleLibraryContent {
     Tracks,
     Albums,
     Artists,
     Playlists,
     Radio,
+}
+
+#[derive(Clone, Debug)]
+struct CollectionReturnTarget {
+    content: VisibleLibraryContent,
+    key: String,
 }
 
 fn visible_library_content(ui: &UiState) -> VisibleLibraryContent {
@@ -1275,6 +1288,14 @@ fn active_collection_grid_and_content(
     Some((content, grid))
 }
 
+fn collection_return_target_for_key(
+    state: &Rc<RefCell<UiState>>,
+    key: String,
+) -> Option<CollectionReturnTarget> {
+    let (content, _) = active_collection_grid_and_content(state)?;
+    Some(CollectionReturnTarget { content, key })
+}
+
 fn save_active_collection_scroll_position(state: &Rc<RefCell<UiState>>) {
     let Some((content, grid)) = active_collection_grid_and_content(state) else {
         return;
@@ -1334,6 +1355,85 @@ fn restore_collection_scroll(scroll: gtk::ScrolledWindow, value: f64) {
             gtk::glib::ControlFlow::Continue
         }
     });
+}
+
+fn pulse_collection_return_target(
+    state: &Rc<RefCell<UiState>>,
+    target: Option<CollectionReturnTarget>,
+) {
+    let Some(target) = target else {
+        return;
+    };
+
+    let state = state.clone();
+    let attempts = Rc::new(Cell::new(0usize));
+    gtk::glib::idle_add_local(move || {
+        if let Some(button) = collection_return_target_button(&state, &target) {
+            button.add_css_class("return-highlight");
+            gtk::glib::timeout_add_local_once(
+                Duration::from_millis(COLLECTION_RETURN_HIGHLIGHT_MS),
+                move || {
+                    button.remove_css_class("return-highlight");
+                },
+            );
+            return gtk::glib::ControlFlow::Break;
+        }
+
+        let attempt = attempts.get() + 1;
+        attempts.set(attempt);
+        if attempt >= 60 {
+            gtk::glib::ControlFlow::Break
+        } else {
+            gtk::glib::ControlFlow::Continue
+        }
+    });
+}
+
+fn collection_return_target_button(
+    state: &Rc<RefCell<UiState>>,
+    target: &CollectionReturnTarget,
+) -> Option<gtk::Button> {
+    let (grid, index) = {
+        let ui = state.borrow();
+        if visible_library_content(&ui) != target.content {
+            return None;
+        }
+        let grid = collection_grid_for_content(&ui, target.content)?;
+        let index = collection_return_target_index(&ui, target)?;
+        (grid, index)
+    };
+
+    grid.child_at_index(index as i32)
+        .and_then(|child| collection_child_button(&child))
+}
+
+fn collection_grid_for_content(
+    ui: &UiState,
+    content: VisibleLibraryContent,
+) -> Option<gtk::FlowBox> {
+    match content {
+        VisibleLibraryContent::Albums => ui.album_grid.clone(),
+        VisibleLibraryContent::Artists => ui.artist_grid.clone(),
+        VisibleLibraryContent::Playlists => ui.playlist_grid.clone(),
+        VisibleLibraryContent::Radio | VisibleLibraryContent::Tracks => None,
+    }
+}
+
+fn collection_return_target_index(ui: &UiState, target: &CollectionReturnTarget) -> Option<usize> {
+    match target.content {
+        VisibleLibraryContent::Albums => visible_album_summaries(ui)
+            .iter()
+            .position(|album| album.key == target.key),
+        VisibleLibraryContent::Artists => {
+            filter_artist_summaries(&ui.library_artists, &ui.search_query)
+                .iter()
+                .position(|artist| artist.key == target.key)
+        }
+        VisibleLibraryContent::Playlists => filter_playlists(&ui.playlists, &ui.search_query)
+            .iter()
+            .position(|playlist| playlist.id == target.key),
+        VisibleLibraryContent::Radio | VisibleLibraryContent::Tracks => None,
+    }
 }
 
 fn setup_mpris(state: Rc<RefCell<UiState>>) {
@@ -4221,6 +4321,9 @@ fn set_library_page(state: &Rc<RefCell<UiState>>, page: LibraryPage) {
             && ui.playlist_filter.is_none()
             && ui.collection_detail_title.is_none()
             && ui.collection_detail_subtitle.is_none()
+            && ui.collection_detail_parent_search_query.is_none()
+            && ui.collection_return_target.is_none()
+            && ui.collection_parent_return_target.is_none()
         {
             return;
         }
@@ -4230,6 +4333,9 @@ fn set_library_page(state: &Rc<RefCell<UiState>>, page: LibraryPage) {
         ui.playlist_filter = None;
         ui.collection_detail_title = None;
         ui.collection_detail_subtitle = None;
+        ui.collection_detail_parent_search_query = None;
+        ui.collection_return_target = None;
+        ui.collection_parent_return_target = None;
         if show_tracks {
             if !ui.track_filter_is_current() {
                 let selected_key = ui.tracks.get(ui.selected_index).map(track_key);
@@ -4259,6 +4365,7 @@ fn show_album_tracks(state: &Rc<RefCell<UiState>>, album: &AlbumSummary) {
         let ui = state.borrow();
         current_display_track(&ui).and_then(|track| track_key_if_same_album(track, &album.key))
     };
+    let return_target = collection_return_target_for_key(state, album.key.clone());
     save_active_collection_scroll_position(state);
 
     {
@@ -4268,6 +4375,10 @@ fn show_album_tracks(state: &Rc<RefCell<UiState>>, album: &AlbumSummary) {
         } else {
             None
         };
+        let parent_return_target = selected_artist
+            .is_some()
+            .then(|| ui.collection_return_target.clone())
+            .flatten();
         ui.active_page = if selected_artist.is_some() {
             LibraryPage::Artists
         } else {
@@ -4282,6 +4393,9 @@ fn show_album_tracks(state: &Rc<RefCell<UiState>>, album: &AlbumSummary) {
             album.artist,
             count_text(album.song_count, "song", "songs")
         ));
+        ui.collection_detail_parent_search_query = Some(ui.search_query.clone());
+        ui.collection_return_target = return_target;
+        ui.collection_parent_return_target = parent_return_target;
         apply_track_filter(&mut ui, selected_key.as_deref());
         update_now_playing_labels(&ui);
         update_play_button(&ui);
@@ -4294,6 +4408,7 @@ fn show_album_tracks(state: &Rc<RefCell<UiState>>, album: &AlbumSummary) {
 }
 
 fn show_playlist_tracks(state: &Rc<RefCell<UiState>>, playlist: &UiPlaylist) {
+    let return_target = collection_return_target_for_key(state, playlist.id.clone());
     save_active_collection_scroll_position(state);
 
     {
@@ -4304,6 +4419,9 @@ fn show_playlist_tracks(state: &Rc<RefCell<UiState>>, playlist: &UiPlaylist) {
         ui.playlist_filter = Some(playlist.id.clone());
         ui.collection_detail_title = Some(playlist.name.clone());
         ui.collection_detail_subtitle = Some(count_text(playlist.tracks.len(), "song", "songs"));
+        ui.collection_detail_parent_search_query = Some(ui.search_query.clone());
+        ui.collection_return_target = return_target;
+        ui.collection_parent_return_target = None;
         ui.selected_index = 0;
         apply_track_filter(&mut ui, None);
         update_now_playing_labels(&ui);
@@ -4317,6 +4435,7 @@ fn show_playlist_tracks(state: &Rc<RefCell<UiState>>, playlist: &UiPlaylist) {
 }
 
 fn show_artist_albums(state: &Rc<RefCell<UiState>>, artist: &ArtistSummary) {
+    let return_target = collection_return_target_for_key(state, artist.key.clone());
     save_active_collection_scroll_position(state);
 
     {
@@ -4328,6 +4447,9 @@ fn show_artist_albums(state: &Rc<RefCell<UiState>>, artist: &ArtistSummary) {
         ui.collection_detail_title = Some(artist.name.clone());
         ui.collection_detail_subtitle =
             Some(artist_count_text(artist.album_count, artist.song_count));
+        ui.collection_detail_parent_search_query = Some(ui.search_query.clone());
+        ui.collection_return_target = return_target;
+        ui.collection_parent_return_target = None;
         ui.selected_index = 0;
         ui.page_summary.set_text(&format!(
             "{} | {}",
@@ -4387,10 +4509,19 @@ fn focus_active_collection_grid(state: &Rc<RefCell<UiState>>) {
 }
 
 fn return_to_collection_grid(state: &Rc<RefCell<UiState>>) {
+    let refresh_grid = {
+        let ui = state.borrow();
+        ui.collection_detail_parent_search_query
+            .as_deref()
+            .is_none_or(|query| query != ui.search_query)
+    };
+    let return_target = state.borrow().collection_return_target.clone();
+
     {
         let mut ui = state.borrow_mut();
         if ui.active_page == LibraryPage::Artists && ui.album_filter.is_some() {
             ui.album_filter = None;
+            ui.collection_return_target = ui.collection_parent_return_target.take();
             if let Some(artist_key_value) = ui.artist_filter.clone() {
                 let artist_detail = ui
                     .library_artists
@@ -4413,14 +4544,20 @@ fn return_to_collection_grid(state: &Rc<RefCell<UiState>>) {
             ui.playlist_filter = None;
             ui.collection_detail_title = None;
             ui.collection_detail_subtitle = None;
+            ui.collection_detail_parent_search_query = None;
+            ui.collection_return_target = None;
+            ui.collection_parent_return_target = None;
         }
         ui.selected_index = 0;
         update_page_summary(&ui);
     }
-    refresh_visible_collection_grid(state);
+    if refresh_grid {
+        refresh_visible_collection_grid(state);
+    }
     update_content_view(state);
     focus_active_collection_grid(state);
     restore_active_collection_scroll_position(state);
+    pulse_collection_return_target(state, return_target);
 }
 
 fn navigate_to_now_playing_artist(state: &Rc<RefCell<UiState>>) {
@@ -5243,6 +5380,9 @@ fn apply_connection_payload(state: &Rc<RefCell<UiState>>, payload: ConnectionPay
         ui.playlist_filter = None;
         ui.collection_detail_title = None;
         ui.collection_detail_subtitle = None;
+        ui.collection_detail_parent_search_query = None;
+        ui.collection_return_target = None;
+        ui.collection_parent_return_target = None;
         let selected_key = preferred_refresh_track_key(
             &ui.all_tracks,
             now_playing_key.as_deref(),

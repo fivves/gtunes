@@ -407,6 +407,12 @@ window {
   background: alpha(@accent_bg_color, .12);
 }
 
+.collection-tile.return-highlight {
+  border-color: alpha(@accent_bg_color, .76);
+  background: alpha(@accent_bg_color, .18);
+  box-shadow: 0 0 0 2px alpha(@accent_bg_color, .24), 0 2px 10px alpha(@window_fg_color, .12);
+}
+
 .collection-art {
   border-radius: 8px;
   background: @card_bg_color;
