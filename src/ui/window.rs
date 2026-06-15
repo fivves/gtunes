@@ -165,7 +165,7 @@ struct UiState {
     shuffle_enabled: bool,
     now_playing_key: Option<String>,
     current_radio_station_id: Option<String>,
-    track_indicators: HashMap<usize, gtk::Image>,
+    track_indicators: Vec<(String, gtk::Image)>,
     playback_tracks: Vec<UiTrack>,
     playback_index: Option<usize>,
     playback_order: Vec<usize>,
@@ -556,7 +556,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         shuffle_enabled: false,
         now_playing_key: None,
         current_radio_station_id: None,
-        track_indicators: HashMap::new(),
+        track_indicators: Vec::new(),
         playback_tracks: Vec::new(),
         playback_index: None,
         playback_order: Vec::new(),
@@ -3934,10 +3934,11 @@ fn track_column_view(column: TrackColumn, state: Rc<RefCell<UiState>>) -> gtk::C
         if column.sort_column == SortColumn::Title {
             bind_title_cell(list_item, &track.title, is_now_playing);
             if let Some(indicator) = get_indicator_image(list_item) {
-                state_bind
-                    .borrow_mut()
-                    .track_indicators
-                    .insert(position, indicator);
+                let key = track_key(&track);
+                let mut ui = state_bind.borrow_mut();
+                ui.track_indicators
+                    .retain(|(_, existing)| existing != &indicator);
+                ui.track_indicators.push((key, indicator));
             }
         } else if let Some(label) = list_item
             .child()
@@ -3953,8 +3954,12 @@ fn track_column_view(column: TrackColumn, state: Rc<RefCell<UiState>>) -> gtk::C
             let Some(list_item) = list_item.downcast_ref::<gtk::ListItem>() else {
                 return;
             };
-            let position = list_item.position() as usize;
-            state.borrow_mut().track_indicators.remove(&position);
+            if let Some(indicator) = get_indicator_image(list_item) {
+                state
+                    .borrow_mut()
+                    .track_indicators
+                    .retain(|(_, existing)| existing != &indicator);
+            }
         });
     }
 
@@ -4127,14 +4132,10 @@ fn refresh_track_model(state: &Rc<RefCell<UiState>>) {
 
 fn update_list_indicators(state: &Rc<RefCell<UiState>>) {
     let ui = state.borrow();
-    let now_playing_key = ui.now_playing_key.clone();
+    let now_playing_key = ui.now_playing_key.as_deref();
 
-    for (pos, indicator) in &ui.track_indicators {
-        let is_playing = if let Some(track) = ui.tracks.get(*pos) {
-            Some(track_key(track)) == now_playing_key
-        } else {
-            false
-        };
+    for (track_key_value, indicator) in &ui.track_indicators {
+        let is_playing = now_playing_key == Some(track_key_value.as_str());
         indicator.set_opacity(if is_playing { 1.0 } else { 0.0 });
     }
 }
@@ -7444,10 +7445,13 @@ fn handle_playback_error(
                 Ok(()) => {
                     ui.now_playing_key = Some(track_key_value);
                     arm_gapless_next(&mut ui);
+                    update_now_playing_labels(&ui);
                     ui.playback_status
                         .set_text(&format!("Playing transcoded stream | {quality}"));
                     update_play_button(&ui);
                     update_mpris_status(&mut ui);
+                    drop(ui);
+                    update_list_indicators(state);
                     return;
                 }
                 Err(error) => {
