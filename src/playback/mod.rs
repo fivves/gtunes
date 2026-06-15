@@ -190,6 +190,13 @@ impl PlaybackEngine {
         Ok(())
     }
 
+    pub fn pause_live_stream(&mut self) -> Result<(), PlaybackError> {
+        self.playbin.set_state(gst::State::Null)?;
+        self.clear_gapless_state();
+        self.state = PlaybackState::Paused;
+        Ok(())
+    }
+
     pub fn position(&self) -> Option<Duration> {
         self.playbin
             .query_position::<gst::ClockTime>()

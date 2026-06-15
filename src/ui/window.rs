@@ -5043,6 +5043,20 @@ fn play_radio_station(state: &Rc<RefCell<UiState>>, station: &RadioStation) {
     }
 }
 
+fn resume_radio_station(state: &Rc<RefCell<UiState>>) -> bool {
+    let station = {
+        let ui = state.borrow();
+        current_radio_station(&ui)
+    };
+
+    if let Some(station) = station {
+        play_radio_station(state, &station);
+        true
+    } else {
+        false
+    }
+}
+
 fn clear_track_visuals_for_radio(ui: &mut UiState) {
     {
         let mut waveform = ui.waveform.borrow_mut();
@@ -5557,9 +5571,15 @@ fn toggle_shuffle(state: &Rc<RefCell<UiState>>) {
 
 fn pause_playback(state: &Rc<RefCell<UiState>>) {
     let mut ui = state.borrow_mut();
+    let radio_is_active = ui.current_radio_station_id.is_some();
 
     if let Some(playback) = ui.playback.as_mut() {
-        match playback.pause() {
+        let result = if radio_is_active {
+            playback.pause_live_stream()
+        } else {
+            playback.pause()
+        };
+        match result {
             Ok(()) => update_now_playing_labels(&ui),
             Err(error) => ui
                 .playback_status
@@ -5575,6 +5595,17 @@ fn resume_playback(state: &Rc<RefCell<UiState>>) {
 
     match ui.playback.as_ref().map(PlaybackEngine::state).cloned() {
         Some(PlaybackState::Paused) => {
+            if ui.current_radio_station_id.is_some() {
+                drop(ui);
+                if !resume_radio_station(state) {
+                    let mut ui = state.borrow_mut();
+                    ui.current_radio_station_id = None;
+                    ui.playback_status.set_text("Radio station is unavailable");
+                    update_play_button(&ui);
+                    update_mpris_status(&mut ui);
+                }
+                return;
+            }
             let result = ui.playback.as_mut().expect("playback was present").resume();
             match result {
                 Ok(()) => update_now_playing_labels(&ui),
