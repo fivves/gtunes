@@ -4578,6 +4578,7 @@ fn navigate_to_now_playing_artist(state: &Rc<RefCell<UiState>>) {
     };
 
     if let Some(artist) = artist {
+        set_library_page(state, LibraryPage::Artists);
         show_artist_albums(state, &artist);
     }
 }
@@ -4599,7 +4600,7 @@ fn navigate_to_now_playing_album(state: &Rc<RefCell<UiState>>) {
     };
 
     if let Some(album) = album {
-        state.borrow_mut().active_page = LibraryPage::Albums;
+        set_library_page(state, LibraryPage::Albums);
         show_album_tracks(state, &album);
     }
 }
@@ -6905,15 +6906,19 @@ fn scroll_to_now_playing(state: &Rc<RefCell<UiState>>) {
     };
     if needs_tracks_page {
         set_library_page(state, LibraryPage::Tracks);
+        let state = state.clone();
+        gtk::glib::idle_add_local(move || {
+            scroll_to_now_playing(&state);
+            gtk::glib::ControlFlow::Break
+        });
+        return;
     }
 
-    let (idx, stack) = {
+    let idx = {
         let ui = state.borrow();
-        let idx = ui
-            .tracks
+        ui.tracks
             .iter()
-            .position(|t| Some(track_key(t)) == ui.now_playing_key);
-        (idx, ui.track_stack.clone())
+            .position(|t| Some(track_key(t)) == ui.now_playing_key)
     };
 
     let Some(idx) = idx else {
@@ -6932,26 +6937,7 @@ fn scroll_to_now_playing(state: &Rc<RefCell<UiState>>) {
     load_selected_waveform(state);
     update_list_indicators(state);
 
-    let scroll = stack
-        .as_ref()
-        .and_then(|s| s.child_by_name("list"))
-        .and_then(|c| c.downcast::<gtk::ScrolledWindow>().ok());
-
-    if let Some(scroll) = scroll {
-        let adj = scroll.vadjustment();
-        let track_count = {
-            let ui = state.borrow();
-            ui.tracks.len()
-        };
-
-        if track_count > 0 {
-            // Use the adjustment's upper value to calculate height.
-            // This matches GTK's internal estimation and prevents compounding errors.
-            let row_height = adj.upper() / track_count as f64;
-            let target = idx as f64 * row_height;
-            adj.set_value(target.clamp(0.0, adj.upper() - adj.page_size()));
-        }
-    }
+    scroll_track_list_to_index(state, idx);
 }
 
 fn build_bottom_bar(state: Rc<RefCell<UiState>>) -> gtk::Box {
