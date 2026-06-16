@@ -306,6 +306,9 @@ const ACTION_PANEL_WIDTH: i32 = 130;
 const ALBUM_ART_SIZE: i32 = 168;
 const COLLECTION_TILE_WIDTH: i32 = 184;
 const ARTIST_ART_SIZE: i32 = 148;
+const RADIO_CARD_CONTENT_WIDTH: i32 = 154;
+const RADIO_CARD_OUTER_WIDTH: i32 = 176;
+const RADIO_GRID_COLUMN_GAP: i32 = 14;
 const COLLECTION_ARTWORK_INITIAL_DELAY_MS: u64 = 24;
 const COLLECTION_ARTWORK_STAGGER_MS: u64 = 8;
 const COLLECTION_ARTWORK_MAX_STAGGERED_ITEMS: usize = 160;
@@ -2914,8 +2917,8 @@ fn radio_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
 
     let grid = gtk::Grid::new();
     grid.add_css_class("radio-grid");
-    grid.set_row_spacing(14);
-    grid.set_column_spacing(14);
+    grid.set_row_spacing(RADIO_GRID_COLUMN_GAP as u32);
+    grid.set_column_spacing(RADIO_GRID_COLUMN_GAP as u32);
     grid.set_column_homogeneous(false);
     grid.set_row_homogeneous(false);
     grid.set_halign(Align::Start);
@@ -4923,20 +4926,20 @@ fn refresh_radio_page(state: &Rc<RefCell<UiState>>) {
 }
 
 fn radio_grid_columns_for_width(width: i32) -> usize {
-    const TILE_WIDTH: i32 = 154;
-    const COLUMN_GAP: i32 = 14;
     const MAX_COLUMNS: usize = 6;
 
-    let width = width.max(TILE_WIDTH);
-    let columns = ((width + COLUMN_GAP) / (TILE_WIDTH + COLUMN_GAP)).max(1) as usize;
+    let width = width.max(RADIO_CARD_OUTER_WIDTH);
+    let columns = ((width + RADIO_GRID_COLUMN_GAP)
+        / (RADIO_CARD_OUTER_WIDTH + RADIO_GRID_COLUMN_GAP))
+        .max(1) as usize;
     columns.min(MAX_COLUMNS)
 }
 
 fn radio_station_card(state: Rc<RefCell<UiState>>, station: RadioStation) -> gtk::Box {
     let card = gtk::Box::new(Orientation::Vertical, 7);
     card.add_css_class("radio-station-card");
-    card.set_width_request(154);
-    card.set_height_request(154);
+    card.set_width_request(RADIO_CARD_CONTENT_WIDTH);
+    card.set_height_request(RADIO_CARD_CONTENT_WIDTH);
     card.set_halign(Align::Start);
     card.set_valign(Align::Start);
     card.set_hexpand(false);
@@ -4976,17 +4979,22 @@ fn radio_station_card(state: Rc<RefCell<UiState>>, station: RadioStation) -> gtk
     text.set_halign(Align::Fill);
     text.set_valign(Align::End);
     text.set_vexpand(true);
+    text.set_size_request(0, -1);
     let title = label(&station.name, "radio-station-title");
     title.set_xalign(0.5);
     title.set_justify(gtk::Justification::Center);
     title.set_single_line_mode(true);
     title.set_lines(1);
+    title.set_width_chars(1);
+    title.set_max_width_chars(18);
     text.append(&title);
     let subtitle = label(&radio_station_subtitle(&station), "meta");
     subtitle.set_xalign(0.5);
     subtitle.set_justify(gtk::Justification::Center);
     subtitle.set_single_line_mode(true);
     subtitle.set_lines(1);
+    subtitle.set_width_chars(1);
+    subtitle.set_max_width_chars(18);
     text.append(&subtitle);
     card.append(&text);
 
@@ -8585,6 +8593,16 @@ mod tests {
             radio_source_kind_from_station("local", "https://radio.example/live.mp3"),
             RadioSourceKind::Stream
         );
+    }
+
+    #[test]
+    fn radio_grid_columns_use_outer_card_width() {
+        let three_column_width = RADIO_CARD_OUTER_WIDTH * 3 + RADIO_GRID_COLUMN_GAP * 2;
+        let four_column_width = RADIO_CARD_OUTER_WIDTH * 4 + RADIO_GRID_COLUMN_GAP * 3;
+
+        assert_eq!(radio_grid_columns_for_width(three_column_width), 3);
+        assert_eq!(radio_grid_columns_for_width(four_column_width - 1), 3);
+        assert_eq!(radio_grid_columns_for_width(four_column_width), 4);
     }
 
     #[test]
