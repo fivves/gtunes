@@ -8,7 +8,8 @@ use std::time::Duration;
 use thiserror::Error;
 use url::Url;
 
-const YOUTUBE_AUDIO_FORMAT: &str = "bestaudio[acodec!=none][vcodec=none]/bestaudio[acodec!=none]";
+const YOUTUBE_AUDIO_FORMAT: &str =
+    "bestaudio[acodec!=none][vcodec=none]/bestaudio[acodec!=none]/best[acodec!=none]";
 
 #[derive(Debug, Error)]
 pub enum PlaybackError {

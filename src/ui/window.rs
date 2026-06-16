@@ -184,8 +184,7 @@ struct UiState {
     album_grid_scroll_value: f64,
     artist_grid_scroll_value: f64,
     playlist_grid_scroll_value: f64,
-    radio_grid: Option<gtk::Grid>,
-    radio_grid_columns: usize,
+    radio_grid: Option<gtk::FlowBox>,
     detail_header: Option<gtk::Box>,
     detail_title_label: Option<gtk::Label>,
     detail_subtitle_label: Option<gtk::Label>,
@@ -307,7 +306,6 @@ const ALBUM_ART_SIZE: i32 = 168;
 const COLLECTION_TILE_WIDTH: i32 = 184;
 const ARTIST_ART_SIZE: i32 = 148;
 const RADIO_CARD_CONTENT_WIDTH: i32 = 154;
-const RADIO_CARD_OUTER_WIDTH: i32 = 176;
 const RADIO_GRID_COLUMN_GAP: i32 = 14;
 const COLLECTION_ARTWORK_INITIAL_DELAY_MS: u64 = 24;
 const COLLECTION_ARTWORK_STAGGER_MS: u64 = 8;
@@ -352,6 +350,10 @@ impl RadioStation {
     fn source_label(&self) -> &'static str {
         self.source_kind().label()
     }
+
+    fn mpris_source_label(&self) -> &'static str {
+        self.source_kind().mpris_label()
+    }
 }
 
 impl RadioSourceKind {
@@ -368,6 +370,14 @@ impl RadioSourceKind {
             Self::Stream => "Stream",
             Self::YouTube => "YouTube Live",
             Self::Twitch => "Twitch Live",
+        }
+    }
+
+    fn mpris_label(self) -> &'static str {
+        match self {
+            Self::Stream => "Radio Stream",
+            Self::YouTube => "Youtube Stream",
+            Self::Twitch => "Twitch Stream",
         }
     }
 
@@ -648,7 +658,6 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         artist_grid_scroll_value: 0.0,
         playlist_grid_scroll_value: 0.0,
         radio_grid: None,
-        radio_grid_columns: 6,
         detail_header: None,
         detail_title_label: None,
         detail_subtitle_label: None,
@@ -1641,7 +1650,7 @@ fn update_mpris_status(ui: &mut UiState) {
 
 fn update_mpris_metadata(ui: &mut UiState) {
     if let Some(station) = current_radio_station(ui) {
-        let artist = format!("{} radio", station.source_label());
+        let artist = station.mpris_source_label().to_string();
         let title = station.name;
         let album = "Radio".to_string();
 
@@ -2901,27 +2910,14 @@ fn radio_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
     station_area.set_hexpand(true);
     station_area.set_vexpand(true);
     station_area.append(&label("Stations", "section-title"));
-    {
-        let state = state.clone();
-        let last_columns = Rc::new(Cell::new(0usize));
-        let last_columns_for_tick = last_columns.clone();
-        station_area.add_tick_callback(move |area, _| {
-            let columns = radio_grid_columns_for_width(area.allocated_width());
-            if last_columns_for_tick.replace(columns) != columns {
-                state.borrow_mut().radio_grid_columns = columns;
-                refresh_radio_page(&state);
-            }
-            gtk::glib::ControlFlow::Continue
-        });
-    }
-
-    let grid = gtk::Grid::new();
+    let grid = gtk::FlowBox::new();
     grid.add_css_class("radio-grid");
     grid.set_row_spacing(RADIO_GRID_COLUMN_GAP as u32);
     grid.set_column_spacing(RADIO_GRID_COLUMN_GAP as u32);
-    grid.set_column_homogeneous(false);
-    grid.set_row_homogeneous(false);
-    grid.set_halign(Align::Start);
+    grid.set_selection_mode(gtk::SelectionMode::None);
+    grid.set_min_children_per_line(1);
+    grid.set_max_children_per_line(6);
+    grid.set_homogeneous(false);
     grid.set_valign(Align::Start);
     station_area.append(&grid);
     page.append(&station_area);
@@ -4905,17 +4901,8 @@ fn refresh_radio_page(state: &Rc<RefCell<UiState>>) {
         grid.remove(&child);
     }
 
-    let stations = radio_stations_for_display(state);
-    let columns = state.borrow().radio_grid_columns.max(1);
-
-    for (index, station) in stations.into_iter().enumerate() {
-        grid.attach(
-            &radio_station_card(state.clone(), station),
-            (index % columns) as i32,
-            (index / columns) as i32,
-            1,
-            1,
-        );
+    for station in radio_stations_for_display(state) {
+        grid.insert(&radio_station_card(state.clone(), station), -1);
     }
 
     update_nav_counts(state);
@@ -4923,16 +4910,6 @@ fn refresh_radio_page(state: &Rc<RefCell<UiState>>) {
     if ui.active_page == LibraryPage::Radio {
         update_page_summary(&ui);
     }
-}
-
-fn radio_grid_columns_for_width(width: i32) -> usize {
-    const MAX_COLUMNS: usize = 6;
-
-    let width = width.max(RADIO_CARD_OUTER_WIDTH);
-    let columns = ((width + RADIO_GRID_COLUMN_GAP)
-        / (RADIO_CARD_OUTER_WIDTH + RADIO_GRID_COLUMN_GAP))
-        .max(1) as usize;
-    columns.min(MAX_COLUMNS)
 }
 
 fn radio_station_card(state: Rc<RefCell<UiState>>, station: RadioStation) -> gtk::Box {
@@ -8593,16 +8570,6 @@ mod tests {
             radio_source_kind_from_station("local", "https://radio.example/live.mp3"),
             RadioSourceKind::Stream
         );
-    }
-
-    #[test]
-    fn radio_grid_columns_use_outer_card_width() {
-        let three_column_width = RADIO_CARD_OUTER_WIDTH * 3 + RADIO_GRID_COLUMN_GAP * 2;
-        let four_column_width = RADIO_CARD_OUTER_WIDTH * 4 + RADIO_GRID_COLUMN_GAP * 3;
-
-        assert_eq!(radio_grid_columns_for_width(three_column_width), 3);
-        assert_eq!(radio_grid_columns_for_width(four_column_width - 1), 3);
-        assert_eq!(radio_grid_columns_for_width(four_column_width), 4);
     }
 
     #[test]

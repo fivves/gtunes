@@ -577,6 +577,19 @@ window {
   background: transparent;
 }
 
+.radio-grid flowboxchild,
+.radio-grid flowboxchild:hover,
+.radio-grid flowboxchild:active,
+.radio-grid flowboxchild:selected,
+.radio-grid flowboxchild:focus,
+.radio-grid flowboxchild:focus-visible {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+}
+
 .radio-station-card {
   min-width: 154px;
   min-height: 154px;
