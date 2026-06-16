@@ -8,6 +8,8 @@ use std::time::Duration;
 use thiserror::Error;
 use url::Url;
 
+const YOUTUBE_AUDIO_FORMAT: &str = "bestaudio[acodec!=none][vcodec=none]/bestaudio[acodec!=none]";
+
 #[derive(Debug, Error)]
 pub enum PlaybackError {
     #[error("GStreamer playbin element is unavailable")]
@@ -91,7 +93,7 @@ pub fn resolve_external_stream_url(
                 "--quiet",
                 "--no-warnings",
                 "--format",
-                "bestaudio/best",
+                YOUTUBE_AUDIO_FORMAT,
                 "--get-url",
                 page_url.as_str(),
             ],
@@ -151,6 +153,11 @@ impl PlaybackEngine {
         let playbin = gst::ElementFactory::make("playbin")
             .build()
             .map_err(|_| PlaybackError::PlaybinUnavailable)?;
+        let video_sink = gst::ElementFactory::make("fakesink")
+            .property("sync", false)
+            .build()
+            .map_err(|_| PlaybackError::PlaybinUnavailable)?;
+        playbin.set_property("video-sink", &video_sink);
         let bus = playbin.bus().ok_or(PlaybackError::PlaybinUnavailable)?;
         let gapless = Arc::new(Mutex::new(GaplessState::default()));
         let http_headers = Arc::new(Mutex::new(Vec::new()));
