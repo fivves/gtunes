@@ -21,7 +21,8 @@ use crate::jellyfin::{
     stream_http_headers_for_token,
 };
 use crate::playback::{
-    PlaybackEngine, PlaybackEvent, PlaybackRequest, PlaybackState, PlaybackStreamKind,
+    ExternalStreamSource, PlaybackEngine, PlaybackEvent, PlaybackRequest, PlaybackState,
+    PlaybackStreamKind, resolve_external_stream_url,
 };
 use crate::waveform::{WaveformKey, WaveformSummary};
 
@@ -84,6 +85,13 @@ struct RadioStation {
     source: String,
     #[serde(default)]
     built_in: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RadioSourceKind {
+    Stream,
+    YouTube,
+    Twitch,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -329,9 +337,78 @@ impl RadioStation {
             id: format!("built-in:{name}"),
             name: name.to_string(),
             url: url.to_string(),
-            source: "cliamp".to_string(),
+            source: "stream".to_string(),
             built_in: true,
         }
+    }
+
+    fn source_kind(&self) -> RadioSourceKind {
+        radio_source_kind_from_station(&self.source, &self.url)
+    }
+
+    fn source_label(&self) -> &'static str {
+        self.source_kind().label()
+    }
+}
+
+impl RadioSourceKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Stream => "stream",
+            Self::YouTube => "youtube",
+            Self::Twitch => "twitch",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Stream => "Stream",
+            Self::YouTube => "YouTube Live",
+            Self::Twitch => "Twitch Live",
+        }
+    }
+
+    fn external_source(self) -> Option<ExternalStreamSource> {
+        match self {
+            Self::Stream => None,
+            Self::YouTube => Some(ExternalStreamSource::YouTube),
+            Self::Twitch => Some(ExternalStreamSource::Twitch),
+        }
+    }
+}
+
+fn radio_source_kind_from_station(source: &str, raw_url: &str) -> RadioSourceKind {
+    match source {
+        "youtube" => RadioSourceKind::YouTube,
+        "twitch" => RadioSourceKind::Twitch,
+        _ => raw_url
+            .parse::<url::Url>()
+            .ok()
+            .map(|url| radio_source_kind_for_url(&url))
+            .unwrap_or(RadioSourceKind::Stream),
+    }
+}
+
+fn radio_source_kind_for_url(url: &url::Url) -> RadioSourceKind {
+    let Some(host) = url
+        .host_str()
+        .map(|host| host.trim_end_matches('.').to_ascii_lowercase())
+    else {
+        return RadioSourceKind::Stream;
+    };
+    let host = host.strip_prefix("www.").unwrap_or(host.as_str());
+
+    if host == "youtu.be"
+        || host == "youtube.com"
+        || host.ends_with(".youtube.com")
+        || host == "youtube-nocookie.com"
+        || host.ends_with(".youtube-nocookie.com")
+    {
+        RadioSourceKind::YouTube
+    } else if host == "twitch.tv" || host.ends_with(".twitch.tv") {
+        RadioSourceKind::Twitch
+    } else {
+        RadioSourceKind::Stream
     }
 }
 
@@ -1561,8 +1638,8 @@ fn update_mpris_status(ui: &mut UiState) {
 
 fn update_mpris_metadata(ui: &mut UiState) {
     if let Some(station) = current_radio_station(ui) {
+        let artist = format!("{} radio", station.source_label());
         let title = station.name;
-        let artist = format!("{} radio", station.source);
         let album = "Radio".to_string();
 
         let Some(mpris) = ui.mpris.as_mut() else {
@@ -2858,7 +2935,7 @@ fn radio_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
     add_panel.append(&name_entry);
 
     let url_entry = gtk::Entry::new();
-    url_entry.set_placeholder_text(Some("Stream URL"));
+    url_entry.set_placeholder_text(Some("Stream, YouTube live, or Twitch URL"));
     url_entry.set_hexpand(true);
     add_panel.append(&url_entry);
 
@@ -4788,9 +4865,10 @@ fn current_radio_station(ui: &UiState) -> Option<RadioStation> {
 }
 
 fn persist_custom_radio_station(state: &Rc<RefCell<UiState>>, name: &str, url: &str) -> bool {
-    if url.parse::<url::Url>().is_err() {
+    let Ok(parsed_url) = url.parse::<url::Url>() else {
         return false;
-    }
+    };
+    let source = radio_source_kind_for_url(&parsed_url);
 
     let mut ui = state.borrow_mut();
     if ui
@@ -4809,7 +4887,7 @@ fn persist_custom_radio_station(state: &Rc<RefCell<UiState>>, name: &str, url: &
         id: format!("custom:{next_id}:{next_index}"),
         name: name.to_string(),
         url: url.to_string(),
-        source: "local".to_string(),
+        source: source.as_str().to_string(),
         built_in: false,
     });
     save_radio_stations(&ui.radio_stations);
@@ -4939,9 +5017,13 @@ fn radio_station_card(state: Rc<RefCell<UiState>>, station: RadioStation) -> gtk
 
 fn radio_station_subtitle(station: &RadioStation) -> String {
     if station.built_in {
-        "cliamp preset".to_string()
-    } else {
-        "custom stream".to_string()
+        return "stream preset".to_string();
+    }
+
+    match station.source_kind() {
+        RadioSourceKind::Stream => "custom stream".to_string(),
+        RadioSourceKind::YouTube => "YouTube live".to_string(),
+        RadioSourceKind::Twitch => "Twitch live".to_string(),
     }
 }
 
@@ -4995,9 +5077,100 @@ fn radio_icon(size: i32) -> gtk::DrawingArea {
 }
 
 fn play_radio_station(state: &Rc<RefCell<UiState>>, station: &RadioStation) {
-    let Ok(stream_url) = station.url.parse() else {
+    let Ok(input_url) = station.url.parse::<url::Url>() else {
+        state
+            .borrow()
+            .playback_status
+            .set_text("Radio station URL is invalid");
         return;
     };
+
+    if let Some(external_source) = station.source_kind().external_source() {
+        resolve_and_play_radio_station(state, station.clone(), input_url, external_source);
+    } else {
+        play_resolved_radio_station(state, station, input_url);
+    }
+}
+
+fn resolve_and_play_radio_station(
+    state: &Rc<RefCell<UiState>>,
+    station: RadioStation,
+    page_url: url::Url,
+    external_source: ExternalStreamSource,
+) {
+    if state.borrow().playback.is_none() {
+        state
+            .borrow()
+            .playback_status
+            .set_text("GStreamer playbin is unavailable");
+        return;
+    }
+
+    let (sender, receiver) = mpsc::channel();
+    {
+        let mut ui = state.borrow_mut();
+        stop_playback(&mut ui);
+        set_active_radio_station_ui(
+            &mut ui,
+            &station,
+            Some(&format!(
+                "Resolving {} audio stream",
+                station.source_label()
+            )),
+        );
+    }
+    refresh_radio_page(state);
+
+    std::thread::spawn(move || {
+        let result = resolve_external_stream_url(external_source, &page_url)
+            .map_err(|error| error.to_string());
+        let _ = sender.send(result);
+    });
+
+    let state = state.clone();
+    let station_id = station.id.clone();
+    gtk::glib::timeout_add_local(Duration::from_millis(100), move || {
+        match receiver.try_recv() {
+            Ok(Ok(stream_url)) => {
+                let still_selected =
+                    state.borrow().current_radio_station_id.as_deref() == Some(station_id.as_str());
+                if still_selected {
+                    play_resolved_radio_station(&state, &station, stream_url);
+                }
+                gtk::glib::ControlFlow::Break
+            }
+            Ok(Err(error)) => {
+                let mut ui = state.borrow_mut();
+                if ui.current_radio_station_id.as_deref() == Some(station_id.as_str()) {
+                    ui.playback_status.set_text(&format!(
+                        "{} resolver failed: {error}",
+                        station.source_label()
+                    ));
+                    update_play_button(&ui);
+                    update_mpris_status(&mut ui);
+                }
+                gtk::glib::ControlFlow::Break
+            }
+            Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                let mut ui = state.borrow_mut();
+                if ui.current_radio_station_id.as_deref() == Some(station_id.as_str()) {
+                    ui.playback_status
+                        .set_text("Radio resolver stopped unexpectedly");
+                    update_play_button(&ui);
+                    update_mpris_status(&mut ui);
+                }
+                gtk::glib::ControlFlow::Break
+            }
+        }
+    });
+}
+
+fn play_resolved_radio_station(
+    state: &Rc<RefCell<UiState>>,
+    station: &RadioStation,
+    stream_url: url::Url,
+) {
     let request = PlaybackRequest {
         item_id: station.id.clone(),
         stream_url,
@@ -5012,18 +5185,7 @@ fn play_radio_station(state: &Rc<RefCell<UiState>>, station: &RadioStation) {
     match played {
         Some(Ok(())) => {
             let mut ui = state.borrow_mut();
-            ui.current_radio_station_id = Some(station.id.clone());
-            ui.now_playing_key = None;
-            ui.playback_tracks.clear();
-            ui.playback_index = None;
-            ui.playback_order.clear();
-            ui.elapsed_label.set_text("0:00");
-            ui.remaining_label.set_text("--:--");
-            clear_track_visuals_for_radio(&mut ui);
-            update_now_playing_labels(&ui);
-            update_play_button(&ui);
-            update_mpris_metadata(&mut ui);
-            update_mpris_status(&mut ui);
+            set_active_radio_station_ui(&mut ui, station, None);
             drop(ui);
             update_list_indicators(state);
             refresh_radio_page(state);
@@ -5041,6 +5203,28 @@ fn play_radio_station(state: &Rc<RefCell<UiState>>, station: &RadioStation) {
                 .set_text("GStreamer playbin is unavailable");
         }
     }
+}
+
+fn set_active_radio_station_ui(
+    ui: &mut UiState,
+    station: &RadioStation,
+    status_override: Option<&str>,
+) {
+    ui.current_radio_station_id = Some(station.id.clone());
+    ui.now_playing_key = None;
+    ui.playback_tracks.clear();
+    ui.playback_index = None;
+    ui.playback_order.clear();
+    ui.elapsed_label.set_text("0:00");
+    ui.remaining_label.set_text("--:--");
+    clear_track_visuals_for_radio(ui);
+    update_now_playing_labels(ui);
+    if let Some(status) = status_override {
+        ui.playback_status.set_text(status);
+    }
+    update_play_button(ui);
+    update_mpris_metadata(ui);
+    update_mpris_status(ui);
 }
 
 fn resume_radio_station(state: &Rc<RefCell<UiState>>) -> bool {
@@ -5461,7 +5645,7 @@ fn update_now_playing_labels(state: &UiState) {
         state.now_title.set_text(&station.name);
         state
             .now_meta
-            .set_text(&format!("{} | Radio stream", station.source));
+            .set_text(&format!("{} | Radio stream", station.source_label()));
         state
             .playback_status
             .set_text(&radio_playback_status_text(state, &station));
@@ -8365,6 +8549,41 @@ mod tests {
         assert_eq!(
             loaded.playlists[0].tracks[0].stream_http_headers,
             vec![("X-Emby-Token".to_string(), "token".to_string())]
+        );
+    }
+
+    #[test]
+    fn radio_source_detection_recognizes_youtube_and_twitch_urls() {
+        let youtube = url::Url::parse("https://www.youtube.com/watch?v=abc123").expect("url");
+        let youtube_short = url::Url::parse("https://youtu.be/abc123").expect("url");
+        let twitch = url::Url::parse("https://www.twitch.tv/channel").expect("url");
+        let stream = url::Url::parse("https://radio.example/live.mp3").expect("url");
+
+        assert_eq!(
+            radio_source_kind_for_url(&youtube),
+            RadioSourceKind::YouTube
+        );
+        assert_eq!(
+            radio_source_kind_for_url(&youtube_short),
+            RadioSourceKind::YouTube
+        );
+        assert_eq!(radio_source_kind_for_url(&twitch), RadioSourceKind::Twitch);
+        assert_eq!(radio_source_kind_for_url(&stream), RadioSourceKind::Stream);
+    }
+
+    #[test]
+    fn legacy_radio_station_source_falls_back_to_url_detection() {
+        assert_eq!(
+            radio_source_kind_from_station("local", "https://www.youtube.com/live/abc123"),
+            RadioSourceKind::YouTube
+        );
+        assert_eq!(
+            radio_source_kind_from_station("local", "https://twitch.tv/channel"),
+            RadioSourceKind::Twitch
+        );
+        assert_eq!(
+            radio_source_kind_from_station("local", "https://radio.example/live.mp3"),
+            RadioSourceKind::Stream
         );
     }
 

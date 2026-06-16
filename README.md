@@ -27,6 +27,9 @@ Souvlaki.
 - Play Jellyfin audio streams through GStreamer.
 - Prefer direct Jellyfin streams and fall back to transcoded streams when a
   direct stream fails.
+- Add internet radio stations from direct stream, YouTube live, and Twitch live
+  URLs. YouTube and Twitch stations are resolved to audio-only streams at
+  playback time.
 - Use previous, play/pause, next, shuffle, and queue controls.
 - Preview the next 15 tracks in the queue and jump directly to upcoming tracks.
 - Generate, cache, display, and scrub waveforms for Jellyfin audio streams.
@@ -55,6 +58,7 @@ support.
 - DBus development libraries for MPRIS media controls.
 - `pkg-config`.
 - A Jellyfin server with a music library.
+- Optional for YouTube and Twitch radio stations: `yt-dlp` and `streamlink`.
 
 Arch Linux:
 

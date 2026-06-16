@@ -30,6 +30,8 @@ Architecture details live in [TECHNICAL_DESIGN.md](TECHNICAL_DESIGN.md).
 Install Rust and the native libraries needed by GTK, Libadwaita, GStreamer,
 SQLite, and DBus.
 
+Install `yt-dlp` and `streamlink` when testing YouTube or Twitch radio stations.
+
 Arch Linux:
 
 ```sh

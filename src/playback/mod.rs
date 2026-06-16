@@ -2,6 +2,7 @@
 
 use gst::prelude::*;
 use std::collections::VecDeque;
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
@@ -17,6 +18,32 @@ pub enum PlaybackError {
     Seek(#[from] gst::glib::BoolError),
     #[error("invalid stream URL: {0}")]
     InvalidUrl(#[from] url::ParseError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExternalStreamSource {
+    YouTube,
+    Twitch,
+}
+
+#[derive(Debug, Error)]
+pub enum ExternalStreamError {
+    #[error("{program} is required to resolve this stream")]
+    MissingResolver {
+        program: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{program} failed with status {status}: {stderr}")]
+    ResolverFailed {
+        program: &'static str,
+        status: std::process::ExitStatus,
+        stderr: String,
+    },
+    #[error("{program} did not return a stream URL")]
+    EmptyResolverOutput { program: &'static str },
+    #[error("resolver returned an invalid stream URL: {0}")]
+    InvalidResolvedUrl(#[from] url::ParseError),
 }
 
 #[derive(Clone, Debug)]
@@ -50,6 +77,56 @@ pub enum PlaybackState {
     Playing,
     Paused,
     Error(String),
+}
+
+pub fn resolve_external_stream_url(
+    source: ExternalStreamSource,
+    page_url: &Url,
+) -> Result<Url, ExternalStreamError> {
+    match source {
+        ExternalStreamSource::YouTube => resolve_stream_with_command(
+            "yt-dlp",
+            &[
+                "--no-playlist",
+                "--quiet",
+                "--no-warnings",
+                "--format",
+                "bestaudio/best",
+                "--get-url",
+                page_url.as_str(),
+            ],
+        ),
+        ExternalStreamSource::Twitch => resolve_stream_with_command(
+            "streamlink",
+            &["--stream-url", page_url.as_str(), "audio_only"],
+        ),
+    }
+}
+
+fn resolve_stream_with_command(
+    program: &'static str,
+    args: &[&str],
+) -> Result<Url, ExternalStreamError> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|source| ExternalStreamError::MissingResolver { program, source })?;
+
+    if !output.status.success() {
+        return Err(ExternalStreamError::ResolverFailed {
+            program,
+            status: output.status,
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stream_url = stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .ok_or(ExternalStreamError::EmptyResolverOutput { program })?;
+    Ok(Url::parse(stream_url)?)
 }
 
 #[derive(Debug)]
