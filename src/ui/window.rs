@@ -2909,7 +2909,6 @@ fn radio_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
     let station_area = gtk::Box::new(Orientation::Vertical, 8);
     station_area.set_hexpand(true);
     station_area.set_vexpand(true);
-    station_area.append(&label("Stations", "section-title"));
     let grid = gtk::FlowBox::new();
     grid.add_css_class("radio-grid");
     grid.set_row_spacing(RADIO_GRID_COLUMN_GAP as u32);
@@ -2918,6 +2917,7 @@ fn radio_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
     grid.set_min_children_per_line(1);
     grid.set_max_children_per_line(6);
     grid.set_homogeneous(false);
+    grid.set_halign(Align::Center);
     grid.set_valign(Align::Start);
     station_area.append(&grid);
     page.append(&station_area);
@@ -4912,8 +4912,8 @@ fn refresh_radio_page(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn radio_station_card(state: Rc<RefCell<UiState>>, station: RadioStation) -> gtk::Box {
-    let card = gtk::Box::new(Orientation::Vertical, 7);
+fn radio_station_card(state: Rc<RefCell<UiState>>, station: RadioStation) -> gtk::Overlay {
+    let card = gtk::Overlay::new();
     card.add_css_class("radio-station-card");
     card.set_width_request(RADIO_CARD_CONTENT_WIDTH);
     card.set_height_request(RADIO_CARD_CONTENT_WIDTH);
@@ -4939,18 +4939,22 @@ fn radio_station_card(state: Rc<RefCell<UiState>>, station: RadioStation) -> gtk
     }
     card.add_controller(click);
 
+    let content = gtk::Box::new(Orientation::Vertical, 7);
+    content.set_hexpand(true);
+    content.set_vexpand(true);
+
     let status_row = gtk::Box::new(Orientation::Horizontal, 0);
     status_row.set_size_request(-1, 24);
     status_row.set_hexpand(true);
     if is_current {
         status_row.append(&radio_status_badge("On Air"));
     }
-    card.append(&status_row);
+    content.append(&status_row);
 
     let icon = radio_icon(48);
     icon.add_css_class("radio-card-icon");
     icon.set_halign(Align::Center);
-    card.append(&icon);
+    content.append(&icon);
 
     let text = gtk::Box::new(Orientation::Vertical, 2);
     text.set_halign(Align::Fill);
@@ -4973,11 +4977,16 @@ fn radio_station_card(state: Rc<RefCell<UiState>>, station: RadioStation) -> gtk
     subtitle.set_width_chars(1);
     subtitle.set_max_width_chars(18);
     text.append(&subtitle);
-    card.append(&text);
+    content.append(&text);
+    card.set_child(Some(&content));
 
     if !station.built_in {
         let remove = icon_button("user-trash-symbolic", "Remove station");
         remove.add_css_class("radio-remove-button");
+        remove.set_halign(Align::End);
+        remove.set_valign(Align::Start);
+        remove.set_margin_top(2);
+        remove.set_margin_end(2);
         let station_id = station.id.clone();
         let state = state.clone();
         remove.connect_clicked(move |_| {
@@ -4994,7 +5003,7 @@ fn radio_station_card(state: Rc<RefCell<UiState>>, station: RadioStation) -> gtk
             drop(ui);
             refresh_radio_page(&state);
         });
-        card.append(&remove);
+        card.add_overlay(&remove);
     }
 
     card
@@ -5002,11 +5011,11 @@ fn radio_station_card(state: Rc<RefCell<UiState>>, station: RadioStation) -> gtk
 
 fn radio_station_subtitle(station: &RadioStation) -> String {
     if station.built_in {
-        return "stream preset".to_string();
+        return "Stream Preset".to_string();
     }
 
     match station.source_kind() {
-        RadioSourceKind::Stream => "custom stream".to_string(),
+        RadioSourceKind::Stream => "Custom Stream".to_string(),
         RadioSourceKind::YouTube => "YouTube live".to_string(),
         RadioSourceKind::Twitch => "Twitch live".to_string(),
     }
@@ -5341,7 +5350,7 @@ fn update_page_summary(ui: &UiState) {
         }
         LibraryPage::Radio => {
             ui.page_summary.set_text(&format!(
-                "Radio | {} stations",
+                "Radio | {} Stations",
                 radio_stations_for_display_from(&ui.radio_stations).len()
             ));
         }
