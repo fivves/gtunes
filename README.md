@@ -5,7 +5,7 @@
 </br>
 
 gTunes is a native Linux desktop music client for Jellyfin-hosted music
-libraries. Version 1.1.1 focuses on fast library browsing, reliable Jellyfin
+libraries. Version 1.1.2 focuses on fast library browsing, reliable Jellyfin
 streaming, cached sessions, album artwork, waveform scrubbing, queue control,
 and desktop media-key integration.
 
@@ -27,6 +27,9 @@ Souvlaki.
 - Play Jellyfin audio streams through GStreamer.
 - Prefer direct Jellyfin streams and fall back to transcoded streams when a
   direct stream fails.
+- Add internet radio stations from direct stream, YouTube live, and Twitch live
+  URLs. YouTube and Twitch stations are resolved to audio-only streams at
+  playback time.
 - Use previous, play/pause, next, shuffle, and queue controls.
 - Preview the next 15 tracks in the queue and jump directly to upcoming tracks.
 - Generate, cache, display, and scrub waveforms for Jellyfin audio streams.
@@ -40,7 +43,7 @@ Souvlaki.
 - Reset saved login, cached library data, artwork, and waveform files from the
   settings menu.
 
-gTunes 1.1.1 does not include live, synced, unsynced, embedded, or Jellyfin lyrics
+gTunes 1.1.2 does not include live, synced, unsynced, embedded, or Jellyfin lyrics
 support.
 
 ## Requirements
@@ -55,6 +58,7 @@ support.
 - DBus development libraries for MPRIS media controls.
 - `pkg-config`.
 - A Jellyfin server with a music library.
+- Optional for YouTube and Twitch radio stations: `yt-dlp` and `streamlink`.
 
 Arch Linux:
 

@@ -2,10 +2,14 @@
 
 use gst::prelude::*;
 use std::collections::VecDeque;
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 use url::Url;
+
+const YOUTUBE_AUDIO_FORMAT: &str =
+    "bestaudio[acodec!=none][vcodec=none]/bestaudio[acodec!=none]/best[acodec!=none]";
 
 #[derive(Debug, Error)]
 pub enum PlaybackError {
@@ -17,6 +21,32 @@ pub enum PlaybackError {
     Seek(#[from] gst::glib::BoolError),
     #[error("invalid stream URL: {0}")]
     InvalidUrl(#[from] url::ParseError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExternalStreamSource {
+    YouTube,
+    Twitch,
+}
+
+#[derive(Debug, Error)]
+pub enum ExternalStreamError {
+    #[error("{program} is required to resolve this stream")]
+    MissingResolver {
+        program: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{program} failed with status {status}: {stderr}")]
+    ResolverFailed {
+        program: &'static str,
+        status: std::process::ExitStatus,
+        stderr: String,
+    },
+    #[error("{program} did not return a stream URL")]
+    EmptyResolverOutput { program: &'static str },
+    #[error("resolver returned an invalid stream URL: {0}")]
+    InvalidResolvedUrl(#[from] url::ParseError),
 }
 
 #[derive(Clone, Debug)]
@@ -52,6 +82,56 @@ pub enum PlaybackState {
     Error(String),
 }
 
+pub fn resolve_external_stream_url(
+    source: ExternalStreamSource,
+    page_url: &Url,
+) -> Result<Url, ExternalStreamError> {
+    match source {
+        ExternalStreamSource::YouTube => resolve_stream_with_command(
+            "yt-dlp",
+            &[
+                "--no-playlist",
+                "--quiet",
+                "--no-warnings",
+                "--format",
+                YOUTUBE_AUDIO_FORMAT,
+                "--get-url",
+                page_url.as_str(),
+            ],
+        ),
+        ExternalStreamSource::Twitch => resolve_stream_with_command(
+            "streamlink",
+            &["--stream-url", page_url.as_str(), "audio_only"],
+        ),
+    }
+}
+
+fn resolve_stream_with_command(
+    program: &'static str,
+    args: &[&str],
+) -> Result<Url, ExternalStreamError> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|source| ExternalStreamError::MissingResolver { program, source })?;
+
+    if !output.status.success() {
+        return Err(ExternalStreamError::ResolverFailed {
+            program,
+            status: output.status,
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stream_url = stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .ok_or(ExternalStreamError::EmptyResolverOutput { program })?;
+    Ok(Url::parse(stream_url)?)
+}
+
 #[derive(Debug)]
 pub struct PlaybackEngine {
     playbin: gst::Element,
@@ -74,6 +154,11 @@ impl PlaybackEngine {
         let playbin = gst::ElementFactory::make("playbin")
             .build()
             .map_err(|_| PlaybackError::PlaybinUnavailable)?;
+        let video_sink = gst::ElementFactory::make("fakesink")
+            .property("sync", false)
+            .build()
+            .map_err(|_| PlaybackError::PlaybinUnavailable)?;
+        playbin.set_property("video-sink", &video_sink);
         let bus = playbin.bus().ok_or(PlaybackError::PlaybinUnavailable)?;
         let gapless = Arc::new(Mutex::new(GaplessState::default()));
         let http_headers = Arc::new(Mutex::new(Vec::new()));
@@ -186,6 +271,13 @@ impl PlaybackEngine {
 
     pub fn pause(&mut self) -> Result<(), PlaybackError> {
         self.playbin.set_state(gst::State::Paused)?;
+        self.state = PlaybackState::Paused;
+        Ok(())
+    }
+
+    pub fn pause_live_stream(&mut self) -> Result<(), PlaybackError> {
+        self.playbin.set_state(gst::State::Null)?;
+        self.clear_gapless_state();
         self.state = PlaybackState::Paused;
         Ok(())
     }
