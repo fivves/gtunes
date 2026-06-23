@@ -178,6 +178,7 @@ struct UiState {
     playback_tracks: Vec<UiTrack>,
     playback_index: Option<usize>,
     playback_order: Vec<usize>,
+    last_playback_snapshot_at: Option<Instant>,
     library_stack: Option<gtk::Stack>,
     album_grid: Option<gtk::FlowBox>,
     artist_grid: Option<gtk::FlowBox>,
@@ -291,6 +292,15 @@ struct CachedLibrary {
     tracks: Vec<UiTrack>,
     #[serde(default)]
     playlists: Vec<UiPlaylist>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+struct PersistedPlaybackState {
+    version: u8,
+    current_item_id: String,
+    ordered_item_ids: Vec<String>,
+    position_secs: u64,
+    shuffle_enabled: bool,
 }
 
 enum ConnectionMessage {
@@ -659,6 +669,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         playback_tracks: Vec::new(),
         playback_index: None,
         playback_order: Vec::new(),
+        last_playback_snapshot_at: None,
         library_stack: None,
         album_grid: None,
         artist_grid: None,
@@ -736,7 +747,9 @@ fn connect_window_close_request(window: &adw::ApplicationWindow, state: Rc<RefCe
             window.set_visible(false);
             gtk::glib::Propagation::Stop
         } else {
-            stop_playback(&mut state.borrow_mut());
+            let mut ui = state.borrow_mut();
+            save_playback_snapshot_now(&mut ui);
+            stop_playback(&mut ui);
             gtk::glib::Propagation::Proceed
         }
     });
@@ -1598,16 +1611,13 @@ fn handle_mpris_event(state: &Rc<RefCell<UiState>>, event: MediaControlEvent) {
         MediaControlEvent::Play => resume_playback(state),
         MediaControlEvent::Pause => pause_playback(state),
         MediaControlEvent::Toggle => toggle_play_pause(state),
-        MediaControlEvent::Next => {
-            if state.borrow().current_radio_station_id.is_none() {
-                play_next_track(state);
-            }
+        MediaControlEvent::Next if state.borrow().current_radio_station_id.is_none() => {
+            play_next_track(state);
         }
-        MediaControlEvent::Previous => {
-            if state.borrow().current_radio_station_id.is_none() {
-                play_previous_track(state);
-            }
+        MediaControlEvent::Previous if state.borrow().current_radio_station_id.is_none() => {
+            play_previous_track(state);
         }
+        MediaControlEvent::Next | MediaControlEvent::Previous => {}
         MediaControlEvent::Stop => {
             let mut ui = state.borrow_mut();
             stop_playback(&mut ui);
@@ -2142,7 +2152,10 @@ fn show_about_window(parent: &gtk::Window) {
 }
 
 fn quit_application(parent: &gtk::Window, state: &Rc<RefCell<UiState>>) {
-    stop_playback(&mut state.borrow_mut());
+    let mut ui = state.borrow_mut();
+    save_playback_snapshot_now(&mut ui);
+    stop_playback(&mut ui);
+    drop(ui);
     if let Some(app) = parent.application() {
         app.quit();
     } else {
@@ -4363,6 +4376,9 @@ fn save_library_view_settings(settings: LibraryViewSettings) {
 
 const LIBRARY_VIEW_SETTINGS_KEY: &str = "library.view.settings";
 const KEEP_PLAYING_WHILE_CLOSED_KEY: &str = "player.keep_playing_while_closed";
+const PLAYBACK_STATE_KEY: &str = "player.playback.state";
+const PLAYBACK_STATE_VERSION: u8 = 1;
+const PLAYBACK_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(5);
 
 fn load_keep_playing_while_closed() -> bool {
     match CacheDatabase::open_default()
@@ -4387,6 +4403,148 @@ fn set_keep_playing_while_closed(state: &Rc<RefCell<UiState>>, enabled: bool) {
     }) {
         tracing::warn!(%error, "failed to save close behavior setting");
     }
+}
+
+fn playback_snapshot(ui: &UiState) -> Option<PersistedPlaybackState> {
+    if ui.current_radio_station_id.is_some() {
+        return None;
+    }
+
+    let playback_index = ui.playback_index?;
+    let current_track = ui.playback_tracks.get(playback_index)?;
+    let current_item_id = current_track.item_id.clone()?;
+    if current_item_id.is_empty() {
+        return None;
+    }
+
+    let ordered_item_ids = ordered_playback_item_ids(ui);
+    if ordered_item_ids.is_empty() {
+        return None;
+    }
+
+    let position_secs = ui
+        .playback
+        .as_ref()
+        .and_then(PlaybackEngine::position)
+        .map(|position| position.as_secs())
+        .unwrap_or(0);
+
+    Some(PersistedPlaybackState {
+        version: PLAYBACK_STATE_VERSION,
+        current_item_id,
+        ordered_item_ids,
+        position_secs,
+        shuffle_enabled: ui.shuffle_enabled,
+    })
+}
+
+fn ordered_playback_item_ids(ui: &UiState) -> Vec<String> {
+    if ui.playback_tracks.is_empty() {
+        return Vec::new();
+    }
+
+    let mut seen = HashSet::new();
+    ui.playback_order
+        .iter()
+        .filter_map(|index| ui.playback_tracks.get(*index))
+        .filter_map(|track| track.item_id.clone())
+        .filter(|item_id| seen.insert(item_id.clone()))
+        .collect()
+}
+
+fn save_playback_snapshot_now(ui: &mut UiState) {
+    ui.last_playback_snapshot_at = Some(Instant::now());
+    let Some(snapshot) = playback_snapshot(ui) else {
+        return;
+    };
+
+    let result = serde_json::to_string(&snapshot)
+        .map_err(crate::cache::CacheError::from)
+        .and_then(|json| {
+            CacheDatabase::open_default()
+                .and_then(|cache| cache.set_setting(PLAYBACK_STATE_KEY, &json))
+        });
+
+    if let Err(error) = result {
+        tracing::warn!(%error, "failed to save playback queue state");
+    }
+}
+
+fn save_playback_snapshot_if_due(ui: &mut UiState) {
+    if ui
+        .last_playback_snapshot_at
+        .is_some_and(|last_saved| last_saved.elapsed() < PLAYBACK_SNAPSHOT_INTERVAL)
+    {
+        return;
+    }
+    save_playback_snapshot_now(ui);
+}
+
+fn clear_playback_snapshot() {
+    if let Err(error) = CacheDatabase::open_default().and_then(|cache| {
+        cache
+            .connection()
+            .execute(
+                "DELETE FROM app_settings WHERE key = ?1",
+                [PLAYBACK_STATE_KEY],
+            )
+            .map(|_| ())
+            .map_err(crate::cache::CacheError::from)
+    }) {
+        tracing::warn!(%error, "failed to clear playback queue state");
+    }
+}
+
+fn load_playback_snapshot() -> Option<PersistedPlaybackState> {
+    let result = CacheDatabase::open_default()
+        .and_then(|cache| cache.get_setting(PLAYBACK_STATE_KEY))
+        .and_then(|json| {
+            json.map(|json| {
+                serde_json::from_str::<PersistedPlaybackState>(&json)
+                    .map_err(crate::cache::CacheError::from)
+            })
+            .transpose()
+        });
+
+    match result {
+        Ok(Some(snapshot)) if snapshot.version == PLAYBACK_STATE_VERSION => Some(snapshot),
+        Ok(Some(_)) | Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(%error, "failed to load playback queue state");
+            None
+        }
+    }
+}
+
+fn restore_playback_snapshot_tracks(
+    library_tracks: &[UiTrack],
+    snapshot: &PersistedPlaybackState,
+) -> Option<(Vec<UiTrack>, usize, Vec<usize>)> {
+    if snapshot.current_item_id.is_empty() || snapshot.ordered_item_ids.is_empty() {
+        return None;
+    }
+
+    let tracks_by_id = library_tracks
+        .iter()
+        .filter_map(|track| track.item_id.as_deref().map(|item_id| (item_id, track)))
+        .collect::<HashMap<_, _>>();
+    let mut seen = HashSet::new();
+    let playback_tracks = snapshot
+        .ordered_item_ids
+        .iter()
+        .filter(|item_id| seen.insert((*item_id).clone()))
+        .filter_map(|item_id| {
+            tracks_by_id
+                .get(item_id.as_str())
+                .map(|track| (*track).clone())
+        })
+        .collect::<Vec<_>>();
+    let playback_index = playback_tracks
+        .iter()
+        .position(|track| track.item_id.as_deref() == Some(snapshot.current_item_id.as_str()))?;
+    let playback_order = (0..playback_tracks.len()).collect::<Vec<_>>();
+
+    Some((playback_tracks, playback_index, playback_order))
 }
 
 fn sort_track_slice(
@@ -4564,6 +4722,79 @@ fn show_album_tracks(state: &Rc<RefCell<UiState>>, album: &AlbumSummary) {
     update_content_view(state);
     load_selected_cover_art(state);
     load_selected_waveform(state);
+}
+
+fn restore_persisted_playback(state: &Rc<RefCell<UiState>>) {
+    if state.borrow().now_playing_key.is_some() {
+        return;
+    }
+
+    let Some(snapshot) = load_playback_snapshot() else {
+        return;
+    };
+
+    let restored = {
+        let mut ui = state.borrow_mut();
+        let Some((playback_tracks, playback_index, playback_order)) =
+            restore_playback_snapshot_tracks(&ui.all_tracks, &snapshot)
+        else {
+            return;
+        };
+        let selected_index = playback_tracks
+            .get(playback_index)
+            .map(track_key)
+            .and_then(|key| ui.tracks.iter().position(|track| track_key(track) == key))
+            .unwrap_or(ui.selected_index);
+
+        ui.shuffle_enabled = snapshot.shuffle_enabled;
+        ui.playback_tracks = playback_tracks;
+        ui.playback_index = Some(playback_index);
+        ui.playback_order = playback_order;
+        ui.selected_index = selected_index.min(ui.tracks.len().saturating_sub(1));
+        ui.now_playing_key = ui.playback_tracks.get(playback_index).map(track_key);
+        ui.current_radio_station_id = None;
+        update_shuffle_button(&ui);
+        update_now_playing_labels(&ui);
+        update_play_button(&ui);
+        true
+    };
+
+    if !restored {
+        return;
+    }
+
+    let selected_index = state.borrow().selected_index;
+    select_track_model_row(state, selected_index);
+    scroll_track_list_to_index(state, selected_index);
+    rebuild_queue_list(state);
+    play_selected_track(state);
+
+    {
+        let mut ui = state.borrow_mut();
+        if snapshot.position_secs > 0
+            && let Some(playback) = ui.playback.as_mut()
+            && let Err(error) = playback.seek(Duration::from_secs(snapshot.position_secs))
+        {
+            ui.playback_status
+                .set_text(&format!("Restore seek failed: {error}"));
+        }
+        if let Some(playback) = ui.playback.as_mut() {
+            match playback.pause() {
+                Ok(()) => update_now_playing_labels(&ui),
+                Err(error) => ui
+                    .playback_status
+                    .set_text(&format!("Restore pause failed: {error}")),
+            }
+        }
+        save_playback_snapshot_now(&mut ui);
+        update_play_button(&ui);
+        update_mpris_status(&mut ui);
+    }
+
+    update_list_indicators(state);
+    load_selected_cover_art(state);
+    load_selected_waveform(state);
+    scroll_to_now_playing(state);
 }
 
 fn show_playlist_tracks(state: &Rc<RefCell<UiState>>, playlist: &UiPlaylist) {
@@ -5663,13 +5894,18 @@ fn move_next_up_track(state: &Rc<RefCell<UiState>>, from: usize, to_slot: usize)
     let changed = {
         let mut ui = state.borrow_mut();
         let current_index = ui.playback_index.unwrap_or(ui.selected_index);
-        move_upcoming_track_in_playback_order(
+        let changed = move_upcoming_track_in_playback_order(
             &mut ui.playback_order,
             current_index,
             from,
             to_slot,
             NEXT_UP_PAGE_LIMIT,
-        )
+        );
+        if changed {
+            arm_gapless_next(&mut ui);
+            save_playback_snapshot_now(&mut ui);
+        }
+        changed
     };
     if changed {
         rebuild_queue_list(state);
@@ -5715,6 +5951,7 @@ fn finalize_queue_change(state: &Rc<RefCell<UiState>>) {
     {
         let mut ui = state.borrow_mut();
         arm_gapless_next(&mut ui);
+        save_playback_snapshot_now(&mut ui);
         update_page_summary(&ui);
     }
     rebuild_queue_list(state);
@@ -5961,6 +6198,7 @@ fn apply_connection_payload(state: &Rc<RefCell<UiState>>, payload: ConnectionPay
     update_content_view(state);
     load_selected_cover_art(state);
     load_selected_waveform(state);
+    restore_persisted_playback(state);
 }
 
 fn update_now_playing_labels(state: &UiState) {
@@ -6071,6 +6309,7 @@ fn toggle_shuffle(state: &Rc<RefCell<UiState>>) {
         let playback_index = ui.playback_index.unwrap_or(ui.selected_index);
         rebuild_playback_order(&mut ui, playback_index);
         arm_gapless_next(&mut ui);
+        save_playback_snapshot_now(&mut ui);
         update_shuffle_button(&ui);
     }
     rebuild_queue_list(state);
@@ -6087,7 +6326,10 @@ fn pause_playback(state: &Rc<RefCell<UiState>>) {
             playback.pause()
         };
         match result {
-            Ok(()) => update_now_playing_labels(&ui),
+            Ok(()) => {
+                save_playback_snapshot_now(&mut ui);
+                update_now_playing_labels(&ui);
+            }
             Err(error) => ui
                 .playback_status
                 .set_text(&format!("Pause failed: {error}")),
@@ -6115,7 +6357,10 @@ fn resume_playback(state: &Rc<RefCell<UiState>>) {
             }
             let result = ui.playback.as_mut().expect("playback was present").resume();
             match result {
-                Ok(()) => update_now_playing_labels(&ui),
+                Ok(()) => {
+                    save_playback_snapshot_now(&mut ui);
+                    update_now_playing_labels(&ui);
+                }
                 Err(error) => ui
                     .playback_status
                     .set_text(&format!("Resume failed: {error}")),
@@ -6294,6 +6539,7 @@ fn play_selected_track(state: &Rc<RefCell<UiState>>) {
             ui.now_playing_key = Some(track_key(&track));
             ui.current_radio_station_id = None;
             arm_gapless_next(&mut ui);
+            save_playback_snapshot_now(&mut ui);
             update_now_playing_labels(&ui);
             ui.playback_status
                 .set_text(&format!("Playing | {}", track.quality));
@@ -8109,6 +8355,10 @@ fn update_playback_position(state: &Rc<RefCell<UiState>>) {
             area.queue_draw();
         }
     }
+
+    if position.is_some() {
+        save_playback_snapshot_if_due(&mut state.borrow_mut());
+    }
 }
 
 fn take_playback_event(state: &Rc<RefCell<UiState>>) -> Option<PlaybackEvent> {
@@ -8171,6 +8421,7 @@ fn handle_playback_error(
                 Ok(()) => {
                     ui.now_playing_key = Some(track_key_value);
                     arm_gapless_next(&mut ui);
+                    save_playback_snapshot_now(&mut ui);
                     update_now_playing_labels(&ui);
                     ui.playback_status
                         .set_text(&format!("Playing transcoded stream | {quality}"));
@@ -8199,6 +8450,7 @@ fn handle_playback_error(
         }
         ui.now_playing_key = None;
         arm_gapless_next(&mut ui);
+        save_playback_snapshot_now(&mut ui);
         update_play_button(&ui);
         update_mpris_metadata(&mut ui);
         update_mpris_status(&mut ui);
@@ -8251,6 +8503,7 @@ fn apply_gapless_transition(state: &Rc<RefCell<UiState>>) -> bool {
         }
 
         arm_gapless_next(&mut ui);
+        save_playback_snapshot_now(&mut ui);
         update_play_button(&ui);
         update_mpris_metadata(&mut ui);
         update_mpris_status(&mut ui);
@@ -8288,6 +8541,7 @@ fn advance_after_track_end(state: &Rc<RefCell<UiState>>) {
             }
             update_play_button(&ui);
             update_mpris_status(&mut ui);
+            clear_playback_snapshot();
         }
         update_list_indicators(state);
         refresh_radio_page(state);
@@ -8429,6 +8683,7 @@ fn seek_waveform(state: &Rc<RefCell<UiState>>, area: &gtk::DrawingArea, x: f64) 
                 "-{}",
                 format_duration(duration.saturating_sub(position))
             ));
+            save_playback_snapshot_now(&mut ui);
         }
         Err(error) => ui
             .playback_status
@@ -8945,6 +9200,62 @@ mod tests {
         let next_changed = queue_track_next_in_playback_order(&mut already_next_order, 0, 1);
         assert!(!next_changed);
         assert_eq!(already_next_order, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn persisted_playback_restore_uses_current_library_tracks() {
+        let first = UiTrack {
+            item_id: Some("first".to_string()),
+            title: "First".to_string(),
+            ..test_track()
+        };
+        let second = UiTrack {
+            item_id: Some("second".to_string()),
+            title: "Second".to_string(),
+            ..test_track()
+        };
+        let third = UiTrack {
+            item_id: Some("third".to_string()),
+            title: "Third".to_string(),
+            ..test_track()
+        };
+        let snapshot = PersistedPlaybackState {
+            version: PLAYBACK_STATE_VERSION,
+            current_item_id: "second".to_string(),
+            ordered_item_ids: vec![
+                "first".to_string(),
+                "missing".to_string(),
+                "second".to_string(),
+                "third".to_string(),
+            ],
+            position_secs: 42,
+            shuffle_enabled: true,
+        };
+
+        let (tracks, index, order) =
+            restore_playback_snapshot_tracks(&[first, second, third], &snapshot)
+                .expect("snapshot restores");
+
+        let restored_ids = tracks
+            .iter()
+            .filter_map(|track| track.item_id.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(restored_ids, vec!["first", "second", "third"]);
+        assert_eq!(index, 1);
+        assert_eq!(order, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn persisted_playback_restore_requires_current_track() {
+        let snapshot = PersistedPlaybackState {
+            version: PLAYBACK_STATE_VERSION,
+            current_item_id: "missing".to_string(),
+            ordered_item_ids: vec!["track-id".to_string()],
+            position_secs: 0,
+            shuffle_enabled: false,
+        };
+
+        assert!(restore_playback_snapshot_tracks(&[test_track()], &snapshot).is_none());
     }
 
     #[test]
