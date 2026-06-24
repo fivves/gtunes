@@ -82,11 +82,14 @@ background integrations should not implicitly drive playback state.
      fallback, seeking the transcoded stream to that position, and reporting
      either the restored timestamp or a seek restore failure in playback status.
 
-4. [ ] Keep the playback timer non-destructive.
+4. [x] Keep the playback timer non-destructive.
    - Use the timer for UI position, waveform progress, and persistence updates.
    - Do not make restart, fallback, or stop decisions from position polling.
    - Continue relying on GStreamer bus errors and end-of-stream events for
      automatic playback transitions.
+   - Completed by removing position-stall detection from the 250ms playback
+     timer; fallback now flows through GStreamer error events, and position
+     polling only updates UI progress and snapshots.
 
 5. [ ] Add playback-session tests.
    - Cover queue advancement, shuffle ordering, gapless transition bookkeeping,
