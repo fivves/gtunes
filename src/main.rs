@@ -1,6 +1,7 @@
 mod app;
 mod cache;
 mod config;
+mod discord;
 mod jellyfin;
 mod playback;
 mod ui;

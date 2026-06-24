@@ -4,10 +4,8 @@ use gtk::{Align, Orientation};
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, PlatformConfig};
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -16,6 +14,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::cache::{CacheDatabase, JellyfinSession};
 use crate::config;
+use crate::discord::{
+    DiscordPresence, PresenceActivity, PresencePlaybackState, artwork_cache_path,
+};
 use crate::jellyfin::{
     JellyfinClient, JellyfinClientError, JellyfinItemSummary, JellyfinPlaylist, JellyfinTrack,
     stream_http_headers_for_token,
@@ -109,6 +110,7 @@ enum LibraryPage {
     Artists,
     Playlists,
     Radio,
+    NextUp,
 }
 
 #[derive(Debug)]
@@ -177,6 +179,7 @@ struct UiState {
     playback_tracks: Vec<UiTrack>,
     playback_index: Option<usize>,
     playback_order: Vec<usize>,
+    last_playback_snapshot_at: Option<Instant>,
     library_stack: Option<gtk::Stack>,
     album_grid: Option<gtk::FlowBox>,
     artist_grid: Option<gtk::FlowBox>,
@@ -220,6 +223,8 @@ struct UiState {
     refresh_button: Option<gtk::Button>,
     reconnect_button: Option<gtk::Button>,
     queue_view: Option<Rc<QueueView>>,
+    sidebar_queue_card: Option<gtk::Box>,
+    next_up_view: Option<Rc<NextUpPageView>>,
     wave_area: Option<gtk::DrawingArea>,
     elapsed_label: gtk::Label,
     remaining_label: gtk::Label,
@@ -227,6 +232,7 @@ struct UiState {
     waveform: Rc<RefCell<WaveformVisual>>,
     playback: Option<PlaybackEngine>,
     mpris: Option<MediaControls>,
+    discord_presence: Option<DiscordPresence>,
 }
 
 #[derive(Debug)]
@@ -290,6 +296,15 @@ struct CachedLibrary {
     playlists: Vec<UiPlaylist>,
 }
 
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+struct PersistedPlaybackState {
+    version: u8,
+    current_item_id: String,
+    ordered_item_ids: Vec<String>,
+    position_secs: u64,
+    shuffle_enabled: bool,
+}
+
 enum ConnectionMessage {
     Authenticated(JellyfinSession),
     Status(String),
@@ -314,6 +329,7 @@ const COLLECTION_TILE_INITIAL_BATCH: usize = 24;
 const COLLECTION_TILE_IDLE_BATCH: usize = 24;
 const COLLECTION_RETURN_HIGHLIGHT_MS: u64 = 850;
 const INVISIBLE_SEARCH_TIMEOUT: Duration = Duration::from_millis(1_200);
+const NEXT_UP_PAGE_LIMIT: usize = 50;
 const RADIO_STATIONS_KEY: &str = "radio.stations";
 static CONNECTION_GENERATION: AtomicU64 = AtomicU64::new(0);
 static CACHE_RESET_LOCK: Mutex<()> = Mutex::new(());
@@ -330,6 +346,11 @@ struct QueueRow {
     artist: gtk::Label,
     track_index: Rc<RefCell<Option<usize>>>,
     artwork_url: Rc<RefCell<Option<String>>>,
+}
+
+struct NextUpPageView {
+    empty: gtk::Box,
+    list: gtk::Box,
 }
 
 impl RadioStation {
@@ -650,6 +671,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         playback_tracks: Vec::new(),
         playback_index: None,
         playback_order: Vec::new(),
+        last_playback_snapshot_at: None,
         library_stack: None,
         album_grid: None,
         artist_grid: None,
@@ -693,6 +715,8 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         refresh_button: None,
         reconnect_button: None,
         queue_view: None,
+        sidebar_queue_card: None,
+        next_up_view: None,
         wave_area: None,
         elapsed_label: label("0:00", "mono"),
         remaining_label: label("--:--", "mono"),
@@ -705,6 +729,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         })),
         playback: PlaybackEngine::new().ok(),
         mpris: None,
+        discord_presence: DiscordPresence::from_env(),
     }));
 
     setup_mpris(state.clone());
@@ -725,7 +750,9 @@ fn connect_window_close_request(window: &adw::ApplicationWindow, state: Rc<RefCe
             window.set_visible(false);
             gtk::glib::Propagation::Stop
         } else {
-            stop_playback(&mut state.borrow_mut());
+            let mut ui = state.borrow_mut();
+            save_playback_snapshot_now(&mut ui);
+            stop_playback(&mut ui);
             gtk::glib::Propagation::Proceed
         }
     });
@@ -980,7 +1007,7 @@ fn navigate_invisible_search(state: &Rc<RefCell<UiState>>, query: &str) -> bool 
                 })
                 .min_by(|(_, left), (_, right)| left.cmp(right))
                 .map(|(index, _)| index),
-            VisibleLibraryContent::Radio => None,
+            VisibleLibraryContent::Radio | VisibleLibraryContent::NextUp => None,
         };
         (visible_content, target)
     };
@@ -994,7 +1021,8 @@ fn navigate_invisible_search(state: &Rc<RefCell<UiState>>, query: &str) -> bool 
         VisibleLibraryContent::Albums
         | VisibleLibraryContent::Artists
         | VisibleLibraryContent::Playlists
-        | VisibleLibraryContent::Radio => focus_collection_item(state, index),
+        | VisibleLibraryContent::Radio
+        | VisibleLibraryContent::NextUp => focus_collection_item(state, index),
     }
 
     true
@@ -1035,7 +1063,9 @@ fn activate_invisible_collection_match(state: &Rc<RefCell<UiState>>, query: &str
                     .min_by(|(_, left), (_, right)| left.cmp(right))
                     .map(|(artist, _)| CollectionMatch::Artist(artist))
             }
-            VisibleLibraryContent::Tracks | VisibleLibraryContent::Playlists => None,
+            VisibleLibraryContent::Tracks
+            | VisibleLibraryContent::Playlists
+            | VisibleLibraryContent::NextUp => None,
             VisibleLibraryContent::Radio => None,
         }
     };
@@ -1060,6 +1090,7 @@ enum VisibleLibraryContent {
     Artists,
     Playlists,
     Radio,
+    NextUp,
 }
 
 #[derive(Clone, Debug)]
@@ -1081,6 +1112,7 @@ fn visible_library_content(ui: &UiState) -> VisibleLibraryContent {
         (LibraryPage::Playlists, false) => VisibleLibraryContent::Playlists,
         (LibraryPage::Playlists, true) => VisibleLibraryContent::Tracks,
         (LibraryPage::Radio, _) => VisibleLibraryContent::Radio,
+        (LibraryPage::NextUp, _) => VisibleLibraryContent::NextUp,
     }
 }
 
@@ -1211,11 +1243,14 @@ fn focus_collection_item(state: &Rc<RefCell<UiState>>, index: usize) {
             VisibleLibraryContent::Artists => ui.artist_grid.clone(),
             VisibleLibraryContent::Playlists => ui.playlist_grid.clone(),
             VisibleLibraryContent::Radio => None,
-            VisibleLibraryContent::Tracks => None,
+            VisibleLibraryContent::Tracks | VisibleLibraryContent::NextUp => None,
         };
         (grid, visible_library_content(&ui))
     };
-    if matches!(visible_content, VisibleLibraryContent::Tracks) {
+    if matches!(
+        visible_content,
+        VisibleLibraryContent::Tracks | VisibleLibraryContent::NextUp
+    ) {
         select_track_for_navigation(state, index);
         return;
     }
@@ -1358,7 +1393,7 @@ fn active_collection_grid(state: &Rc<RefCell<UiState>>) -> Option<gtk::FlowBox> 
         VisibleLibraryContent::Artists => ui.artist_grid.clone(),
         VisibleLibraryContent::Playlists => ui.playlist_grid.clone(),
         VisibleLibraryContent::Radio => None,
-        VisibleLibraryContent::Tracks => None,
+        VisibleLibraryContent::Tracks | VisibleLibraryContent::NextUp => None,
     }
 }
 
@@ -1372,7 +1407,7 @@ fn active_collection_grid_and_content(
         VisibleLibraryContent::Artists => ui.artist_grid.clone(),
         VisibleLibraryContent::Playlists => ui.playlist_grid.clone(),
         VisibleLibraryContent::Radio => None,
-        VisibleLibraryContent::Tracks => None,
+        VisibleLibraryContent::Tracks | VisibleLibraryContent::NextUp => None,
     }?;
     Some((content, grid))
 }
@@ -1416,7 +1451,9 @@ fn set_collection_scroll_value(ui: &mut UiState, content: VisibleLibraryContent,
         VisibleLibraryContent::Albums => ui.album_grid_scroll_value = value,
         VisibleLibraryContent::Artists => ui.artist_grid_scroll_value = value,
         VisibleLibraryContent::Playlists => ui.playlist_grid_scroll_value = value,
-        VisibleLibraryContent::Radio | VisibleLibraryContent::Tracks => {}
+        VisibleLibraryContent::Radio
+        | VisibleLibraryContent::Tracks
+        | VisibleLibraryContent::NextUp => {}
     }
 }
 
@@ -1425,7 +1462,9 @@ fn collection_scroll_value(ui: &UiState, content: VisibleLibraryContent) -> f64 
         VisibleLibraryContent::Albums => ui.album_grid_scroll_value,
         VisibleLibraryContent::Artists => ui.artist_grid_scroll_value,
         VisibleLibraryContent::Playlists => ui.playlist_grid_scroll_value,
-        VisibleLibraryContent::Radio | VisibleLibraryContent::Tracks => 0.0,
+        VisibleLibraryContent::Radio
+        | VisibleLibraryContent::Tracks
+        | VisibleLibraryContent::NextUp => 0.0,
     }
 }
 
@@ -1504,7 +1543,9 @@ fn collection_grid_for_content(
         VisibleLibraryContent::Albums => ui.album_grid.clone(),
         VisibleLibraryContent::Artists => ui.artist_grid.clone(),
         VisibleLibraryContent::Playlists => ui.playlist_grid.clone(),
-        VisibleLibraryContent::Radio | VisibleLibraryContent::Tracks => None,
+        VisibleLibraryContent::Radio
+        | VisibleLibraryContent::Tracks
+        | VisibleLibraryContent::NextUp => None,
     }
 }
 
@@ -1521,7 +1562,9 @@ fn collection_return_target_index(ui: &UiState, target: &CollectionReturnTarget)
         VisibleLibraryContent::Playlists => filter_playlists(&ui.playlists, &ui.search_query)
             .iter()
             .position(|playlist| playlist.id == target.key),
-        VisibleLibraryContent::Radio | VisibleLibraryContent::Tracks => None,
+        VisibleLibraryContent::Radio
+        | VisibleLibraryContent::Tracks
+        | VisibleLibraryContent::NextUp => None,
     }
 }
 
@@ -1571,16 +1614,13 @@ fn handle_mpris_event(state: &Rc<RefCell<UiState>>, event: MediaControlEvent) {
         MediaControlEvent::Play => resume_playback(state),
         MediaControlEvent::Pause => pause_playback(state),
         MediaControlEvent::Toggle => toggle_play_pause(state),
-        MediaControlEvent::Next => {
-            if state.borrow().current_radio_station_id.is_none() {
-                play_next_track(state);
-            }
+        MediaControlEvent::Next if state.borrow().current_radio_station_id.is_none() => {
+            play_next_track(state);
         }
-        MediaControlEvent::Previous => {
-            if state.borrow().current_radio_station_id.is_none() {
-                play_previous_track(state);
-            }
+        MediaControlEvent::Previous if state.borrow().current_radio_station_id.is_none() => {
+            play_previous_track(state);
         }
+        MediaControlEvent::Next | MediaControlEvent::Previous => {}
         MediaControlEvent::Stop => {
             let mut ui = state.borrow_mut();
             stop_playback(&mut ui);
@@ -1627,6 +1667,8 @@ fn handle_mpris_event(state: &Rc<RefCell<UiState>>, event: MediaControlEvent) {
 }
 
 fn update_mpris_status(ui: &mut UiState) {
+    update_discord_presence(ui);
+
     let Some(mpris) = ui.mpris.as_mut() else {
         return;
     };
@@ -1649,6 +1691,8 @@ fn update_mpris_status(ui: &mut UiState) {
 }
 
 fn update_mpris_metadata(ui: &mut UiState) {
+    update_discord_presence(ui);
+
     if let Some(station) = current_radio_station(ui) {
         let artist = station.mpris_source_label().to_string();
         let title = station.name;
@@ -1701,6 +1745,55 @@ fn update_mpris_metadata(ui: &mut UiState) {
     if let Err(error) = mpris.set_metadata(metadata) {
         tracing::warn!(%error, "failed to update MPRIS metadata");
     }
+}
+
+fn update_discord_presence(ui: &UiState) {
+    let Some(discord) = ui.discord_presence.as_ref() else {
+        return;
+    };
+
+    let playback_state = match ui.playback.as_ref().map(PlaybackEngine::state) {
+        Some(PlaybackState::Playing) => PresencePlaybackState::Playing,
+        Some(PlaybackState::Paused) => PresencePlaybackState::Paused,
+        _ => {
+            discord.clear_activity();
+            return;
+        }
+    };
+
+    if let Some(station) = current_radio_station(ui) {
+        let title = station.name.clone();
+        let artist = station.source_label().to_string();
+        discord.set_activity(PresenceActivity {
+            title,
+            artist,
+            album: Some("Radio".to_string()),
+            artwork_source_url: None,
+            playback_state,
+            position: None,
+            duration: None,
+        });
+        return;
+    }
+
+    let Some(track) = current_display_track(ui) else {
+        discord.clear_activity();
+        return;
+    };
+
+    discord.set_activity(PresenceActivity {
+        title: track.title.clone(),
+        artist: track.artist.clone(),
+        album: Some(track.album.clone()),
+        artwork_source_url: track
+            .thumbnail_artwork_url
+            .as_deref()
+            .or(track.artwork_url.as_deref())
+            .map(str::to_string),
+        playback_state,
+        position: ui.playback.as_ref().and_then(PlaybackEngine::position),
+        duration: ui.playback.as_ref().and_then(PlaybackEngine::duration),
+    });
 }
 
 fn build_player_bar(state: Rc<RefCell<UiState>>) -> gtk::Box {
@@ -2115,7 +2208,10 @@ fn show_about_window(parent: &gtk::Window) {
 }
 
 fn quit_application(parent: &gtk::Window, state: &Rc<RefCell<UiState>>) {
-    stop_playback(&mut state.borrow_mut());
+    let mut ui = state.borrow_mut();
+    save_playback_snapshot_now(&mut ui);
+    stop_playback(&mut ui);
+    drop(ui);
     if let Some(app) = parent.application() {
         app.quit();
     } else {
@@ -2390,7 +2486,8 @@ fn build_sidebar(state: Rc<RefCell<UiState>>) -> (gtk::Box, gtk::Box, gtk::Box) 
     sidebar.append(&spacer);
 
     let queue = queue_card(state.clone());
-    let cover = sidebar_cover_art(state);
+    let cover = sidebar_cover_art(state.clone());
+    state.borrow_mut().sidebar_queue_card = Some(queue.clone());
     sidebar.append(&queue);
     sidebar.append(&cover);
 
@@ -2439,6 +2536,7 @@ fn build_content(state: Rc<RefCell<UiState>>) -> gtk::Box {
     stack.add_named(&artist_grid_page(state.clone()), Some("artists"));
     stack.add_named(&playlist_grid_page(state.clone()), Some("playlists"));
     stack.add_named(&radio_page(state.clone()), Some("radio"));
+    stack.add_named(&next_up_page(state.clone()), Some("next-up"));
     stack.set_visible_child_name("tracks");
     state.borrow_mut().library_stack = Some(stack.clone());
 
@@ -2984,6 +3082,49 @@ fn radio_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
     scroll
 }
 
+fn next_up_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.add_css_class("collection-scroll");
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_overlay_scrolling(true);
+    scroll.set_hexpand(true);
+    scroll.set_vexpand(true);
+
+    let page = gtk::Box::new(Orientation::Vertical, 0);
+    page.add_css_class("next-up-page");
+    page.set_margin_top(18);
+    page.set_margin_bottom(18);
+    page.set_margin_start(18);
+    page.set_margin_end(18);
+    scroll.set_child(Some(&page));
+
+    let empty = collection_empty_state("Nothing queued yet");
+    empty.add_css_class("next-up-empty");
+    page.append(&empty);
+
+    let list = gtk::Box::new(Orientation::Vertical, 8);
+    list.add_css_class("next-up-list");
+    list.set_hexpand(true);
+
+    let list_drop = gtk::DropTarget::new(gtk::glib::Type::U32, gtk::gdk::DragAction::MOVE);
+    {
+        let state = state.clone();
+        list_drop.connect_drop(move |_, value, _, _| {
+            let Ok(from) = value.get::<u32>() else {
+                return false;
+            };
+            move_next_up_track(&state, from as usize, NEXT_UP_PAGE_LIMIT)
+        });
+    }
+    list.add_controller(list_drop);
+
+    page.append(&list);
+
+    state.borrow_mut().next_up_view = Some(Rc::new(NextUpPageView { empty, list }));
+    rebuild_queue_list(&state);
+    scroll
+}
+
 fn refresh_collection_grids(state: &Rc<RefCell<UiState>>) {
     refresh_album_grid(state);
     refresh_artist_grid(state);
@@ -3007,6 +3148,7 @@ fn refresh_visible_collection_grid(state: &Rc<RefCell<UiState>>) {
         (LibraryPage::Artists, _, None, _) => refresh_artist_grid(state),
         (LibraryPage::Artists, None, Some(_), _) => refresh_album_grid(state),
         (LibraryPage::Playlists, _, _, None) => refresh_playlist_grid(state),
+        (LibraryPage::NextUp, _, _, _) => {}
         _ => {}
     }
 }
@@ -3977,6 +4119,7 @@ fn track_table(state: Rc<RefCell<UiState>>) -> gtk::Box {
 fn track_column_view(column: TrackColumn, state: Rc<RefCell<UiState>>) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
 
+    let state_setup = state.clone();
     factory.connect_setup(move |_, list_item| {
         let Some(list_item) = list_item.downcast_ref::<gtk::ListItem>() else {
             return;
@@ -3988,6 +4131,14 @@ fn track_column_view(column: TrackColumn, state: Rc<RefCell<UiState>>) -> gtk::C
         } else {
             let cell = track_cell_label(column);
             list_item.set_child(Some(&cell));
+        }
+
+        if let Some(child) = list_item.child() {
+            let state = state_setup.clone();
+            let list_item = list_item.clone();
+            connect_play_next_gesture(&child, move || {
+                queue_visible_track_next(&state, list_item.position() as usize)
+            });
         }
     });
 
@@ -4281,6 +4432,9 @@ fn save_library_view_settings(settings: LibraryViewSettings) {
 
 const LIBRARY_VIEW_SETTINGS_KEY: &str = "library.view.settings";
 const KEEP_PLAYING_WHILE_CLOSED_KEY: &str = "player.keep_playing_while_closed";
+const PLAYBACK_STATE_KEY: &str = "player.playback.state";
+const PLAYBACK_STATE_VERSION: u8 = 1;
+const PLAYBACK_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(5);
 
 fn load_keep_playing_while_closed() -> bool {
     match CacheDatabase::open_default()
@@ -4305,6 +4459,148 @@ fn set_keep_playing_while_closed(state: &Rc<RefCell<UiState>>, enabled: bool) {
     }) {
         tracing::warn!(%error, "failed to save close behavior setting");
     }
+}
+
+fn playback_snapshot(ui: &UiState) -> Option<PersistedPlaybackState> {
+    if ui.current_radio_station_id.is_some() {
+        return None;
+    }
+
+    let playback_index = ui.playback_index?;
+    let current_track = ui.playback_tracks.get(playback_index)?;
+    let current_item_id = current_track.item_id.clone()?;
+    if current_item_id.is_empty() {
+        return None;
+    }
+
+    let ordered_item_ids = ordered_playback_item_ids(ui);
+    if ordered_item_ids.is_empty() {
+        return None;
+    }
+
+    let position_secs = ui
+        .playback
+        .as_ref()
+        .and_then(PlaybackEngine::position)
+        .map(|position| position.as_secs())
+        .unwrap_or(0);
+
+    Some(PersistedPlaybackState {
+        version: PLAYBACK_STATE_VERSION,
+        current_item_id,
+        ordered_item_ids,
+        position_secs,
+        shuffle_enabled: ui.shuffle_enabled,
+    })
+}
+
+fn ordered_playback_item_ids(ui: &UiState) -> Vec<String> {
+    if ui.playback_tracks.is_empty() {
+        return Vec::new();
+    }
+
+    let mut seen = HashSet::new();
+    ui.playback_order
+        .iter()
+        .filter_map(|index| ui.playback_tracks.get(*index))
+        .filter_map(|track| track.item_id.clone())
+        .filter(|item_id| seen.insert(item_id.clone()))
+        .collect()
+}
+
+fn save_playback_snapshot_now(ui: &mut UiState) {
+    ui.last_playback_snapshot_at = Some(Instant::now());
+    let Some(snapshot) = playback_snapshot(ui) else {
+        return;
+    };
+
+    let result = serde_json::to_string(&snapshot)
+        .map_err(crate::cache::CacheError::from)
+        .and_then(|json| {
+            CacheDatabase::open_default()
+                .and_then(|cache| cache.set_setting(PLAYBACK_STATE_KEY, &json))
+        });
+
+    if let Err(error) = result {
+        tracing::warn!(%error, "failed to save playback queue state");
+    }
+}
+
+fn save_playback_snapshot_if_due(ui: &mut UiState) {
+    if ui
+        .last_playback_snapshot_at
+        .is_some_and(|last_saved| last_saved.elapsed() < PLAYBACK_SNAPSHOT_INTERVAL)
+    {
+        return;
+    }
+    save_playback_snapshot_now(ui);
+}
+
+fn clear_playback_snapshot() {
+    if let Err(error) = CacheDatabase::open_default().and_then(|cache| {
+        cache
+            .connection()
+            .execute(
+                "DELETE FROM app_settings WHERE key = ?1",
+                [PLAYBACK_STATE_KEY],
+            )
+            .map(|_| ())
+            .map_err(crate::cache::CacheError::from)
+    }) {
+        tracing::warn!(%error, "failed to clear playback queue state");
+    }
+}
+
+fn load_playback_snapshot() -> Option<PersistedPlaybackState> {
+    let result = CacheDatabase::open_default()
+        .and_then(|cache| cache.get_setting(PLAYBACK_STATE_KEY))
+        .and_then(|json| {
+            json.map(|json| {
+                serde_json::from_str::<PersistedPlaybackState>(&json)
+                    .map_err(crate::cache::CacheError::from)
+            })
+            .transpose()
+        });
+
+    match result {
+        Ok(Some(snapshot)) if snapshot.version == PLAYBACK_STATE_VERSION => Some(snapshot),
+        Ok(Some(_)) | Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(%error, "failed to load playback queue state");
+            None
+        }
+    }
+}
+
+fn restore_playback_snapshot_tracks(
+    library_tracks: &[UiTrack],
+    snapshot: &PersistedPlaybackState,
+) -> Option<(Vec<UiTrack>, usize, Vec<usize>)> {
+    if snapshot.current_item_id.is_empty() || snapshot.ordered_item_ids.is_empty() {
+        return None;
+    }
+
+    let tracks_by_id = library_tracks
+        .iter()
+        .filter_map(|track| track.item_id.as_deref().map(|item_id| (item_id, track)))
+        .collect::<HashMap<_, _>>();
+    let mut seen = HashSet::new();
+    let playback_tracks = snapshot
+        .ordered_item_ids
+        .iter()
+        .filter(|item_id| seen.insert((*item_id).clone()))
+        .filter_map(|item_id| {
+            tracks_by_id
+                .get(item_id.as_str())
+                .map(|track| (*track).clone())
+        })
+        .collect::<Vec<_>>();
+    let playback_index = playback_tracks
+        .iter()
+        .position(|track| track.item_id.as_deref() == Some(snapshot.current_item_id.as_str()))?;
+    let playback_order = (0..playback_tracks.len()).collect::<Vec<_>>();
+
+    Some((playback_tracks, playback_index, playback_order))
 }
 
 fn sort_track_slice(
@@ -4482,6 +4778,79 @@ fn show_album_tracks(state: &Rc<RefCell<UiState>>, album: &AlbumSummary) {
     update_content_view(state);
     load_selected_cover_art(state);
     load_selected_waveform(state);
+}
+
+fn restore_persisted_playback(state: &Rc<RefCell<UiState>>) {
+    if state.borrow().now_playing_key.is_some() {
+        return;
+    }
+
+    let Some(snapshot) = load_playback_snapshot() else {
+        return;
+    };
+
+    let restored = {
+        let mut ui = state.borrow_mut();
+        let Some((playback_tracks, playback_index, playback_order)) =
+            restore_playback_snapshot_tracks(&ui.all_tracks, &snapshot)
+        else {
+            return;
+        };
+        let selected_index = playback_tracks
+            .get(playback_index)
+            .map(track_key)
+            .and_then(|key| ui.tracks.iter().position(|track| track_key(track) == key))
+            .unwrap_or(ui.selected_index);
+
+        ui.shuffle_enabled = snapshot.shuffle_enabled;
+        ui.playback_tracks = playback_tracks;
+        ui.playback_index = Some(playback_index);
+        ui.playback_order = playback_order;
+        ui.selected_index = selected_index.min(ui.tracks.len().saturating_sub(1));
+        ui.now_playing_key = ui.playback_tracks.get(playback_index).map(track_key);
+        ui.current_radio_station_id = None;
+        update_shuffle_button(&ui);
+        update_now_playing_labels(&ui);
+        update_play_button(&ui);
+        true
+    };
+
+    if !restored {
+        return;
+    }
+
+    let selected_index = state.borrow().selected_index;
+    select_track_model_row(state, selected_index);
+    scroll_track_list_to_index(state, selected_index);
+    rebuild_queue_list(state);
+    play_selected_track(state);
+
+    {
+        let mut ui = state.borrow_mut();
+        if snapshot.position_secs > 0
+            && let Some(playback) = ui.playback.as_mut()
+            && let Err(error) = playback.seek(Duration::from_secs(snapshot.position_secs))
+        {
+            ui.playback_status
+                .set_text(&format!("Restore seek failed: {error}"));
+        }
+        if let Some(playback) = ui.playback.as_mut() {
+            match playback.pause() {
+                Ok(()) => update_now_playing_labels(&ui),
+                Err(error) => ui
+                    .playback_status
+                    .set_text(&format!("Restore pause failed: {error}")),
+            }
+        }
+        save_playback_snapshot_now(&mut ui);
+        update_play_button(&ui);
+        update_mpris_status(&mut ui);
+    }
+
+    update_list_indicators(state);
+    load_selected_cover_art(state);
+    load_selected_waveform(state);
+    scroll_to_now_playing(state);
 }
 
 fn show_playlist_tracks(state: &Rc<RefCell<UiState>>, playlist: &UiPlaylist) {
@@ -4705,6 +5074,7 @@ fn update_content_view(state: &Rc<RefCell<UiState>>) {
             (LibraryPage::Playlists, false) => "playlists",
             (LibraryPage::Playlists, true) => "tracks",
             (LibraryPage::Radio, _) => "radio",
+            (LibraryPage::NextUp, _) => "next-up",
         };
         (
             ui.library_stack.clone(),
@@ -4723,6 +5093,18 @@ fn update_content_view(state: &Rc<RefCell<UiState>>) {
     }
     if let Some(header) = detail_header.as_ref() {
         header.set_visible(show_detail);
+    }
+    {
+        let (sidebar_queue_card, show_sidebar_queue) = {
+            let ui = state.borrow();
+            (
+                ui.sidebar_queue_card.clone(),
+                !matches!(ui.active_page, LibraryPage::NextUp | LibraryPage::Radio),
+            )
+        };
+        if let Some(queue_card) = sidebar_queue_card.as_ref() {
+            queue_card.set_visible(show_sidebar_queue);
+        }
     }
     if let Some(label) = title_label.as_ref() {
         label.set_text(&title);
@@ -4787,11 +5169,19 @@ fn update_nav_selection(state: &Rc<RefCell<UiState>>) {
     };
 
     let row_index = match active_page {
-        LibraryPage::Tracks => 0,
-        LibraryPage::Albums => 1,
-        LibraryPage::Artists => 2,
-        LibraryPage::Playlists => 3,
-        LibraryPage::Radio => 4,
+        LibraryPage::Tracks => Some(0),
+        LibraryPage::Albums => Some(1),
+        LibraryPage::Artists => Some(2),
+        LibraryPage::Playlists => Some(3),
+        LibraryPage::Radio => Some(4),
+        LibraryPage::NextUp => None,
+    };
+    if row_index.is_none() {
+        list.unselect_all();
+        return;
+    }
+    let Some(row_index) = row_index else {
+        return;
     };
     if list.selected_row().as_ref().map(gtk::ListBoxRow::index) == Some(row_index) {
         return;
@@ -5354,6 +5744,12 @@ fn update_page_summary(ui: &UiState) {
                 radio_stations_for_display_from(&ui.radio_stations).len()
             ));
         }
+        LibraryPage::NextUp => {
+            ui.page_summary.set_text(&format!(
+                "Next Up | {} queued tracks",
+                upcoming_track_count(ui)
+            ));
+        }
     }
 }
 
@@ -5415,19 +5811,37 @@ fn previous_playback_index(ui: &UiState) -> Option<usize> {
 }
 
 fn queued_tracks(ui: &UiState) -> Vec<(usize, UiTrack)> {
+    queued_tracks_with_limit(ui, QUEUE_PREVIEW_LIMIT)
+}
+
+fn next_up_tracks(ui: &UiState) -> Vec<(usize, UiTrack)> {
+    queued_tracks_with_limit(ui, NEXT_UP_PAGE_LIMIT)
+}
+
+fn queued_tracks_with_limit(ui: &UiState, limit: usize) -> Vec<(usize, UiTrack)> {
     let tracks = if ui.playback_tracks.is_empty() {
         ui.tracks.as_slice()
     } else {
         ui.playback_tracks.as_slice()
     };
     let current_index = ui.playback_index.unwrap_or(ui.selected_index);
-    queued_tracks_from_order(tracks, &ui.playback_order, current_index)
+    queued_tracks_from_order_with_limit(tracks, &ui.playback_order, current_index, limit)
 }
 
+#[cfg(test)]
 fn queued_tracks_from_order(
     tracks: &[UiTrack],
     playback_order: &[usize],
     current_index: usize,
+) -> Vec<(usize, UiTrack)> {
+    queued_tracks_from_order_with_limit(tracks, playback_order, current_index, QUEUE_PREVIEW_LIMIT)
+}
+
+fn queued_tracks_from_order_with_limit(
+    tracks: &[UiTrack],
+    playback_order: &[usize],
+    current_index: usize,
+    limit: usize,
 ) -> Vec<(usize, UiTrack)> {
     let Some(order_position) = playback_order
         .iter()
@@ -5439,9 +5853,217 @@ fn queued_tracks_from_order(
     playback_order
         .iter()
         .skip(order_position + 1)
-        .take(QUEUE_PREVIEW_LIMIT)
+        .take(limit)
         .filter_map(|index| tracks.get(*index).cloned().map(|track| (*index, track)))
         .collect()
+}
+
+fn upcoming_track_count(ui: &UiState) -> usize {
+    let current_index = ui.playback_index.unwrap_or(ui.selected_index);
+    upcoming_track_count_from_order(&ui.playback_order, current_index)
+}
+
+fn upcoming_track_count_from_order(playback_order: &[usize], current_index: usize) -> usize {
+    playback_order
+        .iter()
+        .position(|index| *index == current_index)
+        .map(|position| playback_order.len().saturating_sub(position + 1))
+        .unwrap_or(0)
+}
+
+fn move_upcoming_track_in_playback_order(
+    playback_order: &mut Vec<usize>,
+    current_index: usize,
+    from: usize,
+    to_slot: usize,
+    visible_limit: usize,
+) -> bool {
+    let Some(order_position) = playback_order
+        .iter()
+        .position(|index| *index == current_index)
+    else {
+        return false;
+    };
+
+    let upcoming_start = order_position + 1;
+    let visible_len = playback_order
+        .len()
+        .saturating_sub(upcoming_start)
+        .min(visible_limit);
+    if visible_len <= 1 || from >= visible_len {
+        return false;
+    }
+
+    let to_slot = to_slot.min(visible_len);
+    if from == to_slot || from + 1 == to_slot {
+        return false;
+    }
+
+    let from_index = upcoming_start + from;
+    let moved = playback_order.remove(from_index);
+    let mut insert_index = upcoming_start + to_slot;
+    if from_index < insert_index {
+        insert_index -= 1;
+    }
+    playback_order.insert(insert_index, moved);
+    true
+}
+
+fn queue_track_next_in_playback_order(
+    playback_order: &mut Vec<usize>,
+    current_index: usize,
+    target_index: usize,
+) -> bool {
+    if current_index == target_index {
+        return false;
+    }
+
+    let Some(current_position) = playback_order
+        .iter()
+        .position(|index| *index == current_index)
+    else {
+        return false;
+    };
+
+    if let Some(existing_position) = playback_order
+        .iter()
+        .position(|index| *index == target_index)
+    {
+        if existing_position == current_position + 1 {
+            return false;
+        }
+        let moved = playback_order.remove(existing_position);
+        let insert_position = if existing_position < current_position + 1 {
+            current_position
+        } else {
+            current_position + 1
+        };
+        playback_order.insert(insert_position, moved);
+    } else {
+        playback_order.insert(current_position + 1, target_index);
+    }
+
+    true
+}
+
+fn move_next_up_track(state: &Rc<RefCell<UiState>>, from: usize, to_slot: usize) -> bool {
+    let changed = {
+        let mut ui = state.borrow_mut();
+        let current_index = ui.playback_index.unwrap_or(ui.selected_index);
+        let changed = move_upcoming_track_in_playback_order(
+            &mut ui.playback_order,
+            current_index,
+            from,
+            to_slot,
+            NEXT_UP_PAGE_LIMIT,
+        );
+        if changed {
+            arm_gapless_next(&mut ui);
+            save_playback_snapshot_now(&mut ui);
+        }
+        changed
+    };
+    if changed {
+        rebuild_queue_list(state);
+    }
+    changed
+}
+
+fn queue_track_next_by_key(ui: &mut UiState, target_key: &str, fallback_track: UiTrack) -> bool {
+    if ui.current_radio_station_id.is_some() {
+        return false;
+    }
+
+    if ui.playback_tracks.is_empty() {
+        ui.playback_tracks = ui.tracks.clone();
+    }
+    if ui.playback_tracks.is_empty() {
+        return false;
+    }
+
+    let current_index = ui
+        .playback_index
+        .unwrap_or(ui.selected_index)
+        .min(ui.playback_tracks.len().saturating_sub(1));
+    if ui.playback_order.is_empty() || !ui.playback_order.contains(&current_index) {
+        rebuild_playback_order(ui, current_index);
+    }
+
+    let target_index = if let Some(index) = ui
+        .playback_tracks
+        .iter()
+        .position(|track| track_key(track) == target_key)
+    {
+        index
+    } else {
+        ui.playback_tracks.push(fallback_track);
+        ui.playback_tracks.len() - 1
+    };
+
+    queue_track_next_in_playback_order(&mut ui.playback_order, current_index, target_index)
+}
+
+fn finalize_queue_change(state: &Rc<RefCell<UiState>>) {
+    {
+        let mut ui = state.borrow_mut();
+        arm_gapless_next(&mut ui);
+        save_playback_snapshot_now(&mut ui);
+        update_page_summary(&ui);
+    }
+    rebuild_queue_list(state);
+}
+
+fn queue_visible_track_next(state: &Rc<RefCell<UiState>>, visible_index: usize) -> bool {
+    let changed = {
+        let mut ui = state.borrow_mut();
+        let Some(track) = ui.tracks.get(visible_index).cloned() else {
+            return false;
+        };
+        let key = track_key(&track);
+        queue_track_next_by_key(&mut ui, &key, track)
+    };
+    if changed {
+        finalize_queue_change(state);
+    }
+    changed
+}
+
+fn queue_existing_track_next(state: &Rc<RefCell<UiState>>, playback_index: usize) -> bool {
+    let changed = {
+        let mut ui = state.borrow_mut();
+        let track = if ui.playback_tracks.is_empty() {
+            ui.tracks.get(playback_index).cloned()
+        } else {
+            ui.playback_tracks.get(playback_index).cloned()
+        };
+        let Some(track) = track else {
+            return false;
+        };
+        let key = track_key(&track);
+        queue_track_next_by_key(&mut ui, &key, track)
+    };
+    if changed {
+        finalize_queue_change(state);
+    }
+    changed
+}
+
+fn connect_play_next_gesture<F>(widget: &impl IsA<gtk::Widget>, handler: F)
+where
+    F: Fn() -> bool + 'static,
+{
+    let gesture = gtk::GestureClick::new();
+    gesture.set_button(0);
+    gesture.connect_pressed(move |gesture, _, _, _| {
+        let button = gesture.current_button();
+        let modifiers = gesture.current_event_state();
+        let should_queue_next = button == 3
+            || (button == 1 && modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK));
+        if should_queue_next && handler() {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+        }
+    });
+    widget.add_controller(gesture);
 }
 
 fn track_matches_query(track: &UiTrack, query: &str) -> bool {
@@ -5632,6 +6254,7 @@ fn apply_connection_payload(state: &Rc<RefCell<UiState>>, payload: ConnectionPay
     update_content_view(state);
     load_selected_cover_art(state);
     load_selected_waveform(state);
+    restore_persisted_playback(state);
 }
 
 fn update_now_playing_labels(state: &UiState) {
@@ -5742,6 +6365,7 @@ fn toggle_shuffle(state: &Rc<RefCell<UiState>>) {
         let playback_index = ui.playback_index.unwrap_or(ui.selected_index);
         rebuild_playback_order(&mut ui, playback_index);
         arm_gapless_next(&mut ui);
+        save_playback_snapshot_now(&mut ui);
         update_shuffle_button(&ui);
     }
     rebuild_queue_list(state);
@@ -5758,7 +6382,10 @@ fn pause_playback(state: &Rc<RefCell<UiState>>) {
             playback.pause()
         };
         match result {
-            Ok(()) => update_now_playing_labels(&ui),
+            Ok(()) => {
+                save_playback_snapshot_now(&mut ui);
+                update_now_playing_labels(&ui);
+            }
             Err(error) => ui
                 .playback_status
                 .set_text(&format!("Pause failed: {error}")),
@@ -5786,7 +6413,10 @@ fn resume_playback(state: &Rc<RefCell<UiState>>) {
             }
             let result = ui.playback.as_mut().expect("playback was present").resume();
             match result {
-                Ok(()) => update_now_playing_labels(&ui),
+                Ok(()) => {
+                    save_playback_snapshot_now(&mut ui);
+                    update_now_playing_labels(&ui);
+                }
                 Err(error) => ui
                     .playback_status
                     .set_text(&format!("Resume failed: {error}")),
@@ -5965,6 +6595,7 @@ fn play_selected_track(state: &Rc<RefCell<UiState>>) {
             ui.now_playing_key = Some(track_key(&track));
             ui.current_radio_station_id = None;
             arm_gapless_next(&mut ui);
+            save_playback_snapshot_now(&mut ui);
             update_now_playing_labels(&ui);
             ui.playback_status
                 .set_text(&format!("Playing | {}", track.quality));
@@ -6190,12 +6821,6 @@ fn fetch_cached_image_file(url: &str) -> Result<PathBuf, ImageFetchError> {
     } else {
         fetch_image_file(url)
     }
-}
-
-fn artwork_cache_path(url: &str) -> PathBuf {
-    let mut hasher = DefaultHasher::new();
-    url.hash(&mut hasher);
-    std::env::temp_dir().join(format!("gtunes-artwork-{:x}", hasher.finish()))
 }
 
 fn connect_and_fetch(
@@ -6876,7 +7501,7 @@ fn queue_card(state: Rc<RefCell<UiState>>) -> gtk::Box {
     card.add_css_class("queue-card");
     card.set_halign(Align::Fill);
     card.set_hexpand(true);
-    card.append(&label("Next Up", "rail-title"));
+    card.append(&next_up_link_button(state.clone()));
 
     let empty = label("Nothing up next", "meta");
     card.append(&empty);
@@ -6947,6 +7572,16 @@ fn queue_card(state: Rc<RefCell<UiState>>) -> gtk::Box {
                 play_track_at_existing_order(&click_state, index);
             }
         });
+        {
+            let gesture_track_index = track_index.clone();
+            let gesture_state = state.clone();
+            connect_play_next_gesture(&button, move || {
+                let Some(index) = *gesture_track_index.borrow() else {
+                    return false;
+                };
+                queue_existing_track_next(&gesture_state, index)
+            });
+        }
 
         list.append(&button);
         rows.push(QueueRow {
@@ -6971,43 +7606,211 @@ fn rebuild_queue_list(state: &Rc<RefCell<UiState>>) {
         let ui = state.borrow();
         (ui.queue_view.clone(), queued_tracks(&ui))
     };
-    let Some(queue_view) = queue_view else {
+    if let Some(queue_view) = queue_view {
+        queue_view.empty.set_visible(upcoming.is_empty());
+
+        for (row, item) in queue_view.rows.iter().zip(
+            upcoming
+                .into_iter()
+                .map(Some)
+                .chain(std::iter::repeat(None)),
+        ) {
+            let Some((index, track)) = item else {
+                row.button.set_visible(false);
+                *row.track_index.borrow_mut() = None;
+                *row.artwork_url.borrow_mut() = None;
+                continue;
+            };
+
+            row.button.set_visible(true);
+            row.button
+                .set_tooltip_text(Some(&format!("Play {}", track.title)));
+            *row.track_index.borrow_mut() = Some(index);
+            row.title.set_text(&track.title);
+            row.artist.set_text(&track.artist);
+
+            if *row.artwork_url.borrow() != track.thumbnail_artwork_url {
+                *row.artwork_url.borrow_mut() = track.thumbnail_artwork_url.clone();
+                row.art.set_paintable(Option::<&gtk::gdk::Paintable>::None);
+                row.art.set_icon_name(Some("audio-x-generic-symbolic"));
+                load_queue_art(
+                    track.thumbnail_artwork_url,
+                    row.art.clone(),
+                    row.artwork_url.clone(),
+                );
+            }
+        }
+    }
+
+    rebuild_next_up_page(state);
+}
+
+fn rebuild_next_up_page(state: &Rc<RefCell<UiState>>) {
+    let (next_up_view, upcoming) = {
+        let ui = state.borrow();
+        (ui.next_up_view.clone(), next_up_tracks(&ui))
+    };
+    let Some(next_up_view) = next_up_view else {
         return;
     };
 
-    queue_view.empty.set_visible(upcoming.is_empty());
-
-    for (row, item) in queue_view.rows.iter().zip(
-        upcoming
-            .into_iter()
-            .map(Some)
-            .chain(std::iter::repeat(None)),
-    ) {
-        let Some((index, track)) = item else {
-            row.button.set_visible(false);
-            *row.track_index.borrow_mut() = None;
-            *row.artwork_url.borrow_mut() = None;
-            continue;
-        };
-
-        row.button.set_visible(true);
-        row.button
-            .set_tooltip_text(Some(&format!("Play {}", track.title)));
-        *row.track_index.borrow_mut() = Some(index);
-        row.title.set_text(&track.title);
-        row.artist.set_text(&track.artist);
-
-        if *row.artwork_url.borrow() != track.thumbnail_artwork_url {
-            *row.artwork_url.borrow_mut() = track.thumbnail_artwork_url.clone();
-            row.art.set_paintable(Option::<&gtk::gdk::Paintable>::None);
-            row.art.set_icon_name(Some("audio-x-generic-symbolic"));
-            load_queue_art(
-                track.thumbnail_artwork_url,
-                row.art.clone(),
-                row.artwork_url.clone(),
-            );
-        }
+    next_up_view.empty.set_visible(upcoming.is_empty());
+    while let Some(child) = next_up_view.list.first_child() {
+        next_up_view.list.remove(&child);
     }
+
+    for (position, (index, track)) in upcoming.into_iter().enumerate() {
+        next_up_view
+            .list
+            .append(&next_up_row(state.clone(), position, index, track));
+    }
+}
+
+fn next_up_row(
+    state: Rc<RefCell<UiState>>,
+    position: usize,
+    track_index: usize,
+    track: UiTrack,
+) -> gtk::Button {
+    let button = gtk::Button::new();
+    button.add_css_class("flat");
+    button.add_css_class("next-up-row");
+    button.set_halign(Align::Fill);
+    button.set_hexpand(true);
+    button.set_cursor_from_name(Some("pointer"));
+    button.set_tooltip_text(Some(&format!("Play {}", track.title)));
+
+    let row = gtk::Box::new(Orientation::Horizontal, 14);
+    row.set_halign(Align::Fill);
+    row.set_hexpand(true);
+    row.set_valign(Align::Center);
+
+    let index_label = label(&(position + 1).to_string(), "next-up-index");
+    index_label.set_xalign(0.5);
+    index_label.set_valign(Align::Center);
+    row.append(&index_label);
+
+    let art = cover_art(48);
+    art.add_css_class("next-up-art");
+    art.set_icon_name(Some("audio-x-generic-symbolic"));
+    art.set_valign(Align::Center);
+    row.append(&art);
+
+    let text = gtk::Box::new(Orientation::Vertical, 2);
+    text.add_css_class("next-up-text");
+    text.set_halign(Align::Fill);
+    text.set_valign(Align::Center);
+    text.set_hexpand(true);
+    let title = label(&track.title, "next-up-title");
+    title.set_single_line_mode(true);
+    title.set_lines(1);
+    title.set_valign(Align::End);
+    let artist = label(&track.artist, "next-up-artist");
+    artist.set_single_line_mode(true);
+    artist.set_lines(1);
+    artist.set_valign(Align::Start);
+    text.append(&title);
+    text.append(&artist);
+    row.append(&text);
+
+    let trailing = gtk::Box::new(Orientation::Horizontal, 12);
+    trailing.add_css_class("next-up-trailing");
+    trailing.set_valign(Align::Center);
+
+    let duration = label(&track.duration, "meta");
+    duration.add_css_class("next-up-time");
+    duration.add_css_class("mono");
+    duration.set_xalign(1.0);
+    duration.set_valign(Align::Center);
+    trailing.append(&duration);
+
+    let handle = gtk::Box::new(Orientation::Horizontal, 0);
+    handle.add_css_class("next-up-handle");
+    handle.set_valign(Align::Center);
+    handle.append(&gtk::Image::from_icon_name("list-drag-handle-symbolic"));
+    trailing.append(&handle);
+
+    row.append(&trailing);
+
+    button.set_child(Some(&row));
+    {
+        let state = state.clone();
+        button.connect_clicked(move |_| {
+            play_track_at_existing_order(&state, track_index);
+        });
+    }
+    {
+        let state = state.clone();
+        connect_play_next_gesture(&button, move || {
+            queue_existing_track_next(&state, track_index)
+        });
+    }
+
+    let artwork_url = Rc::new(RefCell::new(track.thumbnail_artwork_url.clone()));
+    load_queue_art(
+        track.thumbnail_artwork_url.clone(),
+        art.clone(),
+        artwork_url.clone(),
+    );
+
+    let drag_source = gtk::DragSource::new();
+    drag_source.set_actions(gtk::gdk::DragAction::MOVE);
+    drag_source.connect_prepare(move |_, _, _| {
+        Some(gtk::gdk::ContentProvider::for_value(
+            &(position as u32).to_value(),
+        ))
+    });
+    {
+        let button = button.clone();
+        drag_source.connect_drag_begin(move |_, _| {
+            button.add_css_class("dragging");
+        });
+    }
+    {
+        let button = button.clone();
+        drag_source.connect_drag_end(move |_, _, _| {
+            button.remove_css_class("dragging");
+        });
+    }
+    button.add_controller(drag_source);
+
+    let drop_target = gtk::DropTarget::new(gtk::glib::Type::U32, gtk::gdk::DragAction::MOVE);
+    {
+        let button = button.clone();
+        drop_target.connect_motion(move |_, _, y| {
+            button.remove_css_class("drop-before");
+            button.remove_css_class("drop-after");
+            if y >= f64::from(button.height()) / 2.0 {
+                button.add_css_class("drop-after");
+            } else {
+                button.add_css_class("drop-before");
+            }
+            gtk::gdk::DragAction::MOVE
+        });
+    }
+    {
+        let button = button.clone();
+        drop_target.connect_leave(move |_| {
+            button.remove_css_class("drop-before");
+            button.remove_css_class("drop-after");
+        });
+    }
+    {
+        let state = state.clone();
+        let button = button.clone();
+        drop_target.connect_drop(move |_, value, _, y| {
+            button.remove_css_class("drop-before");
+            button.remove_css_class("drop-after");
+            let Ok(from) = value.get::<u32>() else {
+                return false;
+            };
+            let to_slot = position + usize::from(y >= f64::from(button.height()) / 2.0);
+            move_next_up_track(&state, from as usize, to_slot)
+        });
+    }
+    button.add_controller(drop_target);
+
+    button
 }
 
 fn load_queue_art(
@@ -7516,6 +8319,30 @@ fn icon_button(icon_name: &str, tooltip: &str) -> gtk::Button {
     button
 }
 
+fn next_up_link_button(state: Rc<RefCell<UiState>>) -> gtk::Button {
+    let button = gtk::Button::new();
+    button.add_css_class("flat");
+    button.add_css_class("queue-link");
+    button.set_halign(Align::Fill);
+    button.set_hexpand(true);
+    button.set_cursor_from_name(Some("pointer"));
+    button.set_tooltip_text(Some("Open the full Next Up queue"));
+
+    let line = gtk::Box::new(Orientation::Horizontal, 8);
+    line.set_hexpand(true);
+    line.append(&label("Next Up", "rail-title"));
+    let spacer = gtk::Box::new(Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    line.append(&spacer);
+    line.append(&gtk::Image::from_icon_name("go-next-symbolic"));
+    button.set_child(Some(&line));
+
+    button.connect_clicked(move |_| {
+        set_library_page(&state, LibraryPage::NextUp);
+    });
+    button
+}
+
 fn cover_art(size: i32) -> gtk::Image {
     let art = gtk::Image::new();
     art.add_css_class("cover");
@@ -7577,6 +8404,10 @@ fn update_playback_position(state: &Rc<RefCell<UiState>>) {
         if let Some(area) = area.as_ref() {
             area.queue_draw();
         }
+    }
+
+    if position.is_some() {
+        save_playback_snapshot_if_due(&mut state.borrow_mut());
     }
 }
 
@@ -7640,6 +8471,7 @@ fn handle_playback_error(
                 Ok(()) => {
                     ui.now_playing_key = Some(track_key_value);
                     arm_gapless_next(&mut ui);
+                    save_playback_snapshot_now(&mut ui);
                     update_now_playing_labels(&ui);
                     ui.playback_status
                         .set_text(&format!("Playing transcoded stream | {quality}"));
@@ -7668,6 +8500,7 @@ fn handle_playback_error(
         }
         ui.now_playing_key = None;
         arm_gapless_next(&mut ui);
+        save_playback_snapshot_now(&mut ui);
         update_play_button(&ui);
         update_mpris_metadata(&mut ui);
         update_mpris_status(&mut ui);
@@ -7720,6 +8553,7 @@ fn apply_gapless_transition(state: &Rc<RefCell<UiState>>) -> bool {
         }
 
         arm_gapless_next(&mut ui);
+        save_playback_snapshot_now(&mut ui);
         update_play_button(&ui);
         update_mpris_metadata(&mut ui);
         update_mpris_status(&mut ui);
@@ -7757,6 +8591,7 @@ fn advance_after_track_end(state: &Rc<RefCell<UiState>>) {
             }
             update_play_button(&ui);
             update_mpris_status(&mut ui);
+            clear_playback_snapshot();
         }
         update_list_indicators(state);
         refresh_radio_page(state);
@@ -7898,6 +8733,7 @@ fn seek_waveform(state: &Rc<RefCell<UiState>>, area: &gtk::DrawingArea, x: f64) 
                 "-{}",
                 format_duration(duration.saturating_sub(position))
             ));
+            save_playback_snapshot_now(&mut ui);
         }
         Err(error) => ui
             .playback_status
@@ -8361,6 +9197,115 @@ mod tests {
             .map(|(_, track)| track.item_id.as_deref())
             .collect::<Vec<_>>();
         assert_eq!(queued_ids, vec![Some("track-3")]);
+    }
+
+    #[test]
+    fn move_upcoming_track_reorders_visible_queue_without_touching_current_track() {
+        let mut playback_order = vec![4, 0, 1, 2, 3];
+
+        let changed = move_upcoming_track_in_playback_order(&mut playback_order, 4, 0, 3, 50);
+
+        assert!(changed);
+        assert_eq!(playback_order, vec![4, 1, 2, 0, 3]);
+    }
+
+    #[test]
+    fn move_upcoming_track_ignores_no_op_moves() {
+        let mut playback_order = vec![0, 1, 2, 3];
+
+        let changed = move_upcoming_track_in_playback_order(&mut playback_order, 0, 1, 2, 50);
+
+        assert!(!changed);
+        assert_eq!(playback_order, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn queue_track_next_moves_existing_track_directly_after_current() {
+        let mut playback_order = vec![0, 1, 2, 3];
+
+        let changed = queue_track_next_in_playback_order(&mut playback_order, 1, 3);
+
+        assert!(changed);
+        assert_eq!(playback_order, vec![0, 1, 3, 2]);
+    }
+
+    #[test]
+    fn queue_track_next_inserts_missing_track_directly_after_current() {
+        let mut playback_order = vec![0, 1, 2];
+
+        let changed = queue_track_next_in_playback_order(&mut playback_order, 0, 4);
+
+        assert!(changed);
+        assert_eq!(playback_order, vec![0, 4, 1, 2]);
+    }
+
+    #[test]
+    fn queue_track_next_ignores_current_or_already_next_track() {
+        let mut current_track_order = vec![0, 1, 2];
+        let current_changed = queue_track_next_in_playback_order(&mut current_track_order, 1, 1);
+        assert!(!current_changed);
+        assert_eq!(current_track_order, vec![0, 1, 2]);
+
+        let mut already_next_order = vec![0, 1, 2];
+        let next_changed = queue_track_next_in_playback_order(&mut already_next_order, 0, 1);
+        assert!(!next_changed);
+        assert_eq!(already_next_order, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn persisted_playback_restore_uses_current_library_tracks() {
+        let first = UiTrack {
+            item_id: Some("first".to_string()),
+            title: "First".to_string(),
+            ..test_track()
+        };
+        let second = UiTrack {
+            item_id: Some("second".to_string()),
+            title: "Second".to_string(),
+            ..test_track()
+        };
+        let third = UiTrack {
+            item_id: Some("third".to_string()),
+            title: "Third".to_string(),
+            ..test_track()
+        };
+        let snapshot = PersistedPlaybackState {
+            version: PLAYBACK_STATE_VERSION,
+            current_item_id: "second".to_string(),
+            ordered_item_ids: vec![
+                "first".to_string(),
+                "missing".to_string(),
+                "second".to_string(),
+                "third".to_string(),
+            ],
+            position_secs: 42,
+            shuffle_enabled: true,
+        };
+
+        let (tracks, index, order) =
+            restore_playback_snapshot_tracks(&[first, second, third], &snapshot)
+                .expect("snapshot restores");
+
+        let restored_ids = tracks
+            .iter()
+            .filter_map(|track| track.item_id.as_deref())
+            .collect::<Vec<_>>();
+        assert_eq!(restored_ids, vec!["first", "second", "third"]);
+        assert_eq!(index, 1);
+        assert_eq!(order, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn persisted_playback_restore_requires_current_track() {
+        let snapshot = PersistedPlaybackState {
+            version: PLAYBACK_STATE_VERSION,
+            current_item_id: "missing".to_string(),
+            ordered_item_ids: vec!["track-id".to_string()],
+            position_secs: 0,
+            shuffle_enabled: false,
+        };
+
+        assert!(restore_playback_snapshot_tracks(&[test_track()], &snapshot).is_none());
     }
 
     #[test]
