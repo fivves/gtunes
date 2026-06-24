@@ -227,6 +227,18 @@ pub(crate) fn fallback_playback_status(
     }
 }
 
+pub(crate) fn gapless_transition_index(
+    item_ids_by_index: &[Option<String>],
+    playback_order: &[usize],
+    current_index: usize,
+    transition_item_id: &str,
+) -> Option<usize> {
+    item_ids_by_index
+        .iter()
+        .position(|item_id| item_id.as_deref() == Some(transition_item_id))
+        .or_else(|| next_playback_index(playback_order, current_index))
+}
+
 pub(crate) fn playback_snapshot(
     current_item_id: String,
     item_ids_by_index: &[Option<String>],
@@ -441,6 +453,37 @@ mod tests {
     fn test_format_duration(duration: Duration) -> String {
         let seconds = duration.as_secs();
         format!("{}:{:02}", seconds / 60, seconds % 60)
+    }
+
+    #[test]
+    fn gapless_transition_prefers_matching_item_id() {
+        let item_ids = vec![
+            Some("first".to_string()),
+            Some("second".to_string()),
+            Some("third".to_string()),
+        ];
+
+        let index = gapless_transition_index(&item_ids, &[0, 1, 2], 0, "third");
+
+        assert_eq!(index, Some(2));
+    }
+
+    #[test]
+    fn gapless_transition_falls_back_to_next_ordered_index() {
+        let item_ids = vec![Some("first".to_string()), Some("second".to_string())];
+
+        let index = gapless_transition_index(&item_ids, &[0, 1], 0, "missing");
+
+        assert_eq!(index, Some(1));
+    }
+
+    #[test]
+    fn gapless_transition_returns_none_when_match_and_next_are_missing() {
+        let item_ids = vec![Some("first".to_string())];
+
+        let index = gapless_transition_index(&item_ids, &[0], 0, "missing");
+
+        assert_eq!(index, None);
     }
 
     #[test]

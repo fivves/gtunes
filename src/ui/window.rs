@@ -8401,11 +8401,18 @@ fn apply_gapless_transition(state: &Rc<RefCell<UiState>>) -> bool {
 
     {
         let mut ui = state.borrow_mut();
-        let transition_index = ui
+        let item_ids_by_index = ui
             .playback_tracks
             .iter()
-            .position(|track| track.item_id.as_deref() == Some(transition.item_id.as_str()))
-            .or_else(|| next_playback_index(&ui));
+            .map(|track| track.item_id.clone())
+            .collect::<Vec<_>>();
+        let current_index = ui.playback_index.unwrap_or(ui.selected_index);
+        let transition_index = session::gapless_transition_index(
+            &item_ids_by_index,
+            &ui.playback_order,
+            current_index,
+            &transition.item_id,
+        );
 
         if let Some(index) = transition_index {
             ui.playback_index = Some(index);

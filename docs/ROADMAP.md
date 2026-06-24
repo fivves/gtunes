@@ -84,6 +84,9 @@ background integrations should not implicitly drive playback state.
    - Progress: direct-play fallback eligibility and fallback status messaging
      now live in `src/playback/session.rs`; `window.rs` performs track lookup
      and GStreamer operations, then delegates fallback bookkeeping.
+   - Progress: gapless transition index selection now lives in
+     `src/playback/session.rs`; `window.rs` applies the selected index to UI
+     state after the playback engine reports a transition.
 
 3. [x] Preserve position during direct-play fallback.
    - Capture the current playback position before retrying with a Jellyfin
@@ -123,6 +126,8 @@ background integrations should not implicitly drive playback state.
    - Progress: fallback tests now cover direct-only transcode retry
      eligibility, restored-position status, failed seek-restore status, and
      no-position fallback status.
+   - Progress: gapless transition tests now cover matching item IDs, fallback
+     to the next ordered item, and missing-match/missing-next behavior.
 
 ## Follow-Up Candidates
 
