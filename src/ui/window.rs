@@ -179,6 +179,7 @@ struct UiState {
     playback_tracks: Vec<UiTrack>,
     playback_index: Option<usize>,
     playback_order: Vec<usize>,
+    playback_watchdog: PlaybackWatchdog,
     last_playback_snapshot_at: Option<Instant>,
     library_stack: Option<gtk::Stack>,
     album_grid: Option<gtk::FlowBox>,
@@ -305,6 +306,14 @@ struct PersistedPlaybackState {
     shuffle_enabled: bool,
 }
 
+#[derive(Clone, Debug, Default)]
+struct PlaybackWatchdog {
+    item_id: Option<String>,
+    stream_kind: Option<PlaybackStreamKind>,
+    last_position: Option<Duration>,
+    last_advanced_at: Option<Instant>,
+}
+
 enum ConnectionMessage {
     Authenticated(JellyfinSession),
     Status(String),
@@ -331,6 +340,7 @@ const COLLECTION_RETURN_HIGHLIGHT_MS: u64 = 850;
 const INVISIBLE_SEARCH_TIMEOUT: Duration = Duration::from_millis(1_200);
 const NEXT_UP_PAGE_LIMIT: usize = 50;
 const RADIO_STATIONS_KEY: &str = "radio.stations";
+const PLAYBACK_STALL_TIMEOUT: Duration = Duration::from_secs(8);
 static CONNECTION_GENERATION: AtomicU64 = AtomicU64::new(0);
 static CACHE_RESET_LOCK: Mutex<()> = Mutex::new(());
 
@@ -671,6 +681,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         playback_tracks: Vec::new(),
         playback_index: None,
         playback_order: Vec::new(),
+        playback_watchdog: PlaybackWatchdog::default(),
         last_playback_snapshot_at: None,
         library_stack: None,
         album_grid: None,
@@ -5599,6 +5610,7 @@ fn set_active_radio_station_ui(
     ui.playback_tracks.clear();
     ui.playback_index = None;
     ui.playback_order.clear();
+    ui.playback_watchdog = PlaybackWatchdog::default();
     ui.elapsed_label.set_text("0:00");
     ui.remaining_label.set_text("--:--");
     clear_track_visuals_for_radio(ui);
@@ -6594,6 +6606,7 @@ fn play_selected_track(state: &Rc<RefCell<UiState>>) {
         Ok(()) => {
             ui.now_playing_key = Some(track_key(&track));
             ui.current_radio_station_id = None;
+            ui.playback_watchdog = PlaybackWatchdog::default();
             arm_gapless_next(&mut ui);
             save_playback_snapshot_now(&mut ui);
             update_now_playing_labels(&ui);
@@ -6660,6 +6673,7 @@ fn stop_playback(ui: &mut UiState) {
     ui.playback_tracks.clear();
     ui.playback_index = None;
     ui.playback_order.clear();
+    ui.playback_watchdog = PlaybackWatchdog::default();
     if let Some(playback) = ui.playback.as_mut()
         && let Err(error) = playback.stop()
     {
@@ -8369,6 +8383,16 @@ fn update_playback_position(state: &Rc<RefCell<UiState>>) {
         return;
     }
 
+    if let Some((item_id, stream_kind)) = detect_playback_stall(state) {
+        handle_playback_error(
+            state,
+            Some(item_id),
+            Some(stream_kind),
+            "Playback stalled while the pipeline still reported playing".to_string(),
+        );
+        return;
+    }
+
     let (position, duration, area, elapsed, remaining) = {
         let ui = state.borrow();
         let position = ui.playback.as_ref().and_then(PlaybackEngine::position);
@@ -8409,6 +8433,71 @@ fn update_playback_position(state: &Rc<RefCell<UiState>>) {
     if position.is_some() {
         save_playback_snapshot_if_due(&mut state.borrow_mut());
     }
+}
+
+fn detect_playback_stall(state: &Rc<RefCell<UiState>>) -> Option<(String, PlaybackStreamKind)> {
+    let mut ui = state.borrow_mut();
+    if ui.current_radio_station_id.is_some() {
+        ui.playback_watchdog = PlaybackWatchdog::default();
+        return None;
+    }
+
+    let Some(playback) = ui.playback.as_ref() else {
+        ui.playback_watchdog = PlaybackWatchdog::default();
+        return None;
+    };
+    if !matches!(playback.state(), PlaybackState::Playing) {
+        ui.playback_watchdog = PlaybackWatchdog::default();
+        return None;
+    }
+
+    let Some(item_id) = playback.current_item_id().map(str::to_string) else {
+        ui.playback_watchdog = PlaybackWatchdog::default();
+        return None;
+    };
+    let stream_kind = playback.current_stream_kind();
+    let position = playback.position();
+    let now = Instant::now();
+    let watchdog = &mut ui.playback_watchdog;
+
+    if watchdog.item_id.as_deref() != Some(item_id.as_str()) || watchdog.stream_kind != stream_kind
+    {
+        watchdog.item_id = Some(item_id);
+        watchdog.stream_kind = stream_kind;
+        watchdog.last_position = position;
+        watchdog.last_advanced_at = Some(now);
+        return None;
+    }
+
+    let advanced = match (watchdog.last_position, position) {
+        (Some(previous), Some(current)) => current > previous,
+        (None, Some(_)) => true,
+        _ => false,
+    };
+    if advanced {
+        watchdog.last_position = position;
+        watchdog.last_advanced_at = Some(now);
+        return None;
+    }
+
+    let stalled_for = watchdog
+        .last_advanced_at
+        .map(|last_advanced| now.saturating_duration_since(last_advanced))
+        .unwrap_or_default();
+    if stalled_for >= PLAYBACK_STALL_TIMEOUT {
+        tracing::warn!(
+            item_id = %watchdog.item_id.as_deref().unwrap_or(""),
+            ?stream_kind,
+            ?position,
+            stalled_for_ms = stalled_for.as_millis(),
+            "playback position stalled while pipeline reported playing"
+        );
+        let stalled_item_id = watchdog.item_id.clone()?;
+        ui.playback_watchdog = PlaybackWatchdog::default();
+        return stream_kind.map(|stream_kind| (stalled_item_id, stream_kind));
+    }
+
+    None
 }
 
 fn take_playback_event(state: &Rc<RefCell<UiState>>) -> Option<PlaybackEvent> {
@@ -8470,6 +8559,7 @@ fn handle_playback_error(
             match playback.play(request) {
                 Ok(()) => {
                     ui.now_playing_key = Some(track_key_value);
+                    ui.playback_watchdog = PlaybackWatchdog::default();
                     arm_gapless_next(&mut ui);
                     save_playback_snapshot_now(&mut ui);
                     update_now_playing_labels(&ui);
@@ -8538,6 +8628,7 @@ fn apply_gapless_transition(state: &Rc<RefCell<UiState>>) -> bool {
         {
             let quality = track.quality.clone();
             ui.now_playing_key = Some(track_key(&track));
+            ui.playback_watchdog = PlaybackWatchdog::default();
             if let Some(visible_index) = ui
                 .tracks
                 .iter()
