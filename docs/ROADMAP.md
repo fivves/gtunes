@@ -111,6 +111,8 @@ background integrations should not implicitly drive playback state.
    - Progress: shuffle toggling now lives in `session::PlaybackSession`,
      including flag changes and playback-order rebuilds from either the active
      queue or visible library count.
+   - Progress: radio activation now lives in `session::PlaybackSession`,
+     including station mode selection, now-playing clearing, and queue reset.
 
 3. [x] Preserve position during direct-play fallback.
    - Capture the current playback position before retrying with a Jellyfin
@@ -170,6 +172,8 @@ background integrations should not implicitly drive playback state.
      replacement, disappeared now-playing clearing, and inactive queue clearing.
    - Progress: `PlaybackSession` tests now cover shuffle toggling with queued
      playback and library-count fallback.
+   - Progress: `PlaybackSession` tests now cover radio activation clearing
+     library playback state while preserving shuffle.
 
 ## Follow-Up Candidates
 

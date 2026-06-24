@@ -5578,9 +5578,7 @@ fn set_active_radio_station_ui(
     station: &RadioStation,
     status_override: Option<&str>,
 ) {
-    ui.playback_session.mode.set_radio(station.id.clone());
-    ui.playback_session.now_playing_key = None;
-    ui.playback_session.clear_queue();
+    ui.playback_session.activate_radio(station.id.clone());
     ui.elapsed_label.set_text("0:00");
     ui.remaining_label.set_text("--:--");
     clear_track_visuals_for_radio(ui);

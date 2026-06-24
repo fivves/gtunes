@@ -60,6 +60,12 @@ impl<T> PlaybackSession<T> {
         self.clear_queue();
     }
 
+    pub(crate) fn activate_radio(&mut self, station_id: String) {
+        self.mode.set_radio(station_id);
+        self.now_playing_key = None;
+        self.clear_queue();
+    }
+
     pub(crate) fn rebuild_order(&mut self, track_count: usize, start_index: usize) {
         self.playback_order = build_playback_order(track_count, start_index, self.shuffle_enabled);
     }
@@ -654,6 +660,27 @@ mod tests {
         session.reset_to_library();
 
         assert!(!session.mode.is_radio());
+        assert_eq!(session.now_playing_key, None);
+        assert!(session.queue_tracks.is_empty());
+        assert_eq!(session.queue_index, None);
+        assert!(session.playback_order.is_empty());
+        assert!(session.shuffle_enabled);
+    }
+
+    #[test]
+    fn playback_session_activate_radio_clears_library_playback_without_touching_shuffle() {
+        let mut session = PlaybackSession {
+            mode: PlaybackMode::Library,
+            now_playing_key: Some("track-1".to_string()),
+            queue_tracks: vec!["track-1", "track-2"],
+            queue_index: Some(1),
+            playback_order: vec![0, 1],
+            shuffle_enabled: true,
+        };
+
+        session.activate_radio("station-1".to_string());
+
+        assert_eq!(session.mode.radio_station_id(), Some("station-1"));
         assert_eq!(session.now_playing_key, None);
         assert!(session.queue_tracks.is_empty());
         assert_eq!(session.queue_index, None);
