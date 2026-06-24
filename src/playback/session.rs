@@ -45,6 +45,58 @@ impl<T> PlaybackSession<T> {
         self.now_playing_key = None;
         self.clear_queue();
     }
+
+    pub(crate) fn rebuild_order(&mut self, track_count: usize, start_index: usize) {
+        self.playback_order = build_playback_order(track_count, start_index, self.shuffle_enabled);
+    }
+
+    pub(crate) fn current_index_or(&self, fallback_index: usize) -> usize {
+        self.queue_index.unwrap_or(fallback_index)
+    }
+
+    pub(crate) fn next_index(&self, current_index: usize) -> Option<usize> {
+        next_playback_index(&self.playback_order, current_index)
+    }
+
+    pub(crate) fn previous_index(&self, current_index: usize) -> Option<usize> {
+        previous_playback_index(&self.playback_order, current_index)
+    }
+
+    pub(crate) fn queued_indices_with_limit(
+        &self,
+        current_index: usize,
+        limit: usize,
+    ) -> Vec<usize> {
+        queued_indices_with_limit(&self.playback_order, current_index, limit)
+    }
+
+    pub(crate) fn upcoming_count(&self, current_index: usize) -> usize {
+        upcoming_track_count(&self.playback_order, current_index)
+    }
+
+    pub(crate) fn move_upcoming_track(
+        &mut self,
+        current_index: usize,
+        from: usize,
+        to_slot: usize,
+        visible_limit: usize,
+    ) -> bool {
+        move_upcoming_track_in_playback_order(
+            &mut self.playback_order,
+            current_index,
+            from,
+            to_slot,
+            visible_limit,
+        )
+    }
+
+    pub(crate) fn queue_track_next(&mut self, current_index: usize, target_index: usize) -> bool {
+        queue_track_next_in_playback_order(&mut self.playback_order, current_index, target_index)
+    }
+
+    pub(crate) fn order_needs_rebuild_for(&self, current_index: usize) -> bool {
+        self.playback_order.is_empty() || !self.playback_order.contains(&current_index)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -443,6 +495,36 @@ mod tests {
         assert_eq!(session.queue_index, None);
         assert!(session.playback_order.is_empty());
         assert!(session.shuffle_enabled);
+    }
+
+    #[test]
+    fn playback_session_rebuilds_and_navigates_order() {
+        let mut session = PlaybackSession::<&str>::default();
+
+        session.rebuild_order(4, 2);
+
+        assert_eq!(session.playback_order, vec![0, 1, 2, 3]);
+        assert_eq!(session.current_index_or(2), 2);
+        assert_eq!(session.next_index(2), Some(3));
+        assert_eq!(session.previous_index(2), Some(1));
+        assert_eq!(session.queued_indices_with_limit(1, 2), vec![2, 3]);
+        assert_eq!(session.upcoming_count(1), 2);
+        assert!(!session.order_needs_rebuild_for(2));
+        assert!(session.order_needs_rebuild_for(99));
+    }
+
+    #[test]
+    fn playback_session_mutates_upcoming_order() {
+        let mut session = PlaybackSession {
+            playback_order: vec![0, 1, 2, 3],
+            ..PlaybackSession::<&str>::default()
+        };
+
+        assert!(session.queue_track_next(1, 3));
+        assert_eq!(session.playback_order, vec![0, 1, 3, 2]);
+
+        assert!(session.move_upcoming_track(1, 1, 0, 50));
+        assert_eq!(session.playback_order, vec![0, 1, 2, 3]);
     }
 
     #[test]

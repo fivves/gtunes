@@ -5740,21 +5740,17 @@ fn rebuild_playback_order(ui: &mut UiState, start_index: usize) {
     } else {
         ui.playback_session.queue_tracks.len()
     };
-    ui.playback_session.playback_order = session::build_playback_order(
-        track_count,
-        start_index,
-        ui.playback_session.shuffle_enabled,
-    );
+    ui.playback_session.rebuild_order(track_count, start_index);
 }
 
 fn next_playback_index(ui: &UiState) -> Option<usize> {
-    let current_index = ui.playback_session.queue_index.unwrap_or(ui.selected_index);
-    session::next_playback_index(&ui.playback_session.playback_order, current_index)
+    let current_index = ui.playback_session.current_index_or(ui.selected_index);
+    ui.playback_session.next_index(current_index)
 }
 
 fn previous_playback_index(ui: &UiState) -> Option<usize> {
-    let current_index = ui.playback_session.queue_index.unwrap_or(ui.selected_index);
-    session::previous_playback_index(&ui.playback_session.playback_order, current_index)
+    let current_index = ui.playback_session.current_index_or(ui.selected_index);
+    ui.playback_session.previous_index(current_index)
 }
 
 fn queued_tracks(ui: &UiState) -> Vec<(usize, UiTrack)> {
@@ -5771,7 +5767,7 @@ fn queued_tracks_with_limit(ui: &UiState, limit: usize) -> Vec<(usize, UiTrack)>
     } else {
         ui.playback_session.queue_tracks.as_slice()
     };
-    let current_index = ui.playback_session.queue_index.unwrap_or(ui.selected_index);
+    let current_index = ui.playback_session.current_index_or(ui.selected_index);
     queued_tracks_from_order_with_limit(
         tracks,
         &ui.playback_session.playback_order,
@@ -5802,16 +5798,15 @@ fn queued_tracks_from_order_with_limit(
 }
 
 fn upcoming_track_count(ui: &UiState) -> usize {
-    let current_index = ui.playback_session.queue_index.unwrap_or(ui.selected_index);
-    session::upcoming_track_count(&ui.playback_session.playback_order, current_index)
+    let current_index = ui.playback_session.current_index_or(ui.selected_index);
+    ui.playback_session.upcoming_count(current_index)
 }
 
 fn move_next_up_track(state: &Rc<RefCell<UiState>>, from: usize, to_slot: usize) -> bool {
     let changed = {
         let mut ui = state.borrow_mut();
-        let current_index = ui.playback_session.queue_index.unwrap_or(ui.selected_index);
-        let changed = session::move_upcoming_track_in_playback_order(
-            &mut ui.playback_session.playback_order,
+        let current_index = ui.playback_session.current_index_or(ui.selected_index);
+        let changed = ui.playback_session.move_upcoming_track(
             current_index,
             from,
             to_slot,
@@ -5843,12 +5838,9 @@ fn queue_track_next_by_key(ui: &mut UiState, target_key: &str, fallback_track: U
 
     let current_index = ui
         .playback_session
-        .queue_index
-        .unwrap_or(ui.selected_index)
+        .current_index_or(ui.selected_index)
         .min(ui.playback_session.queue_tracks.len().saturating_sub(1));
-    if ui.playback_session.playback_order.is_empty()
-        || !ui.playback_session.playback_order.contains(&current_index)
-    {
+    if ui.playback_session.order_needs_rebuild_for(current_index) {
         rebuild_playback_order(ui, current_index);
     }
 
@@ -5864,11 +5856,8 @@ fn queue_track_next_by_key(ui: &mut UiState, target_key: &str, fallback_track: U
         ui.playback_session.queue_tracks.len() - 1
     };
 
-    session::queue_track_next_in_playback_order(
-        &mut ui.playback_session.playback_order,
-        current_index,
-        target_index,
-    )
+    ui.playback_session
+        .queue_track_next(current_index, target_index)
 }
 
 fn finalize_queue_change(state: &Rc<RefCell<UiState>>) {
@@ -6235,7 +6224,7 @@ fn toggle_shuffle(state: &Rc<RefCell<UiState>>) {
     {
         let mut ui = state.borrow_mut();
         ui.playback_session.shuffle_enabled = !ui.playback_session.shuffle_enabled;
-        let playback_index = ui.playback_session.queue_index.unwrap_or(ui.selected_index);
+        let playback_index = ui.playback_session.current_index_or(ui.selected_index);
         rebuild_playback_order(&mut ui, playback_index);
         arm_gapless_next(&mut ui);
         save_playback_snapshot_now(&mut ui);
@@ -6336,7 +6325,7 @@ fn play_previous_track(state: &Rc<RefCell<UiState>>) {
             return;
         }
         previous_playback_index(&ui)
-            .unwrap_or_else(|| ui.playback_session.queue_index.unwrap_or(ui.selected_index))
+            .unwrap_or_else(|| ui.playback_session.current_index_or(ui.selected_index))
     };
     play_track_at_existing_order(state, previous_index);
 }
@@ -6348,7 +6337,7 @@ fn play_next_track(state: &Rc<RefCell<UiState>>) {
             return;
         }
         next_playback_index(&ui)
-            .unwrap_or_else(|| ui.playback_session.queue_index.unwrap_or(ui.selected_index))
+            .unwrap_or_else(|| ui.playback_session.current_index_or(ui.selected_index))
     };
     play_track_at_existing_order(state, next_index);
 }
@@ -8422,7 +8411,7 @@ fn apply_gapless_transition(state: &Rc<RefCell<UiState>>) -> bool {
             .iter()
             .map(|track| track.item_id.clone())
             .collect::<Vec<_>>();
-        let current_index = ui.playback_session.queue_index.unwrap_or(ui.selected_index);
+        let current_index = ui.playback_session.current_index_or(ui.selected_index);
         let transition_index = session::gapless_transition_index(
             &item_ids_by_index,
             &ui.playback_session.playback_order,

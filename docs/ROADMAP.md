@@ -90,6 +90,11 @@ background integrations should not implicitly drive playback state.
    - Progress: queue tracks, current queue index, playback order,
      now-playing key, shuffle state, and playback mode are consolidated under
      `session::PlaybackSession<UiTrack>` instead of separate `UiState` fields.
+   - Progress: playback order rebuilding, current-index fallback,
+     next/previous lookup, upcoming counts, upcoming reordering, and queue-next
+     mutation are now methods on `session::PlaybackSession`; `window.rs`
+     delegates these state transitions instead of manipulating order state
+     directly.
 
 3. [x] Preserve position during direct-play fallback.
    - Capture the current playback position before retrying with a Jellyfin
@@ -133,6 +138,10 @@ background integrations should not implicitly drive playback state.
      to the next ordered item, and missing-match/missing-next behavior.
    - Progress: `PlaybackSession` tests now cover default empty library state,
      queue clearing, and reset-to-library behavior.
+   - Progress: `PlaybackSession` method tests now cover order rebuild,
+     next/previous navigation, queued index limits, upcoming counts,
+     rebuild-needed detection, queue-next mutation, and upcoming reorder
+     mutation.
 
 ## Follow-Up Candidates
 
