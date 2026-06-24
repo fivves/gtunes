@@ -73,11 +73,14 @@ background integrations should not implicitly drive playback state.
      reordering, and queue-next mutation now live in `src/playback/session.rs`
      with focused tests.
 
-3. [ ] Preserve position during direct-play fallback.
+3. [x] Preserve position during direct-play fallback.
    - Capture the current playback position before retrying with a Jellyfin
      transcode stream.
    - Seek the fallback stream back to the captured position when possible.
    - Surface a clear status message if fallback succeeds but seeking fails.
+   - Completed by capturing the current GStreamer position before direct-play
+     fallback, seeking the transcoded stream to that position, and reporting
+     either the restored timestamp or a seek restore failure in playback status.
 
 4. [ ] Keep the playback timer non-destructive.
    - Use the timer for UI position, waveform progress, and persistence updates.
