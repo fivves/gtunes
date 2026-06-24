@@ -378,10 +378,16 @@ fn cached_or_downloaded_artwork_bytes(source_url: &str) -> Result<Vec<u8>, Strin
         .map_err(|error| error.to_string())?;
 
     if !response.status().is_success() {
-        return Err(format!("artwork request returned HTTP {}", response.status()));
+        return Err(format!(
+            "artwork request returned HTTP {}",
+            response.status()
+        ));
     }
 
-    let bytes = response.bytes().map_err(|error| error.to_string())?.to_vec();
+    let bytes = response
+        .bytes()
+        .map_err(|error| error.to_string())?
+        .to_vec();
     std::fs::write(&path, &bytes).map_err(|error| error.to_string())?;
     Ok(bytes)
 }

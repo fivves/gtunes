@@ -1667,8 +1667,6 @@ fn handle_mpris_event(state: &Rc<RefCell<UiState>>, event: MediaControlEvent) {
 }
 
 fn update_mpris_status(ui: &mut UiState) {
-    update_discord_presence(ui);
-
     let Some(mpris) = ui.mpris.as_mut() else {
         return;
     };
@@ -1691,8 +1689,6 @@ fn update_mpris_status(ui: &mut UiState) {
 }
 
 fn update_mpris_metadata(ui: &mut UiState) {
-    update_discord_presence(ui);
-
     if let Some(station) = current_radio_station(ui) {
         let artist = station.mpris_source_label().to_string();
         let title = station.name;
@@ -1747,7 +1743,23 @@ fn update_mpris_metadata(ui: &mut UiState) {
     }
 }
 
-fn update_discord_presence(ui: &UiState) {
+fn sync_external_playback_status(ui: &mut UiState) {
+    sync_discord_presence(ui);
+    update_mpris_status(ui);
+}
+
+fn sync_external_playback_metadata(ui: &mut UiState) {
+    sync_discord_presence(ui);
+    update_mpris_metadata(ui);
+}
+
+fn sync_external_playback(ui: &mut UiState) {
+    sync_discord_presence(ui);
+    update_mpris_metadata(ui);
+    update_mpris_status(ui);
+}
+
+fn sync_discord_presence(ui: &UiState) {
     let Some(discord) = ui.discord_presence.as_ref() else {
         return;
     };
@@ -2416,7 +2428,7 @@ fn apply_first_time_setup_state(state: &Rc<RefCell<UiState>>) {
         ui.waveform_status.set_text("Select a Jellyfin track");
         update_play_button(&ui);
         update_shuffle_button(&ui);
-        update_mpris_status(&mut ui);
+        sync_external_playback_status(&mut ui);
     }
 
     if let Some(entry) = search_entry.as_ref() {
@@ -4844,7 +4856,7 @@ fn restore_persisted_playback(state: &Rc<RefCell<UiState>>) {
         }
         save_playback_snapshot_now(&mut ui);
         update_play_button(&ui);
-        update_mpris_status(&mut ui);
+        sync_external_playback_status(&mut ui);
     }
 
     update_list_indicators(state);
@@ -5531,7 +5543,7 @@ fn resolve_and_play_radio_station(
                         station.source_label()
                     ));
                     update_play_button(&ui);
-                    update_mpris_status(&mut ui);
+                    sync_external_playback_status(&mut ui);
                 }
                 gtk::glib::ControlFlow::Break
             }
@@ -5542,7 +5554,7 @@ fn resolve_and_play_radio_station(
                     ui.playback_status
                         .set_text("Radio resolver stopped unexpectedly");
                     update_play_button(&ui);
-                    update_mpris_status(&mut ui);
+                    sync_external_playback_status(&mut ui);
                 }
                 gtk::glib::ControlFlow::Break
             }
@@ -5607,8 +5619,7 @@ fn set_active_radio_station_ui(
         ui.playback_status.set_text(status);
     }
     update_play_button(ui);
-    update_mpris_metadata(ui);
-    update_mpris_status(ui);
+    sync_external_playback(ui);
 }
 
 fn resume_radio_station(state: &Rc<RefCell<UiState>>) -> bool {
@@ -6391,7 +6402,7 @@ fn pause_playback(state: &Rc<RefCell<UiState>>) {
                 .set_text(&format!("Pause failed: {error}")),
         }
         update_play_button(&ui);
-        update_mpris_status(&mut ui);
+        sync_external_playback_status(&mut ui);
     }
 }
 
@@ -6407,7 +6418,7 @@ fn resume_playback(state: &Rc<RefCell<UiState>>) {
                     ui.current_radio_station_id = None;
                     ui.playback_status.set_text("Radio station is unavailable");
                     update_play_button(&ui);
-                    update_mpris_status(&mut ui);
+                    sync_external_playback_status(&mut ui);
                 }
                 return;
             }
@@ -6422,7 +6433,7 @@ fn resume_playback(state: &Rc<RefCell<UiState>>) {
                     .set_text(&format!("Resume failed: {error}")),
             }
             update_play_button(&ui);
-            update_mpris_status(&mut ui);
+            sync_external_playback_status(&mut ui);
         }
         Some(PlaybackState::Playing) => {}
         _ => {
@@ -6599,15 +6610,14 @@ fn play_selected_track(state: &Rc<RefCell<UiState>>) {
             update_now_playing_labels(&ui);
             ui.playback_status
                 .set_text(&format!("Playing | {}", track.quality));
-            update_mpris_metadata(&mut ui);
-            update_mpris_status(&mut ui);
+            sync_external_playback(&mut ui);
             refresh_now_playing = true;
         }
         Err(error) => {
             ui.now_playing_key = None;
             ui.playback_status
                 .set_text(&format!("Playback failed: {error}"));
-            update_mpris_status(&mut ui);
+            sync_external_playback_status(&mut ui);
         }
     }
     update_play_button(&ui);
@@ -6666,7 +6676,7 @@ fn stop_playback(ui: &mut UiState) {
         ui.playback_status
             .set_text(&format!("Stop failed: {error}"));
     }
-    update_mpris_status(ui);
+    sync_external_playback_status(ui);
 }
 
 fn load_selected_cover_art(state: &Rc<RefCell<UiState>>) {
@@ -6707,7 +6717,7 @@ fn load_selected_cover_art(state: &Rc<RefCell<UiState>>) {
 
                 if displayed_url.as_deref() == Some(loaded_url.as_str()) {
                     let mut ui = state.borrow_mut();
-                    update_mpris_metadata(&mut ui);
+                    sync_external_playback_metadata(&mut ui);
                     let file = gtk::gio::File::for_path(path);
                     match gtk::gdk::Texture::from_file(&file) {
                         Ok(texture) => cover.set_paintable(Some(&texture)),
@@ -8476,7 +8486,7 @@ fn handle_playback_error(
                     ui.playback_status
                         .set_text(&format!("Playing transcoded stream | {quality}"));
                     update_play_button(&ui);
-                    update_mpris_status(&mut ui);
+                    sync_external_playback_status(&mut ui);
                     drop(ui);
                     update_list_indicators(state);
                     return;
@@ -8502,8 +8512,7 @@ fn handle_playback_error(
         arm_gapless_next(&mut ui);
         save_playback_snapshot_now(&mut ui);
         update_play_button(&ui);
-        update_mpris_metadata(&mut ui);
-        update_mpris_status(&mut ui);
+        sync_external_playback(&mut ui);
     }
     update_list_indicators(state);
 }
@@ -8555,8 +8564,7 @@ fn apply_gapless_transition(state: &Rc<RefCell<UiState>>) -> bool {
         arm_gapless_next(&mut ui);
         save_playback_snapshot_now(&mut ui);
         update_play_button(&ui);
-        update_mpris_metadata(&mut ui);
-        update_mpris_status(&mut ui);
+        sync_external_playback(&mut ui);
     }
 
     let selected_index = state.borrow().selected_index;
@@ -8590,7 +8598,7 @@ fn advance_after_track_end(state: &Rc<RefCell<UiState>>) {
                 ui.playback_status.set_text("Up Next finished");
             }
             update_play_button(&ui);
-            update_mpris_status(&mut ui);
+            sync_external_playback_status(&mut ui);
             clear_playback_snapshot();
         }
         update_list_indicators(state);

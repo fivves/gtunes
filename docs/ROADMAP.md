@@ -55,31 +55,34 @@ background integrations should not implicitly drive playback state.
 
 ## Near-Term Priorities
 
-1. Decouple Discord from MPRIS updates.
+1. [x] Decouple Discord from MPRIS updates.
    - Stop updating Discord Rich Presence from `update_mpris_status` and
      `update_mpris_metadata`.
    - Introduce an explicit presence sync path for external integrations.
    - Keep Discord and MPRIS failures isolated from core playback behavior.
+   - Completed by keeping MPRIS updates inside `update_mpris_status` and
+     `update_mpris_metadata`, with Discord handled through explicit external
+     playback sync helpers.
 
-2. Extract playback session state out of `src/ui/window.rs`.
+2. [ ] Extract playback session state out of `src/ui/window.rs`.
    - Move queue, current item, stream kind, radio mode, and fallback state into a
      dedicated playback/session module.
    - Keep the UI responsible for rendering state, not owning playback truth.
    - Add focused tests for session transitions once the state is isolated.
 
-3. Preserve position during direct-play fallback.
+3. [ ] Preserve position during direct-play fallback.
    - Capture the current playback position before retrying with a Jellyfin
      transcode stream.
    - Seek the fallback stream back to the captured position when possible.
    - Surface a clear status message if fallback succeeds but seeking fails.
 
-4. Keep the playback timer non-destructive.
+4. [ ] Keep the playback timer non-destructive.
    - Use the timer for UI position, waveform progress, and persistence updates.
    - Do not make restart, fallback, or stop decisions from position polling.
    - Continue relying on GStreamer bus errors and end-of-stream events for
      automatic playback transitions.
 
-5. Add playback-session tests.
+5. [ ] Add playback-session tests.
    - Cover queue advancement, shuffle ordering, gapless transition bookkeeping,
      radio isolation, fallback state, and persisted restore behavior.
    - Prefer pure state tests that do not require GTK or a live GStreamer
