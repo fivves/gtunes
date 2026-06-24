@@ -133,6 +133,34 @@ impl CacheDatabase {
         }
     }
 
+    pub fn save_discord_artwork_url(
+        &self,
+        artwork_hash: &str,
+        url: &str,
+    ) -> Result<(), CacheError> {
+        self.set_setting(&discord_artwork_setting_key(artwork_hash), url)
+    }
+
+    pub fn load_discord_artwork_urls(&self) -> Result<Vec<(String, String)>, CacheError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT key, value FROM app_settings WHERE key LIKE 'discord.artwork.%'")?;
+        let rows = statement.query_map([], |row| {
+            let key: String = row.get(0)?;
+            let value: String = row.get(1)?;
+            Ok((key, value))
+        })?;
+
+        let mut urls = Vec::new();
+        for row in rows {
+            let (key, value) = row?;
+            if let Some(hash) = key.strip_prefix("discord.artwork.") {
+                urls.push((hash.to_string(), value));
+            }
+        }
+        Ok(urls)
+    }
+
     pub fn save_waveform_cache(
         &self,
         item_id: &str,
@@ -173,6 +201,10 @@ impl CacheDatabase {
             Ok(None)
         }
     }
+}
+
+fn discord_artwork_setting_key(artwork_hash: &str) -> String {
+    format!("discord.artwork.{artwork_hash}")
 }
 
 #[cfg(test)]
@@ -226,6 +258,23 @@ mod tests {
         assert_eq!(loaded.user_id, session.user_id);
         assert_eq!(loaded.username, session.username);
         assert_eq!(loaded.access_token, session.access_token);
+    }
+
+    #[test]
+    fn discord_artwork_urls_round_trip_through_settings() {
+        let database = CacheDatabase::open_memory().expect("in-memory cache opens");
+
+        database
+            .save_discord_artwork_url("abc123", "https://img.fvvs.me/abc123.jpg")
+            .expect("save discord artwork URL");
+
+        assert_eq!(
+            database.load_discord_artwork_urls().expect("load URLs"),
+            vec![(
+                "abc123".to_string(),
+                "https://img.fvvs.me/abc123.jpg".to_string()
+            )]
+        );
     }
 }
 

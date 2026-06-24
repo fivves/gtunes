@@ -4,10 +4,8 @@ use gtk::{Align, Orientation};
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, PlatformConfig};
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -16,6 +14,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::cache::{CacheDatabase, JellyfinSession};
 use crate::config;
+use crate::discord::{
+    DiscordPresence, PresenceActivity, PresencePlaybackState, artwork_cache_path,
+};
 use crate::jellyfin::{
     JellyfinClient, JellyfinClientError, JellyfinItemSummary, JellyfinPlaylist, JellyfinTrack,
     stream_http_headers_for_token,
@@ -231,6 +232,7 @@ struct UiState {
     waveform: Rc<RefCell<WaveformVisual>>,
     playback: Option<PlaybackEngine>,
     mpris: Option<MediaControls>,
+    discord_presence: Option<DiscordPresence>,
 }
 
 #[derive(Debug)]
@@ -727,6 +729,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         })),
         playback: PlaybackEngine::new().ok(),
         mpris: None,
+        discord_presence: DiscordPresence::from_env(),
     }));
 
     setup_mpris(state.clone());
@@ -1664,6 +1667,8 @@ fn handle_mpris_event(state: &Rc<RefCell<UiState>>, event: MediaControlEvent) {
 }
 
 fn update_mpris_status(ui: &mut UiState) {
+    update_discord_presence(ui);
+
     let Some(mpris) = ui.mpris.as_mut() else {
         return;
     };
@@ -1686,6 +1691,8 @@ fn update_mpris_status(ui: &mut UiState) {
 }
 
 fn update_mpris_metadata(ui: &mut UiState) {
+    update_discord_presence(ui);
+
     if let Some(station) = current_radio_station(ui) {
         let artist = station.mpris_source_label().to_string();
         let title = station.name;
@@ -1738,6 +1745,55 @@ fn update_mpris_metadata(ui: &mut UiState) {
     if let Err(error) = mpris.set_metadata(metadata) {
         tracing::warn!(%error, "failed to update MPRIS metadata");
     }
+}
+
+fn update_discord_presence(ui: &UiState) {
+    let Some(discord) = ui.discord_presence.as_ref() else {
+        return;
+    };
+
+    let playback_state = match ui.playback.as_ref().map(PlaybackEngine::state) {
+        Some(PlaybackState::Playing) => PresencePlaybackState::Playing,
+        Some(PlaybackState::Paused) => PresencePlaybackState::Paused,
+        _ => {
+            discord.clear_activity();
+            return;
+        }
+    };
+
+    if let Some(station) = current_radio_station(ui) {
+        let title = station.name.clone();
+        let artist = station.source_label().to_string();
+        discord.set_activity(PresenceActivity {
+            title,
+            artist,
+            album: Some("Radio".to_string()),
+            artwork_source_url: None,
+            playback_state,
+            position: None,
+            duration: None,
+        });
+        return;
+    }
+
+    let Some(track) = current_display_track(ui) else {
+        discord.clear_activity();
+        return;
+    };
+
+    discord.set_activity(PresenceActivity {
+        title: track.title.clone(),
+        artist: track.artist.clone(),
+        album: Some(track.album.clone()),
+        artwork_source_url: track
+            .thumbnail_artwork_url
+            .as_deref()
+            .or(track.artwork_url.as_deref())
+            .map(str::to_string),
+        playback_state,
+        position: ui.playback.as_ref().and_then(PlaybackEngine::position),
+        duration: ui.playback.as_ref().and_then(PlaybackEngine::duration),
+    });
 }
 
 fn build_player_bar(state: Rc<RefCell<UiState>>) -> gtk::Box {
@@ -6765,12 +6821,6 @@ fn fetch_cached_image_file(url: &str) -> Result<PathBuf, ImageFetchError> {
     } else {
         fetch_image_file(url)
     }
-}
-
-fn artwork_cache_path(url: &str) -> PathBuf {
-    let mut hasher = DefaultHasher::new();
-    url.hash(&mut hasher);
-    std::env::temp_dir().join(format!("gtunes-artwork-{:x}", hasher.finish()))
 }
 
 fn connect_and_fetch(
