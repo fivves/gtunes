@@ -172,13 +172,8 @@ struct UiState {
     sort_column: SortColumn,
     sort_ascending: bool,
     keep_playing_while_closed: bool,
-    shuffle_enabled: bool,
-    now_playing_key: Option<String>,
-    playback_mode: session::PlaybackMode,
+    playback_session: session::PlaybackSession<UiTrack>,
     track_indicators: Vec<(String, gtk::Image)>,
-    playback_tracks: Vec<UiTrack>,
-    playback_index: Option<usize>,
-    playback_order: Vec<usize>,
     last_playback_snapshot_at: Option<Instant>,
     library_stack: Option<gtk::Stack>,
     album_grid: Option<gtk::FlowBox>,
@@ -655,13 +650,8 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         sort_column: view_settings.sort_column,
         sort_ascending: view_settings.sort_ascending,
         keep_playing_while_closed,
-        shuffle_enabled: false,
-        now_playing_key: None,
-        playback_mode: session::PlaybackMode::default(),
+        playback_session: session::PlaybackSession::default(),
         track_indicators: Vec::new(),
-        playback_tracks: Vec::new(),
-        playback_index: None,
-        playback_order: Vec::new(),
         last_playback_snapshot_at: None,
         library_stack: None,
         album_grid: None,
@@ -1189,7 +1179,7 @@ fn select_track_for_navigation(state: &Rc<RefCell<UiState>>, index: usize) {
         }
         ui.selected_index = index.min(ui.tracks.len() - 1);
         let selected_index = ui.selected_index;
-        if ui.playback_tracks.is_empty() {
+        if ui.playback_session.queue_tracks.is_empty() {
             rebuild_playback_order(&mut ui, selected_index);
         }
         update_now_playing_labels(&ui);
@@ -1605,10 +1595,10 @@ fn handle_mpris_event(state: &Rc<RefCell<UiState>>, event: MediaControlEvent) {
         MediaControlEvent::Play => resume_playback(state),
         MediaControlEvent::Pause => pause_playback(state),
         MediaControlEvent::Toggle => toggle_play_pause(state),
-        MediaControlEvent::Next if !state.borrow().playback_mode.is_radio() => {
+        MediaControlEvent::Next if !state.borrow().playback_session.mode.is_radio() => {
             play_next_track(state);
         }
-        MediaControlEvent::Previous if !state.borrow().playback_mode.is_radio() => {
+        MediaControlEvent::Previous if !state.borrow().playback_session.mode.is_radio() => {
             play_previous_track(state);
         }
         MediaControlEvent::Next | MediaControlEvent::Previous => {}
@@ -1863,7 +1853,7 @@ fn build_player_bar(state: Rc<RefCell<UiState>>) -> gtk::Box {
         let state_click = state.clone();
         let click = gtk::GestureClick::new();
         click.connect_pressed(move |_, _, _, _| {
-            if state_click.borrow().playback_mode.is_radio() {
+            if state_click.borrow().playback_session.mode.is_radio() {
                 set_library_page(&state_click, LibraryPage::Radio);
             } else {
                 scroll_to_now_playing(&state_click);
@@ -2391,13 +2381,9 @@ fn apply_first_time_setup_state(state: &Rc<RefCell<UiState>>) {
         ui.jellyfin_connected = false;
         ui.sort_column = LibraryViewSettings::default().sort_column;
         ui.sort_ascending = LibraryViewSettings::default().sort_ascending;
-        ui.shuffle_enabled = false;
-        ui.now_playing_key = None;
-        ui.playback_mode.set_library();
+        ui.playback_session.shuffle_enabled = false;
+        ui.playback_session.reset_to_library();
         ui.track_indicators.clear();
-        ui.playback_tracks.clear();
-        ui.playback_index = None;
-        ui.playback_order.clear();
         {
             let mut waveform = ui.waveform.borrow_mut();
             waveform.peaks.clear();
@@ -4157,7 +4143,8 @@ fn track_column_view(column: TrackColumn, state: Rc<RefCell<UiState>>) -> gtk::C
                 return;
             };
             let key = track_key(&track);
-            let is_now_playing = ui.now_playing_key.as_deref() == Some(key.as_str());
+            let is_now_playing =
+                ui.playback_session.now_playing_key.as_deref() == Some(key.as_str());
             (track, is_now_playing)
         };
 
@@ -4362,7 +4349,7 @@ fn refresh_track_model(state: &Rc<RefCell<UiState>>) {
 
 fn update_list_indicators(state: &Rc<RefCell<UiState>>) {
     let ui = state.borrow();
-    let now_playing_key = ui.now_playing_key.as_deref();
+    let now_playing_key = ui.playback_session.now_playing_key.as_deref();
 
     for (track_key_value, indicator) in &ui.track_indicators {
         let is_playing = now_playing_key == Some(track_key_value.as_str());
@@ -4464,12 +4451,12 @@ fn set_keep_playing_while_closed(state: &Rc<RefCell<UiState>>, enabled: bool) {
 }
 
 fn playback_snapshot(ui: &UiState) -> Option<session::PersistedPlaybackState> {
-    if ui.playback_mode.is_radio() {
+    if ui.playback_session.mode.is_radio() {
         return None;
     }
 
-    let playback_index = ui.playback_index?;
-    let current_track = ui.playback_tracks.get(playback_index)?;
+    let playback_index = ui.playback_session.queue_index?;
+    let current_track = ui.playback_session.queue_tracks.get(playback_index)?;
     let current_item_id = current_track.item_id.clone()?;
     if current_item_id.is_empty() {
         return None;
@@ -4482,7 +4469,8 @@ fn playback_snapshot(ui: &UiState) -> Option<session::PersistedPlaybackState> {
         .map(|position| position.as_secs())
         .unwrap_or(0);
     let item_ids_by_index = ui
-        .playback_tracks
+        .playback_session
+        .queue_tracks
         .iter()
         .map(|track| track.item_id.clone())
         .collect::<Vec<_>>();
@@ -4490,9 +4478,9 @@ fn playback_snapshot(ui: &UiState) -> Option<session::PersistedPlaybackState> {
     session::playback_snapshot(
         current_item_id,
         &item_ids_by_index,
-        &ui.playback_order,
+        &ui.playback_session.playback_order,
         position_secs,
-        ui.shuffle_enabled,
+        ui.playback_session.shuffle_enabled,
     )
 }
 
@@ -4772,7 +4760,7 @@ fn show_album_tracks(state: &Rc<RefCell<UiState>>, album: &AlbumSummary) {
 }
 
 fn restore_persisted_playback(state: &Rc<RefCell<UiState>>) {
-    if state.borrow().now_playing_key.is_some() {
+    if state.borrow().playback_session.now_playing_key.is_some() {
         return;
     }
 
@@ -4793,13 +4781,17 @@ fn restore_persisted_playback(state: &Rc<RefCell<UiState>>) {
             .and_then(|key| ui.tracks.iter().position(|track| track_key(track) == key))
             .unwrap_or(ui.selected_index);
 
-        ui.shuffle_enabled = snapshot.shuffle_enabled;
-        ui.playback_tracks = playback_tracks;
-        ui.playback_index = Some(playback_index);
-        ui.playback_order = playback_order;
+        ui.playback_session.shuffle_enabled = snapshot.shuffle_enabled;
+        ui.playback_session.queue_tracks = playback_tracks;
+        ui.playback_session.queue_index = Some(playback_index);
+        ui.playback_session.playback_order = playback_order;
         ui.selected_index = selected_index.min(ui.tracks.len().saturating_sub(1));
-        ui.now_playing_key = ui.playback_tracks.get(playback_index).map(track_key);
-        ui.playback_mode.set_library();
+        ui.playback_session.now_playing_key = ui
+            .playback_session
+            .queue_tracks
+            .get(playback_index)
+            .map(track_key);
+        ui.playback_session.mode.set_library();
         update_shuffle_button(&ui);
         update_now_playing_labels(&ui);
         update_play_button(&ui);
@@ -5000,7 +4992,7 @@ fn return_to_collection_grid(state: &Rc<RefCell<UiState>>) {
 fn navigate_to_now_playing_artist(state: &Rc<RefCell<UiState>>) {
     let artist = {
         let ui = state.borrow();
-        if ui.playback_mode.is_radio() {
+        if ui.playback_session.mode.is_radio() {
             return;
         }
         let Some(track) = current_display_track(&ui) else {
@@ -5022,7 +5014,7 @@ fn navigate_to_now_playing_artist(state: &Rc<RefCell<UiState>>) {
 fn navigate_to_now_playing_album(state: &Rc<RefCell<UiState>>) {
     let album = {
         let ui = state.borrow();
-        if ui.playback_mode.is_radio() {
+        if ui.playback_session.mode.is_radio() {
             return;
         }
         let Some(track) = current_display_track(&ui) else {
@@ -5238,7 +5230,7 @@ fn save_radio_stations(stations: &[RadioStation]) {
 }
 
 fn current_radio_station(ui: &UiState) -> Option<RadioStation> {
-    let station_id = ui.playback_mode.radio_station_id()?;
+    let station_id = ui.playback_session.mode.radio_station_id()?;
     radio_stations_for_display_from(&ui.radio_stations)
         .into_iter()
         .find(|station| station.id == station_id)
@@ -5304,7 +5296,8 @@ fn radio_station_card(state: Rc<RefCell<UiState>>, station: RadioStation) -> gtk
     card.set_vexpand(false);
     card.set_tooltip_text(Some(&station.url));
     card.set_cursor_from_name(Some("pointer"));
-    let is_current = state.borrow().playback_mode.radio_station_id() == Some(station.id.as_str());
+    let is_current =
+        state.borrow().playback_session.mode.radio_station_id() == Some(station.id.as_str());
     if is_current {
         card.add_css_class("radio-station-card-playing");
     }
@@ -5371,7 +5364,8 @@ fn radio_station_card(state: Rc<RefCell<UiState>>, station: RadioStation) -> gtk
         let state = state.clone();
         remove.connect_clicked(move |_| {
             let mut ui = state.borrow_mut();
-            let was_current = ui.playback_mode.radio_station_id() == Some(station_id.as_str());
+            let was_current =
+                ui.playback_session.mode.radio_station_id() == Some(station_id.as_str());
             ui.radio_stations
                 .retain(|candidate| candidate.id != station_id);
             if was_current {
@@ -5506,8 +5500,8 @@ fn resolve_and_play_radio_station(
     gtk::glib::timeout_add_local(Duration::from_millis(100), move || {
         match receiver.try_recv() {
             Ok(Ok(stream_url)) => {
-                let still_selected =
-                    state.borrow().playback_mode.radio_station_id() == Some(station_id.as_str());
+                let still_selected = state.borrow().playback_session.mode.radio_station_id()
+                    == Some(station_id.as_str());
                 if still_selected {
                     play_resolved_radio_station(&state, &station, stream_url);
                 }
@@ -5515,7 +5509,7 @@ fn resolve_and_play_radio_station(
             }
             Ok(Err(error)) => {
                 let mut ui = state.borrow_mut();
-                if ui.playback_mode.radio_station_id() == Some(station_id.as_str()) {
+                if ui.playback_session.mode.radio_station_id() == Some(station_id.as_str()) {
                     ui.playback_status.set_text(&format!(
                         "{} resolver failed: {error}",
                         station.source_label()
@@ -5528,7 +5522,7 @@ fn resolve_and_play_radio_station(
             Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
             Err(mpsc::TryRecvError::Disconnected) => {
                 let mut ui = state.borrow_mut();
-                if ui.playback_mode.radio_station_id() == Some(station_id.as_str()) {
+                if ui.playback_session.mode.radio_station_id() == Some(station_id.as_str()) {
                     ui.playback_status
                         .set_text("Radio resolver stopped unexpectedly");
                     update_play_button(&ui);
@@ -5584,11 +5578,9 @@ fn set_active_radio_station_ui(
     station: &RadioStation,
     status_override: Option<&str>,
 ) {
-    ui.playback_mode.set_radio(station.id.clone());
-    ui.now_playing_key = None;
-    ui.playback_tracks.clear();
-    ui.playback_index = None;
-    ui.playback_order.clear();
+    ui.playback_session.mode.set_radio(station.id.clone());
+    ui.playback_session.now_playing_key = None;
+    ui.playback_session.clear_queue();
     ui.elapsed_label.set_text("0:00");
     ui.remaining_label.set_text("--:--");
     clear_track_visuals_for_radio(ui);
@@ -5683,7 +5675,7 @@ fn apply_track_filter(ui: &mut UiState, selected_key: Option<&str>) {
         &mut ui.selected_index,
     );
     ui.track_filter_signature = ui.current_track_filter_signature();
-    if ui.playback_tracks.is_empty() {
+    if ui.playback_session.queue_tracks.is_empty() {
         let selected_index = ui.selected_index;
         rebuild_playback_order(ui, selected_index);
     }
@@ -5743,22 +5735,26 @@ fn update_page_summary(ui: &UiState) {
 }
 
 fn rebuild_playback_order(ui: &mut UiState, start_index: usize) {
-    let track_count = if ui.playback_tracks.is_empty() {
+    let track_count = if ui.playback_session.queue_tracks.is_empty() {
         ui.tracks.len()
     } else {
-        ui.playback_tracks.len()
+        ui.playback_session.queue_tracks.len()
     };
-    ui.playback_order = session::build_playback_order(track_count, start_index, ui.shuffle_enabled);
+    ui.playback_session.playback_order = session::build_playback_order(
+        track_count,
+        start_index,
+        ui.playback_session.shuffle_enabled,
+    );
 }
 
 fn next_playback_index(ui: &UiState) -> Option<usize> {
-    let current_index = ui.playback_index.unwrap_or(ui.selected_index);
-    session::next_playback_index(&ui.playback_order, current_index)
+    let current_index = ui.playback_session.queue_index.unwrap_or(ui.selected_index);
+    session::next_playback_index(&ui.playback_session.playback_order, current_index)
 }
 
 fn previous_playback_index(ui: &UiState) -> Option<usize> {
-    let current_index = ui.playback_index.unwrap_or(ui.selected_index);
-    session::previous_playback_index(&ui.playback_order, current_index)
+    let current_index = ui.playback_session.queue_index.unwrap_or(ui.selected_index);
+    session::previous_playback_index(&ui.playback_session.playback_order, current_index)
 }
 
 fn queued_tracks(ui: &UiState) -> Vec<(usize, UiTrack)> {
@@ -5770,13 +5766,18 @@ fn next_up_tracks(ui: &UiState) -> Vec<(usize, UiTrack)> {
 }
 
 fn queued_tracks_with_limit(ui: &UiState, limit: usize) -> Vec<(usize, UiTrack)> {
-    let tracks = if ui.playback_tracks.is_empty() {
+    let tracks = if ui.playback_session.queue_tracks.is_empty() {
         ui.tracks.as_slice()
     } else {
-        ui.playback_tracks.as_slice()
+        ui.playback_session.queue_tracks.as_slice()
     };
-    let current_index = ui.playback_index.unwrap_or(ui.selected_index);
-    queued_tracks_from_order_with_limit(tracks, &ui.playback_order, current_index, limit)
+    let current_index = ui.playback_session.queue_index.unwrap_or(ui.selected_index);
+    queued_tracks_from_order_with_limit(
+        tracks,
+        &ui.playback_session.playback_order,
+        current_index,
+        limit,
+    )
 }
 
 #[cfg(test)]
@@ -5801,16 +5802,16 @@ fn queued_tracks_from_order_with_limit(
 }
 
 fn upcoming_track_count(ui: &UiState) -> usize {
-    let current_index = ui.playback_index.unwrap_or(ui.selected_index);
-    session::upcoming_track_count(&ui.playback_order, current_index)
+    let current_index = ui.playback_session.queue_index.unwrap_or(ui.selected_index);
+    session::upcoming_track_count(&ui.playback_session.playback_order, current_index)
 }
 
 fn move_next_up_track(state: &Rc<RefCell<UiState>>, from: usize, to_slot: usize) -> bool {
     let changed = {
         let mut ui = state.borrow_mut();
-        let current_index = ui.playback_index.unwrap_or(ui.selected_index);
+        let current_index = ui.playback_session.queue_index.unwrap_or(ui.selected_index);
         let changed = session::move_upcoming_track_in_playback_order(
-            &mut ui.playback_order,
+            &mut ui.playback_session.playback_order,
             current_index,
             from,
             to_slot,
@@ -5829,37 +5830,45 @@ fn move_next_up_track(state: &Rc<RefCell<UiState>>, from: usize, to_slot: usize)
 }
 
 fn queue_track_next_by_key(ui: &mut UiState, target_key: &str, fallback_track: UiTrack) -> bool {
-    if ui.playback_mode.is_radio() {
+    if ui.playback_session.mode.is_radio() {
         return false;
     }
 
-    if ui.playback_tracks.is_empty() {
-        ui.playback_tracks = ui.tracks.clone();
+    if ui.playback_session.queue_tracks.is_empty() {
+        ui.playback_session.queue_tracks = ui.tracks.clone();
     }
-    if ui.playback_tracks.is_empty() {
+    if ui.playback_session.queue_tracks.is_empty() {
         return false;
     }
 
     let current_index = ui
-        .playback_index
+        .playback_session
+        .queue_index
         .unwrap_or(ui.selected_index)
-        .min(ui.playback_tracks.len().saturating_sub(1));
-    if ui.playback_order.is_empty() || !ui.playback_order.contains(&current_index) {
+        .min(ui.playback_session.queue_tracks.len().saturating_sub(1));
+    if ui.playback_session.playback_order.is_empty()
+        || !ui.playback_session.playback_order.contains(&current_index)
+    {
         rebuild_playback_order(ui, current_index);
     }
 
     let target_index = if let Some(index) = ui
-        .playback_tracks
+        .playback_session
+        .queue_tracks
         .iter()
         .position(|track| track_key(track) == target_key)
     {
         index
     } else {
-        ui.playback_tracks.push(fallback_track);
-        ui.playback_tracks.len() - 1
+        ui.playback_session.queue_tracks.push(fallback_track);
+        ui.playback_session.queue_tracks.len() - 1
     };
 
-    session::queue_track_next_in_playback_order(&mut ui.playback_order, current_index, target_index)
+    session::queue_track_next_in_playback_order(
+        &mut ui.playback_session.playback_order,
+        current_index,
+        target_index,
+    )
 }
 
 fn finalize_queue_change(state: &Rc<RefCell<UiState>>) {
@@ -5890,10 +5899,13 @@ fn queue_visible_track_next(state: &Rc<RefCell<UiState>>, visible_index: usize) 
 fn queue_existing_track_next(state: &Rc<RefCell<UiState>>, playback_index: usize) -> bool {
     let changed = {
         let mut ui = state.borrow_mut();
-        let track = if ui.playback_tracks.is_empty() {
+        let track = if ui.playback_session.queue_tracks.is_empty() {
             ui.tracks.get(playback_index).cloned()
         } else {
-            ui.playback_tracks.get(playback_index).cloned()
+            ui.playback_session
+                .queue_tracks
+                .get(playback_index)
+                .cloned()
         };
         let Some(track) = track else {
             return false;
@@ -5966,11 +5978,12 @@ fn preferred_refresh_track_key(
 }
 
 fn current_display_track(state: &UiState) -> Option<&UiTrack> {
-    if state.playback_mode.is_radio() {
+    if state.playback_session.mode.is_radio() {
         return None;
     }
 
     state
+        .playback_session
         .now_playing_key
         .as_deref()
         .and_then(|key| find_track_by_key(state, key))
@@ -6038,7 +6051,7 @@ fn apply_connection_payload(state: &Rc<RefCell<UiState>>, payload: ConnectionPay
     let (now_playing_key, selected_key) = {
         let ui = state.borrow();
         (
-            ui.now_playing_key.clone(),
+            ui.playback_session.now_playing_key.clone(),
             ui.tracks.get(ui.selected_index).map(track_key),
         )
     };
@@ -6063,13 +6076,16 @@ fn apply_connection_payload(state: &Rc<RefCell<UiState>>, payload: ConnectionPay
             now_playing_key.as_deref(),
             selected_key.as_deref(),
         );
-        ui.now_playing_key = now_playing_key
+        ui.playback_session.now_playing_key = now_playing_key
             .as_deref()
             .filter(|key| ui.all_tracks.iter().any(|track| track_key(track) == *key))
             .map(|key| key.to_string());
-        if ui.now_playing_key.is_some() && !ui.playback_tracks.is_empty() {
-            ui.playback_tracks = ui
-                .playback_tracks
+        if ui.playback_session.now_playing_key.is_some()
+            && !ui.playback_session.queue_tracks.is_empty()
+        {
+            ui.playback_session.queue_tracks = ui
+                .playback_session
+                .queue_tracks
                 .iter()
                 .map(|track| {
                     let key = track_key(track);
@@ -6080,10 +6096,8 @@ fn apply_connection_payload(state: &Rc<RefCell<UiState>>, payload: ConnectionPay
                         .unwrap_or_else(|| track.clone())
                 })
                 .collect();
-        } else if ui.now_playing_key.is_none() {
-            ui.playback_tracks.clear();
-            ui.playback_index = None;
-            ui.playback_order.clear();
+        } else if ui.playback_session.now_playing_key.is_none() {
+            ui.playback_session.clear_queue();
         }
         apply_track_filter(&mut ui, selected_key.as_deref());
         update_now_playing_labels(&ui);
@@ -6204,7 +6218,7 @@ fn update_shuffle_button(state: &UiState) {
         return;
     };
 
-    if state.shuffle_enabled {
+    if state.playback_session.shuffle_enabled {
         button.add_css_class("suggested-action");
         button.add_css_class("shuffle-on");
         button.remove_css_class("shuffle-off");
@@ -6220,8 +6234,8 @@ fn update_shuffle_button(state: &UiState) {
 fn toggle_shuffle(state: &Rc<RefCell<UiState>>) {
     {
         let mut ui = state.borrow_mut();
-        ui.shuffle_enabled = !ui.shuffle_enabled;
-        let playback_index = ui.playback_index.unwrap_or(ui.selected_index);
+        ui.playback_session.shuffle_enabled = !ui.playback_session.shuffle_enabled;
+        let playback_index = ui.playback_session.queue_index.unwrap_or(ui.selected_index);
         rebuild_playback_order(&mut ui, playback_index);
         arm_gapless_next(&mut ui);
         save_playback_snapshot_now(&mut ui);
@@ -6232,7 +6246,7 @@ fn toggle_shuffle(state: &Rc<RefCell<UiState>>) {
 
 fn pause_playback(state: &Rc<RefCell<UiState>>) {
     let mut ui = state.borrow_mut();
-    let radio_is_active = ui.playback_mode.is_radio();
+    let radio_is_active = ui.playback_session.mode.is_radio();
 
     if let Some(playback) = ui.playback.as_mut() {
         let result = if radio_is_active {
@@ -6259,11 +6273,11 @@ fn resume_playback(state: &Rc<RefCell<UiState>>) {
 
     match ui.playback.as_ref().map(PlaybackEngine::state).cloned() {
         Some(PlaybackState::Paused) => {
-            if ui.playback_mode.is_radio() {
+            if ui.playback_session.mode.is_radio() {
                 drop(ui);
                 if !resume_radio_station(state) {
                     let mut ui = state.borrow_mut();
-                    ui.playback_mode.set_library();
+                    ui.playback_session.mode.set_library();
                     ui.playback_status.set_text("Radio station is unavailable");
                     update_play_button(&ui);
                     sync_external_playback_status(&mut ui);
@@ -6318,11 +6332,11 @@ fn play_track_at_selected_index(state: &Rc<RefCell<UiState>>) {
 fn play_previous_track(state: &Rc<RefCell<UiState>>) {
     let previous_index = {
         let ui = state.borrow();
-        if ui.playback_mode.is_radio() {
+        if ui.playback_session.mode.is_radio() {
             return;
         }
         previous_playback_index(&ui)
-            .unwrap_or_else(|| ui.playback_index.unwrap_or(ui.selected_index))
+            .unwrap_or_else(|| ui.playback_session.queue_index.unwrap_or(ui.selected_index))
     };
     play_track_at_existing_order(state, previous_index);
 }
@@ -6330,10 +6344,11 @@ fn play_previous_track(state: &Rc<RefCell<UiState>>) {
 fn play_next_track(state: &Rc<RefCell<UiState>>) {
     let next_index = {
         let ui = state.borrow();
-        if ui.playback_mode.is_radio() {
+        if ui.playback_session.mode.is_radio() {
             return;
         }
-        next_playback_index(&ui).unwrap_or_else(|| ui.playback_index.unwrap_or(ui.selected_index))
+        next_playback_index(&ui)
+            .unwrap_or_else(|| ui.playback_session.queue_index.unwrap_or(ui.selected_index))
     };
     play_track_at_existing_order(state, next_index);
 }
@@ -6351,23 +6366,25 @@ fn play_track_at_with_order(state: &Rc<RefCell<UiState>>, index: usize, rebuild_
         let mut ui = state.borrow_mut();
         if rebuild_order {
             ui.selected_index = index.min(ui.tracks.len().saturating_sub(1));
-            ui.playback_tracks = ui.tracks.clone();
-            ui.playback_index = Some(ui.selected_index);
+            ui.playback_session.queue_tracks = ui.tracks.clone();
+            ui.playback_session.queue_index = Some(ui.selected_index);
             let playback_index = ui.selected_index;
             rebuild_playback_order(&mut ui, playback_index);
-        } else if !ui.playback_tracks.is_empty() {
-            ui.playback_index = Some(index.min(ui.playback_tracks.len().saturating_sub(1)));
+        } else if !ui.playback_session.queue_tracks.is_empty() {
+            ui.playback_session.queue_index =
+                Some(index.min(ui.playback_session.queue_tracks.len().saturating_sub(1)));
         } else {
             ui.selected_index = index.min(ui.tracks.len().saturating_sub(1));
-            ui.playback_tracks = ui.tracks.clone();
-            ui.playback_index = Some(ui.selected_index);
+            ui.playback_session.queue_tracks = ui.tracks.clone();
+            ui.playback_session.queue_index = Some(ui.selected_index);
             let playback_index = ui.selected_index;
             rebuild_playback_order(&mut ui, playback_index);
         }
 
         let visible_index = ui
-            .playback_index
-            .and_then(|playback_index| ui.playback_tracks.get(playback_index))
+            .playback_session
+            .queue_index
+            .and_then(|playback_index| ui.playback_session.queue_tracks.get(playback_index))
             .map(track_key)
             .and_then(|key| ui.tracks.iter().position(|track| track_key(track) == key));
         if let Some(visible_index) = visible_index {
@@ -6403,8 +6420,9 @@ fn select_track_model_row(state: &Rc<RefCell<UiState>>, index: usize) {
 fn play_selected_track(state: &Rc<RefCell<UiState>>) {
     let mut ui = state.borrow_mut();
     let Some(track) = ui
-        .playback_index
-        .and_then(|index| ui.playback_tracks.get(index))
+        .playback_session
+        .queue_index
+        .and_then(|index| ui.playback_session.queue_tracks.get(index))
         .cloned()
     else {
         stop_playback(&mut ui);
@@ -6432,7 +6450,7 @@ fn play_selected_track(state: &Rc<RefCell<UiState>>) {
         return;
     };
     let Some(playback) = ui.playback.as_mut() else {
-        ui.now_playing_key = None;
+        ui.playback_session.now_playing_key = None;
         ui.playback_status
             .set_text("GStreamer playbin is unavailable");
         update_play_button(&ui);
@@ -6451,8 +6469,8 @@ fn play_selected_track(state: &Rc<RefCell<UiState>>) {
     let mut refresh_now_playing = false;
     match playback.play(request) {
         Ok(()) => {
-            ui.now_playing_key = Some(track_key(&track));
-            ui.playback_mode.set_library();
+            ui.playback_session.now_playing_key = Some(track_key(&track));
+            ui.playback_session.mode.set_library();
             arm_gapless_next(&mut ui);
             save_playback_snapshot_now(&mut ui);
             update_now_playing_labels(&ui);
@@ -6462,7 +6480,7 @@ fn play_selected_track(state: &Rc<RefCell<UiState>>) {
             refresh_now_playing = true;
         }
         Err(error) => {
-            ui.now_playing_key = None;
+            ui.playback_session.now_playing_key = None;
             ui.playback_status
                 .set_text(&format!("Playback failed: {error}"));
             sync_external_playback_status(&mut ui);
@@ -6502,7 +6520,7 @@ fn playback_request_for_track_kind(
 
 fn next_gapless_request(ui: &UiState) -> Option<PlaybackRequest> {
     let next_index = next_playback_index(ui)?;
-    playback_request_for_track(ui.playback_tracks.get(next_index)?)
+    playback_request_for_track(ui.playback_session.queue_tracks.get(next_index)?)
 }
 
 fn arm_gapless_next(ui: &mut UiState) {
@@ -6513,11 +6531,7 @@ fn arm_gapless_next(ui: &mut UiState) {
 }
 
 fn stop_playback(ui: &mut UiState) {
-    ui.now_playing_key = None;
-    ui.playback_mode.set_library();
-    ui.playback_tracks.clear();
-    ui.playback_index = None;
-    ui.playback_order.clear();
+    ui.playback_session.reset_to_library();
     if let Some(playback) = ui.playback.as_mut()
         && let Err(error) = playback.stop()
     {
@@ -7788,7 +7802,7 @@ fn scroll_to_now_playing(state: &Rc<RefCell<UiState>>) {
         let ui = state.borrow();
         ui.tracks
             .iter()
-            .position(|t| Some(track_key(t)) == ui.now_playing_key)
+            .position(|t| Some(track_key(t)) == ui.playback_session.now_playing_key)
     };
 
     let Some(idx) = idx else {
@@ -8304,7 +8318,8 @@ fn handle_playback_error(
                     .iter()
                     .find(|track| track.item_id.as_deref() == Some(item_id))
                     .or_else(|| {
-                        ui.playback_tracks
+                        ui.playback_session
+                            .queue_tracks
                             .iter()
                             .find(|track| track.item_id.as_deref() == Some(item_id))
                     })
@@ -8346,7 +8361,7 @@ fn handle_playback_error(
                             },
                         })
                         .unwrap_or(session::FallbackSeekRestore::NotNeeded);
-                    ui.now_playing_key = Some(track_key_value);
+                    ui.playback_session.now_playing_key = Some(track_key_value);
                     arm_gapless_next(&mut ui);
                     save_playback_snapshot_now(&mut ui);
                     update_now_playing_labels(&ui);
@@ -8372,14 +8387,14 @@ fn handle_playback_error(
 
     {
         let mut ui = state.borrow_mut();
-        if ui.playback_mode.is_radio() {
+        if ui.playback_session.mode.is_radio() {
             ui.playback_status
                 .set_text(&format!("Radio stream failed: {message}"));
         } else {
             ui.playback_status
                 .set_text(&format!("Playback failed: {message}"));
         }
-        ui.now_playing_key = None;
+        ui.playback_session.now_playing_key = None;
         arm_gapless_next(&mut ui);
         save_playback_snapshot_now(&mut ui);
         update_play_button(&ui);
@@ -8402,29 +8417,31 @@ fn apply_gapless_transition(state: &Rc<RefCell<UiState>>) -> bool {
     {
         let mut ui = state.borrow_mut();
         let item_ids_by_index = ui
-            .playback_tracks
+            .playback_session
+            .queue_tracks
             .iter()
             .map(|track| track.item_id.clone())
             .collect::<Vec<_>>();
-        let current_index = ui.playback_index.unwrap_or(ui.selected_index);
+        let current_index = ui.playback_session.queue_index.unwrap_or(ui.selected_index);
         let transition_index = session::gapless_transition_index(
             &item_ids_by_index,
-            &ui.playback_order,
+            &ui.playback_session.playback_order,
             current_index,
             &transition.item_id,
         );
 
         if let Some(index) = transition_index {
-            ui.playback_index = Some(index);
+            ui.playback_session.queue_index = Some(index);
         }
 
         if let Some(track) = ui
-            .playback_index
-            .and_then(|index| ui.playback_tracks.get(index))
+            .playback_session
+            .queue_index
+            .and_then(|index| ui.playback_session.queue_tracks.get(index))
             .cloned()
         {
             let quality = track.quality.clone();
-            ui.now_playing_key = Some(track_key(&track));
+            ui.playback_session.now_playing_key = Some(track_key(&track));
             if let Some(visible_index) = ui
                 .tracks
                 .iter()
@@ -8435,7 +8452,7 @@ fn apply_gapless_transition(state: &Rc<RefCell<UiState>>) -> bool {
             update_now_playing_labels(&ui);
             ui.playback_status.set_text(&format!("Playing | {quality}"));
         } else {
-            ui.now_playing_key = None;
+            ui.playback_session.now_playing_key = None;
             ui.playback_status.set_text("Playing next stream");
         }
 
@@ -8465,11 +8482,9 @@ fn advance_after_track_end(state: &Rc<RefCell<UiState>>) {
     } else {
         {
             let mut ui = state.borrow_mut();
-            let radio_was_active = ui.playback_mode.is_radio();
-            ui.now_playing_key = None;
-            ui.playback_tracks.clear();
-            ui.playback_index = None;
-            ui.playback_order.clear();
+            let radio_was_active = ui.playback_session.mode.is_radio();
+            ui.playback_session.now_playing_key = None;
+            ui.playback_session.clear_queue();
             if radio_was_active {
                 ui.playback_status.set_text("Radio stream ended");
             } else {

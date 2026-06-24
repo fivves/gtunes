@@ -10,6 +10,43 @@ pub(crate) struct RestoredPlaybackItems {
     pub playback_order: Vec<usize>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct PlaybackSession<T> {
+    pub mode: PlaybackMode,
+    pub now_playing_key: Option<String>,
+    pub queue_tracks: Vec<T>,
+    pub queue_index: Option<usize>,
+    pub playback_order: Vec<usize>,
+    pub shuffle_enabled: bool,
+}
+
+impl<T> Default for PlaybackSession<T> {
+    fn default() -> Self {
+        Self {
+            mode: PlaybackMode::default(),
+            now_playing_key: None,
+            queue_tracks: Vec::new(),
+            queue_index: None,
+            playback_order: Vec::new(),
+            shuffle_enabled: false,
+        }
+    }
+}
+
+impl<T> PlaybackSession<T> {
+    pub(crate) fn clear_queue(&mut self) {
+        self.queue_tracks.clear();
+        self.queue_index = None;
+        self.playback_order.clear();
+    }
+
+    pub(crate) fn reset_to_library(&mut self) {
+        self.mode.set_library();
+        self.now_playing_key = None;
+        self.clear_queue();
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum FallbackSeekRestore {
     NotNeeded,
@@ -348,6 +385,64 @@ mod tests {
         mode.set_library();
         assert!(!mode.is_radio());
         assert_eq!(mode.radio_station_id(), None);
+    }
+
+    #[test]
+    fn playback_session_defaults_to_empty_library_queue() {
+        let session = PlaybackSession::<&str>::default();
+
+        assert!(!session.mode.is_radio());
+        assert_eq!(session.now_playing_key, None);
+        assert!(session.queue_tracks.is_empty());
+        assert_eq!(session.queue_index, None);
+        assert!(session.playback_order.is_empty());
+        assert!(!session.shuffle_enabled);
+    }
+
+    #[test]
+    fn playback_session_clear_queue_keeps_mode_and_current_track() {
+        let mut session = PlaybackSession {
+            mode: PlaybackMode::Radio {
+                station_id: "station-1".to_string(),
+            },
+            now_playing_key: Some("track-1".to_string()),
+            queue_tracks: vec!["track-1", "track-2"],
+            queue_index: Some(1),
+            playback_order: vec![0, 1],
+            shuffle_enabled: true,
+        };
+
+        session.clear_queue();
+
+        assert_eq!(session.mode.radio_station_id(), Some("station-1"));
+        assert_eq!(session.now_playing_key.as_deref(), Some("track-1"));
+        assert!(session.queue_tracks.is_empty());
+        assert_eq!(session.queue_index, None);
+        assert!(session.playback_order.is_empty());
+        assert!(session.shuffle_enabled);
+    }
+
+    #[test]
+    fn playback_session_reset_to_library_clears_active_queue_without_touching_shuffle() {
+        let mut session = PlaybackSession {
+            mode: PlaybackMode::Radio {
+                station_id: "station-1".to_string(),
+            },
+            now_playing_key: Some("track-1".to_string()),
+            queue_tracks: vec!["track-1"],
+            queue_index: Some(0),
+            playback_order: vec![0],
+            shuffle_enabled: true,
+        };
+
+        session.reset_to_library();
+
+        assert!(!session.mode.is_radio());
+        assert_eq!(session.now_playing_key, None);
+        assert!(session.queue_tracks.is_empty());
+        assert_eq!(session.queue_index, None);
+        assert!(session.playback_order.is_empty());
+        assert!(session.shuffle_enabled);
     }
 
     #[test]

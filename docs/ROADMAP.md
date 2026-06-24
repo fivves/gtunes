@@ -87,6 +87,9 @@ background integrations should not implicitly drive playback state.
    - Progress: gapless transition index selection now lives in
      `src/playback/session.rs`; `window.rs` applies the selected index to UI
      state after the playback engine reports a transition.
+   - Progress: queue tracks, current queue index, playback order,
+     now-playing key, shuffle state, and playback mode are consolidated under
+     `session::PlaybackSession<UiTrack>` instead of separate `UiState` fields.
 
 3. [x] Preserve position during direct-play fallback.
    - Capture the current playback position before retrying with a Jellyfin
@@ -128,6 +131,8 @@ background integrations should not implicitly drive playback state.
      no-position fallback status.
    - Progress: gapless transition tests now cover matching item IDs, fallback
      to the next ordered item, and missing-match/missing-next behavior.
+   - Progress: `PlaybackSession` tests now cover default empty library state,
+     queue clearing, and reset-to-library behavior.
 
 ## Follow-Up Candidates
 
