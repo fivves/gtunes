@@ -125,6 +125,9 @@ background integrations should not implicitly drive playback state.
    - Progress: empty-library reset now lives in `session::PlaybackSession`;
      disconnect/cache-reset UI no longer clears shuffle and playback state as
      separate field mutations.
+   - Progress: playback-order rebuild count selection now lives in
+     `session::PlaybackSession`; `window.rs` passes the visible library count
+     instead of deciding between active queue length and library length.
 
 3. [x] Preserve position during direct-play fallback.
    - Capture the current playback position before retrying with a Jellyfin
@@ -195,6 +198,8 @@ background integrations should not implicitly drive playback state.
      library and radio modes.
    - Progress: `PlaybackSession` tests now cover empty-library reset clearing
      shuffle, mode, current item, and queue state.
+   - Progress: `PlaybackSession` tests now cover playback-order rebuilds using
+     visible library count when no queue is active and queue count when queued.
 
 ## Follow-Up Candidates
 

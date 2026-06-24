@@ -91,6 +91,19 @@ impl<T> PlaybackSession<T> {
         self.playback_order = build_playback_order(track_count, start_index, self.shuffle_enabled);
     }
 
+    pub(crate) fn rebuild_order_for_library(
+        &mut self,
+        library_track_count: usize,
+        start_index: usize,
+    ) {
+        let track_count = if self.queue_tracks.is_empty() {
+            library_track_count
+        } else {
+            self.queue_tracks.len()
+        };
+        self.rebuild_order(track_count, start_index);
+    }
+
     pub(crate) fn current_index_or(&self, fallback_index: usize) -> usize {
         self.queue_index.unwrap_or(fallback_index)
     }
@@ -142,12 +155,7 @@ impl<T> PlaybackSession<T> {
     pub(crate) fn toggle_shuffle(&mut self, library_track_count: usize, fallback_index: usize) {
         self.shuffle_enabled = !self.shuffle_enabled;
         let playback_index = self.current_index_or(fallback_index);
-        let track_count = if self.queue_tracks.is_empty() {
-            library_track_count
-        } else {
-            self.queue_tracks.len()
-        };
-        self.rebuild_order(track_count, playback_index);
+        self.rebuild_order_for_library(library_track_count, playback_index);
     }
 
     pub(crate) fn apply_gapless_transition(
@@ -855,6 +863,27 @@ mod tests {
         assert_eq!(session.upcoming_count(1), 2);
         assert!(!session.order_needs_rebuild_for(2));
         assert!(session.order_needs_rebuild_for(99));
+    }
+
+    #[test]
+    fn playback_session_rebuilds_order_from_library_count_without_queue() {
+        let mut session = PlaybackSession::<&str>::default();
+
+        session.rebuild_order_for_library(3, 1);
+
+        assert_eq!(session.playback_order, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn playback_session_rebuilds_order_from_queue_count_when_queued() {
+        let mut session = PlaybackSession {
+            queue_tracks: vec!["first", "second"],
+            ..PlaybackSession::<&str>::default()
+        };
+
+        session.rebuild_order_for_library(99, 1);
+
+        assert_eq!(session.playback_order, vec![0, 1]);
     }
 
     #[test]

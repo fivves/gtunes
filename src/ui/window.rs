@@ -5732,12 +5732,8 @@ fn update_page_summary(ui: &UiState) {
 }
 
 fn rebuild_playback_order(ui: &mut UiState, start_index: usize) {
-    let track_count = if ui.playback_session.queue_tracks.is_empty() {
-        ui.tracks.len()
-    } else {
-        ui.playback_session.queue_tracks.len()
-    };
-    ui.playback_session.rebuild_order(track_count, start_index);
+    ui.playback_session
+        .rebuild_order_for_library(ui.tracks.len(), start_index);
 }
 
 fn next_playback_index(ui: &UiState) -> Option<usize> {
