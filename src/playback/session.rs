@@ -20,6 +20,20 @@ pub(crate) struct PlaybackSession<T> {
     pub shuffle_enabled: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PlaybackSelection {
+    pub selected_index: usize,
+    pub visible_index: Option<usize>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RestoredPlayback<T> {
+    pub tracks: Vec<T>,
+    pub current_index: usize,
+    pub playback_order: Vec<usize>,
+    pub shuffle_enabled: bool,
+}
+
 impl<T> Default for PlaybackSession<T> {
     fn default() -> Self {
         Self {
@@ -96,6 +110,156 @@ impl<T> PlaybackSession<T> {
 
     pub(crate) fn order_needs_rebuild_for(&self, current_index: usize) -> bool {
         self.playback_order.is_empty() || !self.playback_order.contains(&current_index)
+    }
+
+    pub(crate) fn toggle_shuffle(&mut self, library_track_count: usize, fallback_index: usize) {
+        self.shuffle_enabled = !self.shuffle_enabled;
+        let playback_index = self.current_index_or(fallback_index);
+        let track_count = if self.queue_tracks.is_empty() {
+            library_track_count
+        } else {
+            self.queue_tracks.len()
+        };
+        self.rebuild_order(track_count, playback_index);
+    }
+}
+
+impl<T: Clone> PlaybackSession<T> {
+    pub(crate) fn select_library_track(
+        &mut self,
+        library_tracks: &[T],
+        requested_index: usize,
+        rebuild_order: bool,
+        same_track: impl Fn(&T, &T) -> bool,
+    ) -> PlaybackSelection {
+        let selected_index = requested_index.min(library_tracks.len().saturating_sub(1));
+
+        if rebuild_order || self.queue_tracks.is_empty() {
+            self.queue_tracks = library_tracks.to_vec();
+            self.queue_index = Some(selected_index);
+            self.rebuild_order(self.queue_tracks.len(), selected_index);
+        } else {
+            self.queue_index = Some(requested_index.min(self.queue_tracks.len().saturating_sub(1)));
+        }
+
+        let visible_index = self
+            .queue_index
+            .and_then(|queue_index| self.queue_tracks.get(queue_index))
+            .and_then(|queued_track| {
+                library_tracks
+                    .iter()
+                    .position(|library_track| same_track(queued_track, library_track))
+            });
+        let selected_index = visible_index.unwrap_or(selected_index);
+
+        PlaybackSelection {
+            selected_index,
+            visible_index,
+        }
+    }
+
+    pub(crate) fn queue_library_track_next(
+        &mut self,
+        library_tracks: &[T],
+        selected_index: usize,
+        target_track: T,
+        same_track: impl Fn(&T, &T) -> bool,
+    ) -> bool {
+        if self.mode.is_radio() {
+            return false;
+        }
+
+        if self.queue_tracks.is_empty() {
+            self.queue_tracks = library_tracks.to_vec();
+        }
+        if self.queue_tracks.is_empty() {
+            return false;
+        }
+
+        let current_index = self
+            .current_index_or(selected_index)
+            .min(self.queue_tracks.len().saturating_sub(1));
+        if self.order_needs_rebuild_for(current_index) {
+            self.rebuild_order(self.queue_tracks.len(), current_index);
+        }
+
+        let target_index = if let Some(index) = self
+            .queue_tracks
+            .iter()
+            .position(|queued_track| same_track(queued_track, &target_track))
+        {
+            index
+        } else {
+            self.queue_tracks.push(target_track);
+            self.queue_tracks.len() - 1
+        };
+
+        self.queue_track_next(current_index, target_index)
+    }
+
+    pub(crate) fn restore_library_playback(
+        &mut self,
+        restored: RestoredPlayback<T>,
+        visible_tracks: &[T],
+        fallback_selected_index: usize,
+        same_track: impl Fn(&T, &T) -> bool,
+        track_key: impl Fn(&T) -> String,
+    ) -> Option<PlaybackSelection> {
+        let current_track = restored.tracks.get(restored.current_index)?;
+        let now_playing_key = track_key(current_track);
+        let visible_index = visible_tracks
+            .iter()
+            .position(|visible_track| same_track(current_track, visible_track));
+        let selected_index = visible_index
+            .unwrap_or(fallback_selected_index)
+            .min(visible_tracks.len().saturating_sub(1));
+
+        self.shuffle_enabled = restored.shuffle_enabled;
+        self.queue_tracks = restored.tracks;
+        self.queue_index = Some(restored.current_index);
+        self.playback_order = restored.playback_order;
+        self.now_playing_key = Some(now_playing_key);
+        self.mode.set_library();
+
+        Some(PlaybackSelection {
+            selected_index,
+            visible_index,
+        })
+    }
+
+    pub(crate) fn reconcile_library_refresh(
+        &mut self,
+        library_tracks: &[T],
+        track_key: impl Fn(&T) -> String,
+    ) {
+        let Some(now_playing_key) = self.now_playing_key.clone() else {
+            self.clear_queue();
+            return;
+        };
+
+        let still_available = library_tracks
+            .iter()
+            .any(|track| track_key(track) == now_playing_key);
+        if !still_available {
+            self.now_playing_key = None;
+            self.clear_queue();
+            return;
+        }
+
+        if !self.queue_tracks.is_empty() {
+            self.queue_tracks = self
+                .queue_tracks
+                .iter()
+                .map(|queued_track| {
+                    let queued_key = track_key(queued_track);
+                    library_tracks
+                        .iter()
+                        .find(|library_track| track_key(library_track) == queued_key)
+                        .cloned()
+                        .unwrap_or_else(|| queued_track.clone())
+                })
+                .collect();
+        }
     }
 }
 
@@ -525,6 +689,370 @@ mod tests {
 
         assert!(session.move_upcoming_track(1, 1, 0, 50));
         assert_eq!(session.playback_order, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn playback_session_toggle_shuffle_rebuilds_order_from_queue() {
+        let mut session = PlaybackSession {
+            queue_tracks: vec!["first", "second", "third"],
+            queue_index: Some(2),
+            playback_order: vec![0, 1, 2],
+            ..PlaybackSession::<&str>::default()
+        };
+
+        session.toggle_shuffle(99, 0);
+
+        assert!(session.shuffle_enabled);
+        assert_eq!(session.playback_order.first(), Some(&2));
+        assert_eq!(session.playback_order.len(), 3);
+        for index in 0..3 {
+            assert!(session.playback_order.contains(&index));
+        }
+    }
+
+    #[test]
+    fn playback_session_toggle_shuffle_uses_library_count_without_queue() {
+        let mut session = PlaybackSession {
+            shuffle_enabled: true,
+            playback_order: vec![2, 0, 1],
+            ..PlaybackSession::<&str>::default()
+        };
+
+        session.toggle_shuffle(3, 1);
+
+        assert!(!session.shuffle_enabled);
+        assert_eq!(session.playback_order, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn playback_session_selects_library_track_and_rebuilds_queue() {
+        let mut session = PlaybackSession::<&str>::default();
+
+        let selection =
+            session.select_library_track(&["first", "second", "third"], 1, true, |a, b| a == b);
+
+        assert_eq!(
+            selection,
+            PlaybackSelection {
+                selected_index: 1,
+                visible_index: Some(1),
+            }
+        );
+        assert_eq!(session.queue_tracks, vec!["first", "second", "third"]);
+        assert_eq!(session.queue_index, Some(1));
+        assert_eq!(session.playback_order, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn playback_session_selects_existing_queue_track_visible_in_library() {
+        let mut session = PlaybackSession {
+            queue_tracks: vec!["queued-first", "library-second"],
+            queue_index: Some(0),
+            playback_order: vec![0, 1],
+            ..PlaybackSession::<&str>::default()
+        };
+
+        let selection =
+            session.select_library_track(&["library-first", "library-second"], 1, false, |a, b| {
+                a == b
+            });
+
+        assert_eq!(
+            selection,
+            PlaybackSelection {
+                selected_index: 1,
+                visible_index: Some(1),
+            }
+        );
+        assert_eq!(session.queue_tracks, vec!["queued-first", "library-second"]);
+        assert_eq!(session.queue_index, Some(1));
+        assert_eq!(session.playback_order, vec![0, 1]);
+    }
+
+    #[test]
+    fn playback_session_clamps_empty_library_selection() {
+        let mut session = PlaybackSession::<&str>::default();
+
+        let selection = session.select_library_track(&[], 10, true, |a, b| a == b);
+
+        assert_eq!(
+            selection,
+            PlaybackSelection {
+                selected_index: 0,
+                visible_index: None,
+            }
+        );
+        assert!(session.queue_tracks.is_empty());
+        assert_eq!(session.queue_index, Some(0));
+        assert!(session.playback_order.is_empty());
+    }
+
+    #[test]
+    fn playback_session_queues_library_track_next_from_empty_queue() {
+        let mut session = PlaybackSession {
+            queue_index: Some(0),
+            ..PlaybackSession::<&str>::default()
+        };
+
+        assert!(session.queue_library_track_next(
+            &["first", "second", "third"],
+            0,
+            "third",
+            |a, b| a == b,
+        ));
+
+        assert_eq!(session.queue_tracks, vec!["first", "second", "third"]);
+        assert_eq!(session.playback_order, vec![0, 2, 1]);
+    }
+
+    #[test]
+    fn playback_session_queues_missing_track_next_by_appending_it() {
+        let mut session = PlaybackSession {
+            queue_tracks: vec!["current", "other"],
+            queue_index: Some(0),
+            playback_order: vec![0, 1],
+            ..PlaybackSession::<&str>::default()
+        };
+
+        assert!(session.queue_library_track_next(&[], 0, "missing", |a, b| a == b));
+
+        assert_eq!(session.queue_tracks, vec!["current", "other", "missing"]);
+        assert_eq!(session.playback_order, vec![0, 2, 1]);
+    }
+
+    #[test]
+    fn playback_session_does_not_queue_next_in_radio_mode() {
+        let mut session = PlaybackSession {
+            mode: PlaybackMode::Radio {
+                station_id: "station-1".to_string(),
+            },
+            queue_tracks: vec!["current", "target"],
+            queue_index: Some(0),
+            playback_order: vec![0, 1],
+            ..PlaybackSession::<&str>::default()
+        };
+
+        assert!(
+            !session
+                .queue_library_track_next(&["current", "target"], 0, "target", |a, b| { a == b })
+        );
+
+        assert_eq!(session.playback_order, vec![0, 1]);
+    }
+
+    #[test]
+    fn playback_session_rebuilds_stale_order_before_queueing_next() {
+        let mut session = PlaybackSession {
+            queue_tracks: vec!["current", "other", "target"],
+            queue_index: Some(1),
+            playback_order: vec![0],
+            ..PlaybackSession::<&str>::default()
+        };
+
+        assert!(session.queue_library_track_next(&[], 1, "current", |a, b| a == b));
+
+        assert_eq!(session.playback_order, vec![1, 0, 2]);
+    }
+
+    #[test]
+    fn playback_session_restores_library_playback_state() {
+        let mut session = PlaybackSession {
+            mode: PlaybackMode::Radio {
+                station_id: "station-1".to_string(),
+            },
+            now_playing_key: Some("old".to_string()),
+            queue_tracks: vec!["old"],
+            queue_index: Some(0),
+            playback_order: vec![0],
+            shuffle_enabled: false,
+        };
+
+        let selection = session
+            .restore_library_playback(
+                RestoredPlayback {
+                    tracks: vec!["first", "second", "third"],
+                    current_index: 1,
+                    playback_order: vec![1, 2, 0],
+                    shuffle_enabled: true,
+                },
+                &["visible-first", "second"],
+                0,
+                |a, b| a == b,
+                |track| (*track).to_string(),
+            )
+            .expect("restore applies");
+
+        assert_eq!(
+            selection,
+            PlaybackSelection {
+                selected_index: 1,
+                visible_index: Some(1),
+            }
+        );
+        assert!(!session.mode.is_radio());
+        assert_eq!(session.now_playing_key.as_deref(), Some("second"));
+        assert_eq!(session.queue_tracks, vec!["first", "second", "third"]);
+        assert_eq!(session.queue_index, Some(1));
+        assert_eq!(session.playback_order, vec![1, 2, 0]);
+        assert!(session.shuffle_enabled);
+    }
+
+    #[test]
+    fn playback_session_restore_uses_fallback_selection_when_current_track_is_hidden() {
+        let mut session = PlaybackSession::<&str>::default();
+
+        let selection = session
+            .restore_library_playback(
+                RestoredPlayback {
+                    tracks: vec!["first", "second"],
+                    current_index: 1,
+                    playback_order: vec![0, 1],
+                    shuffle_enabled: false,
+                },
+                &["visible-first"],
+                5,
+                |a, b| a == b,
+                |track| (*track).to_string(),
+            )
+            .expect("restore applies");
+
+        assert_eq!(
+            selection,
+            PlaybackSelection {
+                selected_index: 0,
+                visible_index: None,
+            }
+        );
+        assert_eq!(session.now_playing_key.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn playback_session_restore_rejects_missing_current_index() {
+        let mut session = PlaybackSession {
+            now_playing_key: Some("old".to_string()),
+            queue_tracks: vec!["old"],
+            queue_index: Some(0),
+            playback_order: vec![0],
+            ..PlaybackSession::<&str>::default()
+        };
+
+        let selection = session.restore_library_playback(
+            RestoredPlayback {
+                tracks: vec!["first"],
+                current_index: 99,
+                playback_order: vec![0],
+                shuffle_enabled: true,
+            },
+            &["first"],
+            0,
+            |a, b| a == b,
+            |track| (*track).to_string(),
+        );
+
+        assert_eq!(selection, None);
+        assert_eq!(session.now_playing_key.as_deref(), Some("old"));
+        assert_eq!(session.queue_tracks, vec!["old"]);
+        assert_eq!(session.queue_index, Some(0));
+        assert_eq!(session.playback_order, vec![0]);
+        assert!(!session.shuffle_enabled);
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct TestTrack {
+        key: &'static str,
+        title: &'static str,
+    }
+
+    fn test_track_key(track: &TestTrack) -> String {
+        track.key.to_string()
+    }
+
+    #[test]
+    fn playback_session_refresh_replaces_queued_tracks_from_library() {
+        let mut session = PlaybackSession {
+            now_playing_key: Some("current".to_string()),
+            queue_tracks: vec![
+                TestTrack {
+                    key: "current",
+                    title: "Old current",
+                },
+                TestTrack {
+                    key: "missing",
+                    title: "Keep queued copy",
+                },
+            ],
+            queue_index: Some(0),
+            playback_order: vec![0, 1],
+            ..PlaybackSession::default()
+        };
+
+        session.reconcile_library_refresh(
+            &[
+                TestTrack {
+                    key: "current",
+                    title: "Fresh current",
+                },
+                TestTrack {
+                    key: "other",
+                    title: "Other",
+                },
+            ],
+            test_track_key,
+        );
+
+        assert_eq!(session.now_playing_key.as_deref(), Some("current"));
+        assert_eq!(session.queue_tracks[0].title, "Fresh current");
+        assert_eq!(session.queue_tracks[1].title, "Keep queued copy");
+        assert_eq!(session.queue_index, Some(0));
+        assert_eq!(session.playback_order, vec![0, 1]);
+    }
+
+    #[test]
+    fn playback_session_refresh_clears_queue_when_now_playing_disappears() {
+        let mut session = PlaybackSession {
+            now_playing_key: Some("missing".to_string()),
+            queue_tracks: vec![TestTrack {
+                key: "missing",
+                title: "Missing",
+            }],
+            queue_index: Some(0),
+            playback_order: vec![0],
+            ..PlaybackSession::default()
+        };
+
+        session.reconcile_library_refresh(
+            &[TestTrack {
+                key: "other",
+                title: "Other",
+            }],
+            test_track_key,
+        );
+
+        assert_eq!(session.now_playing_key, None);
+        assert!(session.queue_tracks.is_empty());
+        assert_eq!(session.queue_index, None);
+        assert!(session.playback_order.is_empty());
+    }
+
+    #[test]
+    fn playback_session_refresh_clears_queue_without_active_track() {
+        let mut session = PlaybackSession {
+            now_playing_key: None,
+            queue_tracks: vec![TestTrack {
+                key: "queued",
+                title: "Queued",
+            }],
+            queue_index: Some(0),
+            playback_order: vec![0],
+            ..PlaybackSession::default()
+        };
+
+        session.reconcile_library_refresh(&[], test_track_key);
+
+        assert_eq!(session.now_playing_key, None);
+        assert!(session.queue_tracks.is_empty());
+        assert_eq!(session.queue_index, None);
+        assert!(session.playback_order.is_empty());
     }
 
     #[test]

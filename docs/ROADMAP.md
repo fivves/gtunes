@@ -95,6 +95,22 @@ background integrations should not implicitly drive playback state.
      mutation are now methods on `session::PlaybackSession`; `window.rs`
      delegates these state transitions instead of manipulating order state
      directly.
+   - Progress: library-track playback selection now delegates queue
+     initialization, queue index selection, playback order rebuilds, and
+     visible-row mapping to `session::PlaybackSession`.
+   - Progress: queue-next setup now lives in `session::PlaybackSession`,
+     including radio-mode rejection, queue initialization, stale-order rebuild,
+     missing-track append, and next-track ordering.
+   - Progress: persisted playback restore application now lives in
+     `session::PlaybackSession`, including queue state, current index, playback
+     order, shuffle state, now-playing key, library mode, and visible-row
+     selection.
+   - Progress: library-refresh playback reconciliation now lives in
+     `session::PlaybackSession`, including refreshed queued track replacement
+     and stale now-playing/queue clearing.
+   - Progress: shuffle toggling now lives in `session::PlaybackSession`,
+     including flag changes and playback-order rebuilds from either the active
+     queue or visible library count.
 
 3. [x] Preserve position during direct-play fallback.
    - Capture the current playback position before retrying with a Jellyfin
@@ -142,6 +158,18 @@ background integrations should not implicitly drive playback state.
      next/previous navigation, queued index limits, upcoming counts,
      rebuild-needed detection, queue-next mutation, and upcoming reorder
      mutation.
+   - Progress: `PlaybackSession` tests now cover library-track playback
+     selection, existing-queue selection, and empty-library clamping.
+   - Progress: `PlaybackSession` tests now cover queue-next setup from empty
+     queues, missing queued tracks, radio-mode rejection, and stale-order
+     rebuilds.
+   - Progress: `PlaybackSession` tests now cover applying restored playback
+     state, hidden-current fallback selection, and invalid restore index
+     rejection.
+   - Progress: `PlaybackSession` tests now cover library-refresh queue
+     replacement, disappeared now-playing clearing, and inactive queue clearing.
+   - Progress: `PlaybackSession` tests now cover shuffle toggling with queued
+     playback and library-count fallback.
 
 ## Follow-Up Candidates
 

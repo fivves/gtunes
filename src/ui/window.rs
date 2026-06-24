@@ -4775,23 +4775,23 @@ fn restore_persisted_playback(state: &Rc<RefCell<UiState>>) {
         else {
             return;
         };
-        let selected_index = playback_tracks
-            .get(playback_index)
-            .map(track_key)
-            .and_then(|key| ui.tracks.iter().position(|track| track_key(track) == key))
-            .unwrap_or(ui.selected_index);
-
-        ui.playback_session.shuffle_enabled = snapshot.shuffle_enabled;
-        ui.playback_session.queue_tracks = playback_tracks;
-        ui.playback_session.queue_index = Some(playback_index);
-        ui.playback_session.playback_order = playback_order;
-        ui.selected_index = selected_index.min(ui.tracks.len().saturating_sub(1));
-        ui.playback_session.now_playing_key = ui
-            .playback_session
-            .queue_tracks
-            .get(playback_index)
-            .map(track_key);
-        ui.playback_session.mode.set_library();
+        let tracks = ui.tracks.clone();
+        let fallback_selected_index = ui.selected_index;
+        let Some(selection) = ui.playback_session.restore_library_playback(
+            session::RestoredPlayback {
+                tracks: playback_tracks,
+                current_index: playback_index,
+                playback_order,
+                shuffle_enabled: snapshot.shuffle_enabled,
+            },
+            &tracks,
+            fallback_selected_index,
+            |queued, visible| track_key(queued) == track_key(visible),
+            track_key,
+        ) else {
+            return;
+        };
+        ui.selected_index = selection.selected_index;
         update_shuffle_button(&ui);
         update_now_playing_labels(&ui);
         update_play_button(&ui);
@@ -5824,40 +5824,14 @@ fn move_next_up_track(state: &Rc<RefCell<UiState>>, from: usize, to_slot: usize)
     changed
 }
 
-fn queue_track_next_by_key(ui: &mut UiState, target_key: &str, fallback_track: UiTrack) -> bool {
-    if ui.playback_session.mode.is_radio() {
-        return false;
-    }
-
-    if ui.playback_session.queue_tracks.is_empty() {
-        ui.playback_session.queue_tracks = ui.tracks.clone();
-    }
-    if ui.playback_session.queue_tracks.is_empty() {
-        return false;
-    }
-
-    let current_index = ui
-        .playback_session
-        .current_index_or(ui.selected_index)
-        .min(ui.playback_session.queue_tracks.len().saturating_sub(1));
-    if ui.playback_session.order_needs_rebuild_for(current_index) {
-        rebuild_playback_order(ui, current_index);
-    }
-
-    let target_index = if let Some(index) = ui
-        .playback_session
-        .queue_tracks
-        .iter()
-        .position(|track| track_key(track) == target_key)
-    {
-        index
-    } else {
-        ui.playback_session.queue_tracks.push(fallback_track);
-        ui.playback_session.queue_tracks.len() - 1
-    };
-
-    ui.playback_session
-        .queue_track_next(current_index, target_index)
+fn queue_track_next(ui: &mut UiState, target_track: UiTrack) -> bool {
+    let tracks = ui.tracks.clone();
+    ui.playback_session.queue_library_track_next(
+        &tracks,
+        ui.selected_index,
+        target_track,
+        |queued, target| track_key(queued) == track_key(target),
+    )
 }
 
 fn finalize_queue_change(state: &Rc<RefCell<UiState>>) {
@@ -5876,8 +5850,7 @@ fn queue_visible_track_next(state: &Rc<RefCell<UiState>>, visible_index: usize) 
         let Some(track) = ui.tracks.get(visible_index).cloned() else {
             return false;
         };
-        let key = track_key(&track);
-        queue_track_next_by_key(&mut ui, &key, track)
+        queue_track_next(&mut ui, track)
     };
     if changed {
         finalize_queue_change(state);
@@ -5899,8 +5872,7 @@ fn queue_existing_track_next(state: &Rc<RefCell<UiState>>, playback_index: usize
         let Some(track) = track else {
             return false;
         };
-        let key = track_key(&track);
-        queue_track_next_by_key(&mut ui, &key, track)
+        queue_track_next(&mut ui, track)
     };
     if changed {
         finalize_queue_change(state);
@@ -6065,29 +6037,9 @@ fn apply_connection_payload(state: &Rc<RefCell<UiState>>, payload: ConnectionPay
             now_playing_key.as_deref(),
             selected_key.as_deref(),
         );
-        ui.playback_session.now_playing_key = now_playing_key
-            .as_deref()
-            .filter(|key| ui.all_tracks.iter().any(|track| track_key(track) == *key))
-            .map(|key| key.to_string());
-        if ui.playback_session.now_playing_key.is_some()
-            && !ui.playback_session.queue_tracks.is_empty()
-        {
-            ui.playback_session.queue_tracks = ui
-                .playback_session
-                .queue_tracks
-                .iter()
-                .map(|track| {
-                    let key = track_key(track);
-                    ui.all_tracks
-                        .iter()
-                        .find(|library_track| track_key(library_track) == key)
-                        .cloned()
-                        .unwrap_or_else(|| track.clone())
-                })
-                .collect();
-        } else if ui.playback_session.now_playing_key.is_none() {
-            ui.playback_session.clear_queue();
-        }
+        let all_tracks = ui.all_tracks.clone();
+        ui.playback_session
+            .reconcile_library_refresh(&all_tracks, track_key);
         apply_track_filter(&mut ui, selected_key.as_deref());
         update_now_playing_labels(&ui);
         update_play_button(&ui);
@@ -6223,9 +6175,10 @@ fn update_shuffle_button(state: &UiState) {
 fn toggle_shuffle(state: &Rc<RefCell<UiState>>) {
     {
         let mut ui = state.borrow_mut();
-        ui.playback_session.shuffle_enabled = !ui.playback_session.shuffle_enabled;
-        let playback_index = ui.playback_session.current_index_or(ui.selected_index);
-        rebuild_playback_order(&mut ui, playback_index);
+        let track_count = ui.tracks.len();
+        let selected_index = ui.selected_index;
+        ui.playback_session
+            .toggle_shuffle(track_count, selected_index);
         arm_gapless_next(&mut ui);
         save_playback_snapshot_now(&mut ui);
         update_shuffle_button(&ui);
@@ -6353,36 +6306,18 @@ fn play_track_at_existing_order(state: &Rc<RefCell<UiState>>, index: usize) {
 fn play_track_at_with_order(state: &Rc<RefCell<UiState>>, index: usize, rebuild_order: bool) {
     let (selected_index, visible_index) = {
         let mut ui = state.borrow_mut();
-        if rebuild_order {
-            ui.selected_index = index.min(ui.tracks.len().saturating_sub(1));
-            ui.playback_session.queue_tracks = ui.tracks.clone();
-            ui.playback_session.queue_index = Some(ui.selected_index);
-            let playback_index = ui.selected_index;
-            rebuild_playback_order(&mut ui, playback_index);
-        } else if !ui.playback_session.queue_tracks.is_empty() {
-            ui.playback_session.queue_index =
-                Some(index.min(ui.playback_session.queue_tracks.len().saturating_sub(1)));
-        } else {
-            ui.selected_index = index.min(ui.tracks.len().saturating_sub(1));
-            ui.playback_session.queue_tracks = ui.tracks.clone();
-            ui.playback_session.queue_index = Some(ui.selected_index);
-            let playback_index = ui.selected_index;
-            rebuild_playback_order(&mut ui, playback_index);
-        }
-
-        let visible_index = ui
-            .playback_session
-            .queue_index
-            .and_then(|playback_index| ui.playback_session.queue_tracks.get(playback_index))
-            .map(track_key)
-            .and_then(|key| ui.tracks.iter().position(|track| track_key(track) == key));
-        if let Some(visible_index) = visible_index {
-            ui.selected_index = visible_index;
-        }
+        let tracks = ui.tracks.clone();
+        let selection = ui.playback_session.select_library_track(
+            &tracks,
+            index,
+            rebuild_order,
+            |queued, visible| track_key(queued) == track_key(visible),
+        );
+        ui.selected_index = selection.selected_index;
 
         update_now_playing_labels(&ui);
         update_play_button(&ui);
-        (ui.selected_index, visible_index)
+        (ui.selected_index, selection.visible_index)
     };
     if visible_index.is_some() {
         select_track_model_row(state, selected_index);
