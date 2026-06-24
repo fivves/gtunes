@@ -8344,17 +8344,12 @@ fn apply_gapless_transition(state: &Rc<RefCell<UiState>>) -> bool {
             .iter()
             .map(|track| track.item_id.clone())
             .collect::<Vec<_>>();
-        let current_index = ui.playback_session.current_index_or(ui.selected_index);
-        let transition_index = session::gapless_transition_index(
+        let selected_index = ui.selected_index;
+        ui.playback_session.apply_gapless_transition(
             &item_ids_by_index,
-            &ui.playback_session.playback_order,
-            current_index,
+            selected_index,
             &transition.item_id,
         );
-
-        if let Some(index) = transition_index {
-            ui.playback_session.queue_index = Some(index);
-        }
 
         if let Some(track) = ui
             .playback_session

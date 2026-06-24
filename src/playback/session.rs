@@ -137,6 +137,23 @@ impl<T> PlaybackSession<T> {
         };
         self.rebuild_order(track_count, playback_index);
     }
+
+    pub(crate) fn apply_gapless_transition(
+        &mut self,
+        item_ids_by_index: &[Option<String>],
+        fallback_index: usize,
+        transition_item_id: &str,
+    ) -> Option<usize> {
+        let current_index = self.current_index_or(fallback_index);
+        let transition_index = gapless_transition_index(
+            item_ids_by_index,
+            &self.playback_order,
+            current_index,
+            transition_item_id,
+        )?;
+        self.queue_index = Some(transition_index);
+        Some(transition_index)
+    }
 }
 
 impl<T: Clone> PlaybackSession<T> {
@@ -804,6 +821,55 @@ mod tests {
 
         assert!(!session.shuffle_enabled);
         assert_eq!(session.playback_order, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn playback_session_gapless_transition_sets_matching_queue_index() {
+        let mut session = PlaybackSession {
+            queue_index: Some(0),
+            playback_order: vec![0, 1, 2],
+            ..PlaybackSession::<&str>::default()
+        };
+        let item_ids = vec![
+            Some("first".to_string()),
+            Some("second".to_string()),
+            Some("third".to_string()),
+        ];
+
+        let index = session.apply_gapless_transition(&item_ids, 0, "third");
+
+        assert_eq!(index, Some(2));
+        assert_eq!(session.queue_index, Some(2));
+    }
+
+    #[test]
+    fn playback_session_gapless_transition_falls_back_to_next_ordered_index() {
+        let mut session = PlaybackSession {
+            queue_index: Some(0),
+            playback_order: vec![0, 2, 1],
+            ..PlaybackSession::<&str>::default()
+        };
+        let item_ids = vec![Some("first".to_string()), Some("second".to_string())];
+
+        let index = session.apply_gapless_transition(&item_ids, 0, "missing");
+
+        assert_eq!(index, Some(2));
+        assert_eq!(session.queue_index, Some(2));
+    }
+
+    #[test]
+    fn playback_session_gapless_transition_keeps_index_when_target_missing() {
+        let mut session = PlaybackSession {
+            queue_index: Some(0),
+            playback_order: vec![0],
+            ..PlaybackSession::<&str>::default()
+        };
+        let item_ids = vec![Some("first".to_string())];
+
+        let index = session.apply_gapless_transition(&item_ids, 0, "missing");
+
+        assert_eq!(index, None);
+        assert_eq!(session.queue_index, Some(0));
     }
 
     #[test]

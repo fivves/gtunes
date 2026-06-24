@@ -116,6 +116,9 @@ background integrations should not implicitly drive playback state.
    - Progress: library playback start and now-playing clearing now live in
      `session::PlaybackSession`; playback, fallback, gapless, and end/error
      paths no longer assign the current item key directly.
+   - Progress: gapless transition application now lives in
+     `session::PlaybackSession`; `window.rs` no longer assigns the active
+     queue index directly when the playback engine reports a transition.
 
 3. [x] Preserve position during direct-play fallback.
    - Capture the current playback position before retrying with a Jellyfin
@@ -179,6 +182,9 @@ background integrations should not implicitly drive playback state.
      library playback state while preserving shuffle.
    - Progress: `PlaybackSession` tests now cover library playback start and
      current-item clearing without disturbing queue or mode state.
+   - Progress: `PlaybackSession` tests now cover applying gapless transitions
+     by matching item ID, falling back to the next ordered item, and preserving
+     the current index when no transition target exists.
 
 ## Follow-Up Candidates
 
