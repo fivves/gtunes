@@ -4588,31 +4588,34 @@ fn restore_playback_snapshot_tracks(
     library_tracks: &[UiTrack],
     snapshot: &PersistedPlaybackState,
 ) -> Option<(Vec<UiTrack>, usize, Vec<usize>)> {
-    if snapshot.current_item_id.is_empty() || snapshot.ordered_item_ids.is_empty() {
-        return None;
-    }
-
     let tracks_by_id = library_tracks
         .iter()
         .filter_map(|track| track.item_id.as_deref().map(|item_id| (item_id, track)))
         .collect::<HashMap<_, _>>();
-    let mut seen = HashSet::new();
-    let playback_tracks = snapshot
-        .ordered_item_ids
+    let library_item_ids = library_tracks
         .iter()
-        .filter(|item_id| seen.insert((*item_id).clone()))
+        .filter_map(|track| track.item_id.clone())
+        .collect::<Vec<_>>();
+    let restored = session::restore_ordered_item_ids(
+        &library_item_ids,
+        &snapshot.ordered_item_ids,
+        &snapshot.current_item_id,
+    )?;
+    let playback_tracks = restored
+        .item_ids
+        .iter()
         .filter_map(|item_id| {
             tracks_by_id
                 .get(item_id.as_str())
                 .map(|track| (*track).clone())
         })
         .collect::<Vec<_>>();
-    let playback_index = playback_tracks
-        .iter()
-        .position(|track| track.item_id.as_deref() == Some(snapshot.current_item_id.as_str()))?;
-    let playback_order = (0..playback_tracks.len()).collect::<Vec<_>>();
 
-    Some((playback_tracks, playback_index, playback_order))
+    Some((
+        playback_tracks,
+        restored.current_index,
+        restored.playback_order,
+    ))
 }
 
 fn sort_track_slice(

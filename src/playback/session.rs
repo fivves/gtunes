@@ -1,4 +1,12 @@
+use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RestoredPlaybackItems {
+    pub item_ids: Vec<String>,
+    pub current_index: usize,
+    pub playback_order: Vec<usize>,
+}
 
 pub(crate) fn build_playback_order(
     track_count: usize,
@@ -143,6 +151,38 @@ pub(crate) fn queue_track_next_in_playback_order(
     true
 }
 
+pub(crate) fn restore_ordered_item_ids(
+    library_item_ids: &[String],
+    ordered_item_ids: &[String],
+    current_item_id: &str,
+) -> Option<RestoredPlaybackItems> {
+    if current_item_id.is_empty() || ordered_item_ids.is_empty() {
+        return None;
+    }
+
+    let available_item_ids = library_item_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    let item_ids = ordered_item_ids
+        .iter()
+        .filter(|item_id| available_item_ids.contains(item_id.as_str()))
+        .filter(|item_id| seen.insert((*item_id).clone()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let current_index = item_ids
+        .iter()
+        .position(|item_id| item_id == current_item_id)?;
+    let playback_order = (0..item_ids.len()).collect::<Vec<_>>();
+
+    Some(RestoredPlaybackItems {
+        item_ids,
+        current_index,
+        playback_order,
+    })
+}
+
 fn shuffle_indices(indices: &mut [usize]) {
     let mut seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -218,6 +258,39 @@ mod tests {
         assert_eq!(upcoming_track_count(&[0, 1, 2, 3], 1), 2);
         assert_eq!(upcoming_track_count(&[0, 1, 2, 3], 3), 0);
         assert_eq!(upcoming_track_count(&[0, 1, 2, 3], 99), 0);
+    }
+
+    #[test]
+    fn restore_ordered_item_ids_uses_available_library_items() {
+        let library_item_ids = vec![
+            "first".to_string(),
+            "second".to_string(),
+            "third".to_string(),
+        ];
+        let ordered_item_ids = vec![
+            "first".to_string(),
+            "missing".to_string(),
+            "second".to_string(),
+            "first".to_string(),
+            "third".to_string(),
+        ];
+
+        let restored = restore_ordered_item_ids(&library_item_ids, &ordered_item_ids, "second")
+            .expect("queue restores");
+
+        assert_eq!(restored.item_ids, vec!["first", "second", "third"]);
+        assert_eq!(restored.current_index, 1);
+        assert_eq!(restored.playback_order, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn restore_ordered_item_ids_requires_current_item() {
+        let library_item_ids = vec!["first".to_string()];
+        let ordered_item_ids = vec!["first".to_string()];
+
+        assert!(
+            restore_ordered_item_ids(&library_item_ids, &ordered_item_ids, "missing").is_none()
+        );
     }
 
     #[test]
