@@ -60,6 +60,11 @@ impl<T> PlaybackSession<T> {
         self.clear_queue();
     }
 
+    pub(crate) fn reset_to_empty_library(&mut self) {
+        self.shuffle_enabled = false;
+        self.reset_to_library();
+    }
+
     pub(crate) fn activate_radio(&mut self, station_id: String) {
         self.mode.set_radio(station_id);
         self.now_playing_key = None;
@@ -698,6 +703,29 @@ mod tests {
         assert_eq!(session.queue_index, None);
         assert!(session.playback_order.is_empty());
         assert!(session.shuffle_enabled);
+    }
+
+    #[test]
+    fn playback_session_reset_to_empty_library_clears_shuffle_and_playback() {
+        let mut session = PlaybackSession {
+            mode: PlaybackMode::Radio {
+                station_id: "station-1".to_string(),
+            },
+            now_playing_key: Some("track-1".to_string()),
+            queue_tracks: vec!["track-1"],
+            queue_index: Some(0),
+            playback_order: vec![0],
+            shuffle_enabled: true,
+        };
+
+        session.reset_to_empty_library();
+
+        assert!(!session.mode.is_radio());
+        assert_eq!(session.now_playing_key, None);
+        assert!(session.queue_tracks.is_empty());
+        assert_eq!(session.queue_index, None);
+        assert!(session.playback_order.is_empty());
+        assert!(!session.shuffle_enabled);
     }
 
     #[test]

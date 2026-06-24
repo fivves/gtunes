@@ -122,6 +122,9 @@ background integrations should not implicitly drive playback state.
    - Progress: playback-finished session cleanup now lives in
      `session::PlaybackSession`; end-of-queue handling clears current playback
      and queue state through a single session transition while preserving mode.
+   - Progress: empty-library reset now lives in `session::PlaybackSession`;
+     disconnect/cache-reset UI no longer clears shuffle and playback state as
+     separate field mutations.
 
 3. [x] Preserve position during direct-play fallback.
    - Capture the current playback position before retrying with a Jellyfin
@@ -190,6 +193,8 @@ background integrations should not implicitly drive playback state.
      the current index when no transition target exists.
    - Progress: `PlaybackSession` tests now cover playback-finished cleanup for
      library and radio modes.
+   - Progress: `PlaybackSession` tests now cover empty-library reset clearing
+     shuffle, mode, current item, and queue state.
 
 ## Follow-Up Candidates
 

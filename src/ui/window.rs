@@ -2381,8 +2381,7 @@ fn apply_first_time_setup_state(state: &Rc<RefCell<UiState>>) {
         ui.jellyfin_connected = false;
         ui.sort_column = LibraryViewSettings::default().sort_column;
         ui.sort_ascending = LibraryViewSettings::default().sort_ascending;
-        ui.playback_session.shuffle_enabled = false;
-        ui.playback_session.reset_to_library();
+        ui.playback_session.reset_to_empty_library();
         ui.track_indicators.clear();
         {
             let mut waveform = ui.waveform.borrow_mut();
