@@ -75,6 +75,13 @@ impl<T> PlaybackSession<T> {
         self.now_playing_key = None;
     }
 
+    pub(crate) fn finish_playback(&mut self) -> bool {
+        let was_radio = self.mode.is_radio();
+        self.now_playing_key = None;
+        self.clear_queue();
+        was_radio
+    }
+
     pub(crate) fn rebuild_order(&mut self, track_count: usize, start_index: usize) {
         self.playback_order = build_playback_order(track_count, start_index, self.shuffle_enabled);
     }
@@ -757,6 +764,52 @@ mod tests {
         assert_eq!(session.queue_tracks, vec!["track-1"]);
         assert_eq!(session.queue_index, Some(0));
         assert_eq!(session.playback_order, vec![0]);
+        assert!(session.shuffle_enabled);
+    }
+
+    #[test]
+    fn playback_session_finish_playback_clears_library_queue_and_reports_mode() {
+        let mut session = PlaybackSession {
+            mode: PlaybackMode::Library,
+            now_playing_key: Some("track-1".to_string()),
+            queue_tracks: vec!["track-1"],
+            queue_index: Some(0),
+            playback_order: vec![0],
+            shuffle_enabled: true,
+        };
+
+        let was_radio = session.finish_playback();
+
+        assert!(!was_radio);
+        assert!(!session.mode.is_radio());
+        assert_eq!(session.now_playing_key, None);
+        assert!(session.queue_tracks.is_empty());
+        assert_eq!(session.queue_index, None);
+        assert!(session.playback_order.is_empty());
+        assert!(session.shuffle_enabled);
+    }
+
+    #[test]
+    fn playback_session_finish_playback_preserves_radio_mode() {
+        let mut session = PlaybackSession {
+            mode: PlaybackMode::Radio {
+                station_id: "station-1".to_string(),
+            },
+            now_playing_key: Some("track-1".to_string()),
+            queue_tracks: vec!["track-1"],
+            queue_index: Some(0),
+            playback_order: vec![0],
+            shuffle_enabled: true,
+        };
+
+        let was_radio = session.finish_playback();
+
+        assert!(was_radio);
+        assert_eq!(session.mode.radio_station_id(), Some("station-1"));
+        assert_eq!(session.now_playing_key, None);
+        assert!(session.queue_tracks.is_empty());
+        assert_eq!(session.queue_index, None);
+        assert!(session.playback_order.is_empty());
         assert!(session.shuffle_enabled);
     }
 

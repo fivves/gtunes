@@ -8400,9 +8400,7 @@ fn advance_after_track_end(state: &Rc<RefCell<UiState>>) {
     } else {
         {
             let mut ui = state.borrow_mut();
-            let radio_was_active = ui.playback_session.mode.is_radio();
-            ui.playback_session.clear_now_playing();
-            ui.playback_session.clear_queue();
+            let radio_was_active = ui.playback_session.finish_playback();
             if radio_was_active {
                 ui.playback_status.set_text("Radio stream ended");
             } else {

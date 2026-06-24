@@ -119,6 +119,9 @@ background integrations should not implicitly drive playback state.
    - Progress: gapless transition application now lives in
      `session::PlaybackSession`; `window.rs` no longer assigns the active
      queue index directly when the playback engine reports a transition.
+   - Progress: playback-finished session cleanup now lives in
+     `session::PlaybackSession`; end-of-queue handling clears current playback
+     and queue state through a single session transition while preserving mode.
 
 3. [x] Preserve position during direct-play fallback.
    - Capture the current playback position before retrying with a Jellyfin
@@ -185,6 +188,8 @@ background integrations should not implicitly drive playback state.
    - Progress: `PlaybackSession` tests now cover applying gapless transitions
      by matching item ID, falling back to the next ordered item, and preserving
      the current index when no transition target exists.
+   - Progress: `PlaybackSession` tests now cover playback-finished cleanup for
+     library and radio modes.
 
 ## Follow-Up Candidates
 
