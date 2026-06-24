@@ -282,17 +282,12 @@ fn queue_artwork_upload(
         return;
     }
 
-    let path = artwork_cache_path(&source_url);
-    if !path.exists() {
-        return;
-    }
-
     let upload_cache_id = cache_id.clone();
     uploading.insert(cache_id);
     let sender = sender.clone();
     let spawn_result = std::thread::Builder::new()
         .name("gtunes-discord-artwork-upload".to_string())
-        .spawn(move || match upload_artwork_file(&path) {
+        .spawn(move || match upload_artwork_file(&source_url) {
             Ok(public_url) => {
                 let _ = sender.send(PresenceCommand::ArtworkUploaded {
                     generation,
@@ -333,8 +328,8 @@ fn persist_artwork_url(source_url: &str, public_url: &str) {
     }
 }
 
-fn upload_artwork_file(path: &PathBuf) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+fn upload_artwork_file(source_url: &str) -> Result<String, String> {
+    let bytes = cached_or_downloaded_artwork_bytes(source_url)?;
     let (file_name, content_type) = discord_artwork_file_metadata(&bytes);
     let part = reqwest::blocking::multipart::Part::bytes(bytes)
         .file_name(file_name)
@@ -366,6 +361,29 @@ fn upload_artwork_file(path: &PathBuf) -> Result<String, String> {
     let url = upload.url.ok_or("PictShare upload did not return a URL")?;
     validate_pictshare_url(&url)?;
     Ok(url)
+}
+
+fn cached_or_downloaded_artwork_bytes(source_url: &str) -> Result<Vec<u8>, String> {
+    let path = artwork_cache_path(source_url);
+    if path.exists() {
+        return std::fs::read(&path).map_err(|error| error.to_string());
+    }
+
+    let response = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| error.to_string())?
+        .get(source_url)
+        .send()
+        .map_err(|error| error.to_string())?;
+
+    if !response.status().is_success() {
+        return Err(format!("artwork request returned HTTP {}", response.status()));
+    }
+
+    let bytes = response.bytes().map_err(|error| error.to_string())?.to_vec();
+    std::fs::write(&path, &bytes).map_err(|error| error.to_string())?;
+    Ok(bytes)
 }
 
 fn discord_artwork_file_metadata(bytes: &[u8]) -> (&'static str, &'static str) {
