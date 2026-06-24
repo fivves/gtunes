@@ -113,6 +113,9 @@ background integrations should not implicitly drive playback state.
      queue or visible library count.
    - Progress: radio activation now lives in `session::PlaybackSession`,
      including station mode selection, now-playing clearing, and queue reset.
+   - Progress: library playback start and now-playing clearing now live in
+     `session::PlaybackSession`; playback, fallback, gapless, and end/error
+     paths no longer assign the current item key directly.
 
 3. [x] Preserve position during direct-play fallback.
    - Capture the current playback position before retrying with a Jellyfin
@@ -174,6 +177,8 @@ background integrations should not implicitly drive playback state.
      playback and library-count fallback.
    - Progress: `PlaybackSession` tests now cover radio activation clearing
      library playback state while preserving shuffle.
+   - Progress: `PlaybackSession` tests now cover library playback start and
+     current-item clearing without disturbing queue or mode state.
 
 ## Follow-Up Candidates
 

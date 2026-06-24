@@ -66,6 +66,15 @@ impl<T> PlaybackSession<T> {
         self.clear_queue();
     }
 
+    pub(crate) fn start_library_playback(&mut self, now_playing_key: String) {
+        self.now_playing_key = Some(now_playing_key);
+        self.mode.set_library();
+    }
+
+    pub(crate) fn clear_now_playing(&mut self) {
+        self.now_playing_key = None;
+    }
+
     pub(crate) fn rebuild_order(&mut self, track_count: usize, start_index: usize) {
         self.playback_order = build_playback_order(track_count, start_index, self.shuffle_enabled);
     }
@@ -685,6 +694,52 @@ mod tests {
         assert!(session.queue_tracks.is_empty());
         assert_eq!(session.queue_index, None);
         assert!(session.playback_order.is_empty());
+        assert!(session.shuffle_enabled);
+    }
+
+    #[test]
+    fn playback_session_start_library_playback_sets_key_and_library_mode() {
+        let mut session = PlaybackSession {
+            mode: PlaybackMode::Radio {
+                station_id: "station-1".to_string(),
+            },
+            now_playing_key: None,
+            queue_tracks: vec!["track-1"],
+            queue_index: Some(0),
+            playback_order: vec![0],
+            shuffle_enabled: true,
+        };
+
+        session.start_library_playback("track-1".to_string());
+
+        assert!(!session.mode.is_radio());
+        assert_eq!(session.now_playing_key.as_deref(), Some("track-1"));
+        assert_eq!(session.queue_tracks, vec!["track-1"]);
+        assert_eq!(session.queue_index, Some(0));
+        assert_eq!(session.playback_order, vec![0]);
+        assert!(session.shuffle_enabled);
+    }
+
+    #[test]
+    fn playback_session_clear_now_playing_keeps_queue_and_mode() {
+        let mut session = PlaybackSession {
+            mode: PlaybackMode::Radio {
+                station_id: "station-1".to_string(),
+            },
+            now_playing_key: Some("track-1".to_string()),
+            queue_tracks: vec!["track-1"],
+            queue_index: Some(0),
+            playback_order: vec![0],
+            shuffle_enabled: true,
+        };
+
+        session.clear_now_playing();
+
+        assert_eq!(session.mode.radio_station_id(), Some("station-1"));
+        assert_eq!(session.now_playing_key, None);
+        assert_eq!(session.queue_tracks, vec!["track-1"]);
+        assert_eq!(session.queue_index, Some(0));
+        assert_eq!(session.playback_order, vec![0]);
         assert!(session.shuffle_enabled);
     }
 

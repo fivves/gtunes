@@ -6372,7 +6372,7 @@ fn play_selected_track(state: &Rc<RefCell<UiState>>) {
         return;
     };
     let Some(playback) = ui.playback.as_mut() else {
-        ui.playback_session.now_playing_key = None;
+        ui.playback_session.clear_now_playing();
         ui.playback_status
             .set_text("GStreamer playbin is unavailable");
         update_play_button(&ui);
@@ -6391,8 +6391,8 @@ fn play_selected_track(state: &Rc<RefCell<UiState>>) {
     let mut refresh_now_playing = false;
     match playback.play(request) {
         Ok(()) => {
-            ui.playback_session.now_playing_key = Some(track_key(&track));
-            ui.playback_session.mode.set_library();
+            ui.playback_session
+                .start_library_playback(track_key(&track));
             arm_gapless_next(&mut ui);
             save_playback_snapshot_now(&mut ui);
             update_now_playing_labels(&ui);
@@ -6402,7 +6402,7 @@ fn play_selected_track(state: &Rc<RefCell<UiState>>) {
             refresh_now_playing = true;
         }
         Err(error) => {
-            ui.playback_session.now_playing_key = None;
+            ui.playback_session.clear_now_playing();
             ui.playback_status
                 .set_text(&format!("Playback failed: {error}"));
             sync_external_playback_status(&mut ui);
@@ -8283,7 +8283,7 @@ fn handle_playback_error(
                             },
                         })
                         .unwrap_or(session::FallbackSeekRestore::NotNeeded);
-                    ui.playback_session.now_playing_key = Some(track_key_value);
+                    ui.playback_session.start_library_playback(track_key_value);
                     arm_gapless_next(&mut ui);
                     save_playback_snapshot_now(&mut ui);
                     update_now_playing_labels(&ui);
@@ -8316,7 +8316,7 @@ fn handle_playback_error(
             ui.playback_status
                 .set_text(&format!("Playback failed: {message}"));
         }
-        ui.playback_session.now_playing_key = None;
+        ui.playback_session.clear_now_playing();
         arm_gapless_next(&mut ui);
         save_playback_snapshot_now(&mut ui);
         update_play_button(&ui);
@@ -8363,7 +8363,8 @@ fn apply_gapless_transition(state: &Rc<RefCell<UiState>>) -> bool {
             .cloned()
         {
             let quality = track.quality.clone();
-            ui.playback_session.now_playing_key = Some(track_key(&track));
+            ui.playback_session
+                .start_library_playback(track_key(&track));
             if let Some(visible_index) = ui
                 .tracks
                 .iter()
@@ -8374,7 +8375,7 @@ fn apply_gapless_transition(state: &Rc<RefCell<UiState>>) -> bool {
             update_now_playing_labels(&ui);
             ui.playback_status.set_text(&format!("Playing | {quality}"));
         } else {
-            ui.playback_session.now_playing_key = None;
+            ui.playback_session.clear_now_playing();
             ui.playback_status.set_text("Playing next stream");
         }
 
@@ -8405,7 +8406,7 @@ fn advance_after_track_end(state: &Rc<RefCell<UiState>>) {
         {
             let mut ui = state.borrow_mut();
             let radio_was_active = ui.playback_session.mode.is_radio();
-            ui.playback_session.now_playing_key = None;
+            ui.playback_session.clear_now_playing();
             ui.playback_session.clear_queue();
             if radio_was_active {
                 ui.playback_status.set_text("Radio stream ended");
