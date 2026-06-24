@@ -78,6 +78,9 @@ background integrations should not implicitly drive playback state.
    - Progress: persisted playback snapshot data and ordered item ID
      construction now live in `src/playback/session.rs`; `window.rs` only
      gathers UI/runtime inputs and handles cache storage.
+   - Progress: radio/library playback mode now lives in
+     `src/playback/session.rs` through `PlaybackMode`; `window.rs` no longer
+     owns a raw radio-station ID field.
 
 3. [x] Preserve position during direct-play fallback.
    - Capture the current playback position before retrying with a Jellyfin
@@ -111,6 +114,9 @@ background integrations should not implicitly drive playback state.
      current item is unavailable.
    - Progress: snapshot tests now cover queue item deduping, persisted version
      assignment, position/shuffle capture, and invalid snapshot rejection.
+   - Progress: radio isolation has focused session coverage through
+     `PlaybackMode` tests for library mode, radio mode, station IDs, and mode
+     reset.
 
 ## Follow-Up Candidates
 

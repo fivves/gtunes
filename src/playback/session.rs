@@ -8,6 +8,36 @@ pub(crate) struct RestoredPlaybackItems {
     pub playback_order: Vec<usize>,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) enum PlaybackMode {
+    #[default]
+    Library,
+    Radio {
+        station_id: String,
+    },
+}
+
+impl PlaybackMode {
+    pub(crate) fn is_radio(&self) -> bool {
+        matches!(self, Self::Radio { .. })
+    }
+
+    pub(crate) fn radio_station_id(&self) -> Option<&str> {
+        match self {
+            Self::Radio { station_id } => Some(station_id),
+            Self::Library => None,
+        }
+    }
+
+    pub(crate) fn set_library(&mut self) {
+        *self = Self::Library;
+    }
+
+    pub(crate) fn set_radio(&mut self, station_id: String) {
+        *self = Self::Radio { station_id };
+    }
+}
+
 pub(crate) const PLAYBACK_STATE_VERSION: u8 = 1;
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -255,6 +285,22 @@ mod tests {
         for index in 0..5 {
             assert!(order.contains(&index));
         }
+    }
+
+    #[test]
+    fn playback_mode_tracks_library_or_radio_state() {
+        let mut mode = PlaybackMode::default();
+
+        assert!(!mode.is_radio());
+        assert_eq!(mode.radio_station_id(), None);
+
+        mode.set_radio("station-1".to_string());
+        assert!(mode.is_radio());
+        assert_eq!(mode.radio_station_id(), Some("station-1"));
+
+        mode.set_library();
+        assert!(!mode.is_radio());
+        assert_eq!(mode.radio_station_id(), None);
     }
 
     #[test]

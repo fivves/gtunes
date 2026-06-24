@@ -174,7 +174,7 @@ struct UiState {
     keep_playing_while_closed: bool,
     shuffle_enabled: bool,
     now_playing_key: Option<String>,
-    current_radio_station_id: Option<String>,
+    playback_mode: session::PlaybackMode,
     track_indicators: Vec<(String, gtk::Image)>,
     playback_tracks: Vec<UiTrack>,
     playback_index: Option<usize>,
@@ -657,7 +657,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         keep_playing_while_closed,
         shuffle_enabled: false,
         now_playing_key: None,
-        current_radio_station_id: None,
+        playback_mode: session::PlaybackMode::default(),
         track_indicators: Vec::new(),
         playback_tracks: Vec::new(),
         playback_index: None,
@@ -1605,10 +1605,10 @@ fn handle_mpris_event(state: &Rc<RefCell<UiState>>, event: MediaControlEvent) {
         MediaControlEvent::Play => resume_playback(state),
         MediaControlEvent::Pause => pause_playback(state),
         MediaControlEvent::Toggle => toggle_play_pause(state),
-        MediaControlEvent::Next if state.borrow().current_radio_station_id.is_none() => {
+        MediaControlEvent::Next if !state.borrow().playback_mode.is_radio() => {
             play_next_track(state);
         }
-        MediaControlEvent::Previous if state.borrow().current_radio_station_id.is_none() => {
+        MediaControlEvent::Previous if !state.borrow().playback_mode.is_radio() => {
             play_previous_track(state);
         }
         MediaControlEvent::Next | MediaControlEvent::Previous => {}
@@ -1863,7 +1863,7 @@ fn build_player_bar(state: Rc<RefCell<UiState>>) -> gtk::Box {
         let state_click = state.clone();
         let click = gtk::GestureClick::new();
         click.connect_pressed(move |_, _, _, _| {
-            if state_click.borrow().current_radio_station_id.is_some() {
+            if state_click.borrow().playback_mode.is_radio() {
                 set_library_page(&state_click, LibraryPage::Radio);
             } else {
                 scroll_to_now_playing(&state_click);
@@ -2393,7 +2393,7 @@ fn apply_first_time_setup_state(state: &Rc<RefCell<UiState>>) {
         ui.sort_ascending = LibraryViewSettings::default().sort_ascending;
         ui.shuffle_enabled = false;
         ui.now_playing_key = None;
-        ui.current_radio_station_id = None;
+        ui.playback_mode.set_library();
         ui.track_indicators.clear();
         ui.playback_tracks.clear();
         ui.playback_index = None;
@@ -4464,7 +4464,7 @@ fn set_keep_playing_while_closed(state: &Rc<RefCell<UiState>>, enabled: bool) {
 }
 
 fn playback_snapshot(ui: &UiState) -> Option<session::PersistedPlaybackState> {
-    if ui.current_radio_station_id.is_some() {
+    if ui.playback_mode.is_radio() {
         return None;
     }
 
@@ -4799,7 +4799,7 @@ fn restore_persisted_playback(state: &Rc<RefCell<UiState>>) {
         ui.playback_order = playback_order;
         ui.selected_index = selected_index.min(ui.tracks.len().saturating_sub(1));
         ui.now_playing_key = ui.playback_tracks.get(playback_index).map(track_key);
-        ui.current_radio_station_id = None;
+        ui.playback_mode.set_library();
         update_shuffle_button(&ui);
         update_now_playing_labels(&ui);
         update_play_button(&ui);
@@ -5000,7 +5000,7 @@ fn return_to_collection_grid(state: &Rc<RefCell<UiState>>) {
 fn navigate_to_now_playing_artist(state: &Rc<RefCell<UiState>>) {
     let artist = {
         let ui = state.borrow();
-        if ui.current_radio_station_id.is_some() {
+        if ui.playback_mode.is_radio() {
             return;
         }
         let Some(track) = current_display_track(&ui) else {
@@ -5022,7 +5022,7 @@ fn navigate_to_now_playing_artist(state: &Rc<RefCell<UiState>>) {
 fn navigate_to_now_playing_album(state: &Rc<RefCell<UiState>>) {
     let album = {
         let ui = state.borrow();
-        if ui.current_radio_station_id.is_some() {
+        if ui.playback_mode.is_radio() {
             return;
         }
         let Some(track) = current_display_track(&ui) else {
@@ -5238,7 +5238,7 @@ fn save_radio_stations(stations: &[RadioStation]) {
 }
 
 fn current_radio_station(ui: &UiState) -> Option<RadioStation> {
-    let station_id = ui.current_radio_station_id.as_deref()?;
+    let station_id = ui.playback_mode.radio_station_id()?;
     radio_stations_for_display_from(&ui.radio_stations)
         .into_iter()
         .find(|station| station.id == station_id)
@@ -5304,8 +5304,7 @@ fn radio_station_card(state: Rc<RefCell<UiState>>, station: RadioStation) -> gtk
     card.set_vexpand(false);
     card.set_tooltip_text(Some(&station.url));
     card.set_cursor_from_name(Some("pointer"));
-    let is_current =
-        state.borrow().current_radio_station_id.as_deref() == Some(station.id.as_str());
+    let is_current = state.borrow().playback_mode.radio_station_id() == Some(station.id.as_str());
     if is_current {
         card.add_css_class("radio-station-card-playing");
     }
@@ -5372,7 +5371,7 @@ fn radio_station_card(state: Rc<RefCell<UiState>>, station: RadioStation) -> gtk
         let state = state.clone();
         remove.connect_clicked(move |_| {
             let mut ui = state.borrow_mut();
-            let was_current = ui.current_radio_station_id.as_deref() == Some(station_id.as_str());
+            let was_current = ui.playback_mode.radio_station_id() == Some(station_id.as_str());
             ui.radio_stations
                 .retain(|candidate| candidate.id != station_id);
             if was_current {
@@ -5508,7 +5507,7 @@ fn resolve_and_play_radio_station(
         match receiver.try_recv() {
             Ok(Ok(stream_url)) => {
                 let still_selected =
-                    state.borrow().current_radio_station_id.as_deref() == Some(station_id.as_str());
+                    state.borrow().playback_mode.radio_station_id() == Some(station_id.as_str());
                 if still_selected {
                     play_resolved_radio_station(&state, &station, stream_url);
                 }
@@ -5516,7 +5515,7 @@ fn resolve_and_play_radio_station(
             }
             Ok(Err(error)) => {
                 let mut ui = state.borrow_mut();
-                if ui.current_radio_station_id.as_deref() == Some(station_id.as_str()) {
+                if ui.playback_mode.radio_station_id() == Some(station_id.as_str()) {
                     ui.playback_status.set_text(&format!(
                         "{} resolver failed: {error}",
                         station.source_label()
@@ -5529,7 +5528,7 @@ fn resolve_and_play_radio_station(
             Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
             Err(mpsc::TryRecvError::Disconnected) => {
                 let mut ui = state.borrow_mut();
-                if ui.current_radio_station_id.as_deref() == Some(station_id.as_str()) {
+                if ui.playback_mode.radio_station_id() == Some(station_id.as_str()) {
                     ui.playback_status
                         .set_text("Radio resolver stopped unexpectedly");
                     update_play_button(&ui);
@@ -5585,7 +5584,7 @@ fn set_active_radio_station_ui(
     station: &RadioStation,
     status_override: Option<&str>,
 ) {
-    ui.current_radio_station_id = Some(station.id.clone());
+    ui.playback_mode.set_radio(station.id.clone());
     ui.now_playing_key = None;
     ui.playback_tracks.clear();
     ui.playback_index = None;
@@ -5830,7 +5829,7 @@ fn move_next_up_track(state: &Rc<RefCell<UiState>>, from: usize, to_slot: usize)
 }
 
 fn queue_track_next_by_key(ui: &mut UiState, target_key: &str, fallback_track: UiTrack) -> bool {
-    if ui.current_radio_station_id.is_some() {
+    if ui.playback_mode.is_radio() {
         return false;
     }
 
@@ -5967,7 +5966,7 @@ fn preferred_refresh_track_key(
 }
 
 fn current_display_track(state: &UiState) -> Option<&UiTrack> {
-    if state.current_radio_station_id.is_some() {
+    if state.playback_mode.is_radio() {
         return None;
     }
 
@@ -6233,7 +6232,7 @@ fn toggle_shuffle(state: &Rc<RefCell<UiState>>) {
 
 fn pause_playback(state: &Rc<RefCell<UiState>>) {
     let mut ui = state.borrow_mut();
-    let radio_is_active = ui.current_radio_station_id.is_some();
+    let radio_is_active = ui.playback_mode.is_radio();
 
     if let Some(playback) = ui.playback.as_mut() {
         let result = if radio_is_active {
@@ -6260,11 +6259,11 @@ fn resume_playback(state: &Rc<RefCell<UiState>>) {
 
     match ui.playback.as_ref().map(PlaybackEngine::state).cloned() {
         Some(PlaybackState::Paused) => {
-            if ui.current_radio_station_id.is_some() {
+            if ui.playback_mode.is_radio() {
                 drop(ui);
                 if !resume_radio_station(state) {
                     let mut ui = state.borrow_mut();
-                    ui.current_radio_station_id = None;
+                    ui.playback_mode.set_library();
                     ui.playback_status.set_text("Radio station is unavailable");
                     update_play_button(&ui);
                     sync_external_playback_status(&mut ui);
@@ -6319,7 +6318,7 @@ fn play_track_at_selected_index(state: &Rc<RefCell<UiState>>) {
 fn play_previous_track(state: &Rc<RefCell<UiState>>) {
     let previous_index = {
         let ui = state.borrow();
-        if ui.current_radio_station_id.is_some() {
+        if ui.playback_mode.is_radio() {
             return;
         }
         previous_playback_index(&ui)
@@ -6331,7 +6330,7 @@ fn play_previous_track(state: &Rc<RefCell<UiState>>) {
 fn play_next_track(state: &Rc<RefCell<UiState>>) {
     let next_index = {
         let ui = state.borrow();
-        if ui.current_radio_station_id.is_some() {
+        if ui.playback_mode.is_radio() {
             return;
         }
         next_playback_index(&ui).unwrap_or_else(|| ui.playback_index.unwrap_or(ui.selected_index))
@@ -6453,7 +6452,7 @@ fn play_selected_track(state: &Rc<RefCell<UiState>>) {
     match playback.play(request) {
         Ok(()) => {
             ui.now_playing_key = Some(track_key(&track));
-            ui.current_radio_station_id = None;
+            ui.playback_mode.set_library();
             arm_gapless_next(&mut ui);
             save_playback_snapshot_now(&mut ui);
             update_now_playing_labels(&ui);
@@ -6515,7 +6514,7 @@ fn arm_gapless_next(ui: &mut UiState) {
 
 fn stop_playback(ui: &mut UiState) {
     ui.now_playing_key = None;
-    ui.current_radio_station_id = None;
+    ui.playback_mode.set_library();
     ui.playback_tracks.clear();
     ui.playback_index = None;
     ui.playback_order.clear();
@@ -8362,7 +8361,7 @@ fn handle_playback_error(
 
     {
         let mut ui = state.borrow_mut();
-        if ui.current_radio_station_id.is_some() {
+        if ui.playback_mode.is_radio() {
             ui.playback_status
                 .set_text(&format!("Radio stream failed: {message}"));
         } else {
@@ -8469,7 +8468,7 @@ fn advance_after_track_end(state: &Rc<RefCell<UiState>>) {
     } else {
         {
             let mut ui = state.borrow_mut();
-            let radio_was_active = ui.current_radio_station_id.is_some();
+            let radio_was_active = ui.playback_mode.is_radio();
             ui.now_playing_key = None;
             ui.playback_tracks.clear();
             ui.playback_index = None;
