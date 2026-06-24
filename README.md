@@ -1,6 +1,6 @@
 # gTunes
 
-<img width="1896" height="1017" alt="image" src="https://github.com/user-attachments/assets/f2f18885-e19c-4a74-8bd0-6ed74932a98e" />
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/e1079cb5-40f8-4b48-b7a8-263abde81701" />
 
 </br>
 
