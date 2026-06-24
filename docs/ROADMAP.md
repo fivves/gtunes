@@ -81,6 +81,9 @@ background integrations should not implicitly drive playback state.
    - Progress: radio/library playback mode now lives in
      `src/playback/session.rs` through `PlaybackMode`; `window.rs` no longer
      owns a raw radio-station ID field.
+   - Progress: direct-play fallback eligibility and fallback status messaging
+     now live in `src/playback/session.rs`; `window.rs` performs track lookup
+     and GStreamer operations, then delegates fallback bookkeeping.
 
 3. [x] Preserve position during direct-play fallback.
    - Capture the current playback position before retrying with a Jellyfin
@@ -117,6 +120,9 @@ background integrations should not implicitly drive playback state.
    - Progress: radio isolation has focused session coverage through
      `PlaybackMode` tests for library mode, radio mode, station IDs, and mode
      reset.
+   - Progress: fallback tests now cover direct-only transcode retry
+     eligibility, restored-position status, failed seek-restore status, and
+     no-position fallback status.
 
 ## Follow-Up Candidates
 

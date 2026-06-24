@@ -1,11 +1,20 @@
 use std::collections::HashSet;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use super::PlaybackStreamKind;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RestoredPlaybackItems {
     pub item_ids: Vec<String>,
     pub current_index: usize,
     pub playback_order: Vec<usize>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum FallbackSeekRestore {
+    NotNeeded,
+    Restored(Duration),
+    Failed { position: Duration, error: String },
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -192,6 +201,32 @@ pub(crate) fn queue_track_next_in_playback_order(
     true
 }
 
+pub(crate) fn can_retry_with_transcode(stream_kind: Option<PlaybackStreamKind>) -> bool {
+    stream_kind == Some(PlaybackStreamKind::Direct)
+}
+
+pub(crate) fn fallback_playback_status(
+    quality: &str,
+    seek_restore: FallbackSeekRestore,
+    format_position: impl Fn(Duration) -> String,
+) -> String {
+    match seek_restore {
+        FallbackSeekRestore::Restored(position) => {
+            format!(
+                "Playing transcoded stream | {quality} | resumed at {}",
+                format_position(position)
+            )
+        }
+        FallbackSeekRestore::Failed { position, error } => {
+            format!(
+                "Playing transcoded stream | seek restore to {} failed: {error}",
+                format_position(position)
+            )
+        }
+        FallbackSeekRestore::NotNeeded => format!("Playing transcoded stream | {quality}"),
+    }
+}
+
 pub(crate) fn playback_snapshot(
     current_item_id: String,
     item_ids_by_index: &[Option<String>],
@@ -350,6 +385,62 @@ mod tests {
         assert_eq!(upcoming_track_count(&[0, 1, 2, 3], 1), 2);
         assert_eq!(upcoming_track_count(&[0, 1, 2, 3], 3), 0);
         assert_eq!(upcoming_track_count(&[0, 1, 2, 3], 99), 0);
+    }
+
+    #[test]
+    fn fallback_retry_only_applies_to_direct_streams() {
+        assert!(can_retry_with_transcode(Some(PlaybackStreamKind::Direct)));
+        assert!(!can_retry_with_transcode(Some(
+            PlaybackStreamKind::Transcode
+        )));
+        assert!(!can_retry_with_transcode(None));
+    }
+
+    #[test]
+    fn fallback_status_reports_restored_position() {
+        let status = fallback_playback_status(
+            "MP3 320 kbps",
+            FallbackSeekRestore::Restored(Duration::from_secs(83)),
+            test_format_duration,
+        );
+
+        assert_eq!(
+            status,
+            "Playing transcoded stream | MP3 320 kbps | resumed at 1:23"
+        );
+    }
+
+    #[test]
+    fn fallback_status_reports_seek_restore_failure() {
+        let status = fallback_playback_status(
+            "MP3 320 kbps",
+            FallbackSeekRestore::Failed {
+                position: Duration::from_secs(83),
+                error: "seek failed".to_string(),
+            },
+            test_format_duration,
+        );
+
+        assert_eq!(
+            status,
+            "Playing transcoded stream | seek restore to 1:23 failed: seek failed"
+        );
+    }
+
+    #[test]
+    fn fallback_status_handles_missing_position() {
+        let status = fallback_playback_status(
+            "MP3 320 kbps",
+            FallbackSeekRestore::NotNeeded,
+            test_format_duration,
+        );
+
+        assert_eq!(status, "Playing transcoded stream | MP3 320 kbps");
+    }
+
+    fn test_format_duration(duration: Duration) -> String {
+        let seconds = duration.as_secs();
+        format!("{}:{:02}", seconds / 60, seconds % 60)
     }
 
     #[test]

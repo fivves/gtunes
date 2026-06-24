@@ -8311,7 +8311,7 @@ fn handle_playback_error(
             })
             .or_else(|| current_display_track(&ui));
 
-        if stream_kind == Some(PlaybackStreamKind::Direct) {
+        if session::can_retry_with_transcode(stream_kind) {
             track.and_then(|track| {
                 playback_request_for_track_kind(track, PlaybackStreamKind::Transcode).map(
                     |request| {
@@ -8338,13 +8338,24 @@ fn handle_playback_error(
                 Ok(()) => {
                     let seek_restore = fallback_position
                         .filter(|position| !position.is_zero())
-                        .map(|position| (position, playback.seek(position)));
+                        .map(|position| match playback.seek(position) {
+                            Ok(()) => session::FallbackSeekRestore::Restored(position),
+                            Err(error) => session::FallbackSeekRestore::Failed {
+                                position,
+                                error: error.to_string(),
+                            },
+                        })
+                        .unwrap_or(session::FallbackSeekRestore::NotNeeded);
                     ui.now_playing_key = Some(track_key_value);
                     arm_gapless_next(&mut ui);
                     save_playback_snapshot_now(&mut ui);
                     update_now_playing_labels(&ui);
                     ui.playback_status
-                        .set_text(&fallback_playback_status(&quality, seek_restore));
+                        .set_text(&session::fallback_playback_status(
+                            &quality,
+                            seek_restore,
+                            format_duration,
+                        ));
                     update_play_button(&ui);
                     sync_external_playback_status(&mut ui);
                     drop(ui);
@@ -8375,27 +8386,6 @@ fn handle_playback_error(
         sync_external_playback(&mut ui);
     }
     update_list_indicators(state);
-}
-
-fn fallback_playback_status(
-    quality: &str,
-    seek_restore: Option<(Duration, Result<(), crate::playback::PlaybackError>)>,
-) -> String {
-    match seek_restore {
-        Some((position, Ok(()))) => {
-            format!(
-                "Playing transcoded stream | {quality} | resumed at {}",
-                format_duration(position)
-            )
-        }
-        Some((position, Err(error))) => {
-            format!(
-                "Playing transcoded stream | seek restore to {} failed: {error}",
-                format_duration(position)
-            )
-        }
-        None => format!("Playing transcoded stream | {quality}"),
-    }
 }
 
 fn apply_gapless_transition(state: &Rc<RefCell<UiState>>) -> bool {
@@ -9086,24 +9076,6 @@ mod tests {
             .map(|(_, track)| track.item_id.as_deref())
             .collect::<Vec<_>>();
         assert_eq!(queued_ids, vec![Some("track-3")]);
-    }
-
-    #[test]
-    fn fallback_status_reports_restored_position() {
-        let status =
-            fallback_playback_status("MP3 320 kbps", Some((Duration::from_secs(83), Ok(()))));
-
-        assert_eq!(
-            status,
-            "Playing transcoded stream | MP3 320 kbps | resumed at 1:23"
-        );
-    }
-
-    #[test]
-    fn fallback_status_handles_missing_position() {
-        let status = fallback_playback_status("MP3 320 kbps", None);
-
-        assert_eq!(status, "Playing transcoded stream | MP3 320 kbps");
     }
 
     #[test]
