@@ -69,6 +69,9 @@ background integrations should not implicitly drive playback state.
      dedicated playback/session module.
    - Keep the UI responsible for rendering state, not owning playback truth.
    - Add focused tests for session transitions once the state is isolated.
+   - Progress: playback order construction, upcoming queue indexing, drag
+     reordering, and queue-next mutation now live in `src/playback/session.rs`
+     with focused tests.
 
 3. [ ] Preserve position during direct-play fallback.
    - Capture the current playback position before retrying with a Jellyfin

@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub(crate) mod session;
+
 use gst::prelude::*;
 use std::collections::VecDeque;
 use std::process::Command;

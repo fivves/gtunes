@@ -23,7 +23,7 @@ use crate::jellyfin::{
 };
 use crate::playback::{
     ExternalStreamSource, PlaybackEngine, PlaybackEvent, PlaybackRequest, PlaybackState,
-    PlaybackStreamKind, resolve_external_stream_url,
+    PlaybackStreamKind, resolve_external_stream_url, session,
 };
 use crate::waveform::{WaveformKey, WaveformSummary};
 
@@ -5770,55 +5770,17 @@ fn rebuild_playback_order(ui: &mut UiState, start_index: usize) {
     } else {
         ui.playback_tracks.len()
     };
-
-    if track_count == 0 {
-        ui.playback_order.clear();
-        return;
-    }
-
-    let start_index = start_index.min(track_count.saturating_sub(1));
-    if ui.shuffle_enabled {
-        let mut remaining = (0..track_count)
-            .filter(|index| *index != start_index)
-            .collect::<Vec<_>>();
-        shuffle_indices(&mut remaining);
-        ui.playback_order = std::iter::once(start_index).chain(remaining).collect();
-    } else {
-        ui.playback_order = (0..track_count).collect();
-    }
-}
-
-fn shuffle_indices(indices: &mut [usize]) {
-    let mut seed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos() as u64)
-        .unwrap_or(0x9e37_79b9_7f4a_7c15);
-
-    for index in (1..indices.len()).rev() {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-        let swap_index = (seed as usize) % (index + 1);
-        indices.swap(index, swap_index);
-    }
+    ui.playback_order = session::build_playback_order(track_count, start_index, ui.shuffle_enabled);
 }
 
 fn next_playback_index(ui: &UiState) -> Option<usize> {
     let current_index = ui.playback_index.unwrap_or(ui.selected_index);
-    let order_position = ui
-        .playback_order
-        .iter()
-        .position(|index| *index == current_index)?;
-    ui.playback_order.get(order_position + 1).copied()
+    session::next_playback_index(&ui.playback_order, current_index)
 }
 
 fn previous_playback_index(ui: &UiState) -> Option<usize> {
     let current_index = ui.playback_index.unwrap_or(ui.selected_index);
-    let order_position = ui
-        .playback_order
-        .iter()
-        .position(|index| *index == current_index)?;
-    order_position
-        .checked_sub(1)
-        .and_then(|position| ui.playback_order.get(position).copied())
+    session::previous_playback_index(&ui.playback_order, current_index)
 }
 
 fn queued_tracks(ui: &UiState) -> Vec<(usize, UiTrack)> {
@@ -5854,114 +5816,22 @@ fn queued_tracks_from_order_with_limit(
     current_index: usize,
     limit: usize,
 ) -> Vec<(usize, UiTrack)> {
-    let Some(order_position) = playback_order
-        .iter()
-        .position(|index| *index == current_index)
-    else {
-        return Vec::new();
-    };
-
-    playback_order
-        .iter()
-        .skip(order_position + 1)
-        .take(limit)
-        .filter_map(|index| tracks.get(*index).cloned().map(|track| (*index, track)))
+    session::queued_indices_with_limit(playback_order, current_index, limit)
+        .into_iter()
+        .filter_map(|index| tracks.get(index).cloned().map(|track| (index, track)))
         .collect()
 }
 
 fn upcoming_track_count(ui: &UiState) -> usize {
     let current_index = ui.playback_index.unwrap_or(ui.selected_index);
-    upcoming_track_count_from_order(&ui.playback_order, current_index)
-}
-
-fn upcoming_track_count_from_order(playback_order: &[usize], current_index: usize) -> usize {
-    playback_order
-        .iter()
-        .position(|index| *index == current_index)
-        .map(|position| playback_order.len().saturating_sub(position + 1))
-        .unwrap_or(0)
-}
-
-fn move_upcoming_track_in_playback_order(
-    playback_order: &mut Vec<usize>,
-    current_index: usize,
-    from: usize,
-    to_slot: usize,
-    visible_limit: usize,
-) -> bool {
-    let Some(order_position) = playback_order
-        .iter()
-        .position(|index| *index == current_index)
-    else {
-        return false;
-    };
-
-    let upcoming_start = order_position + 1;
-    let visible_len = playback_order
-        .len()
-        .saturating_sub(upcoming_start)
-        .min(visible_limit);
-    if visible_len <= 1 || from >= visible_len {
-        return false;
-    }
-
-    let to_slot = to_slot.min(visible_len);
-    if from == to_slot || from + 1 == to_slot {
-        return false;
-    }
-
-    let from_index = upcoming_start + from;
-    let moved = playback_order.remove(from_index);
-    let mut insert_index = upcoming_start + to_slot;
-    if from_index < insert_index {
-        insert_index -= 1;
-    }
-    playback_order.insert(insert_index, moved);
-    true
-}
-
-fn queue_track_next_in_playback_order(
-    playback_order: &mut Vec<usize>,
-    current_index: usize,
-    target_index: usize,
-) -> bool {
-    if current_index == target_index {
-        return false;
-    }
-
-    let Some(current_position) = playback_order
-        .iter()
-        .position(|index| *index == current_index)
-    else {
-        return false;
-    };
-
-    if let Some(existing_position) = playback_order
-        .iter()
-        .position(|index| *index == target_index)
-    {
-        if existing_position == current_position + 1 {
-            return false;
-        }
-        let moved = playback_order.remove(existing_position);
-        let insert_position = if existing_position < current_position + 1 {
-            current_position
-        } else {
-            current_position + 1
-        };
-        playback_order.insert(insert_position, moved);
-    } else {
-        playback_order.insert(current_position + 1, target_index);
-    }
-
-    true
+    session::upcoming_track_count(&ui.playback_order, current_index)
 }
 
 fn move_next_up_track(state: &Rc<RefCell<UiState>>, from: usize, to_slot: usize) -> bool {
     let changed = {
         let mut ui = state.borrow_mut();
         let current_index = ui.playback_index.unwrap_or(ui.selected_index);
-        let changed = move_upcoming_track_in_playback_order(
+        let changed = session::move_upcoming_track_in_playback_order(
             &mut ui.playback_order,
             current_index,
             from,
@@ -6011,7 +5881,7 @@ fn queue_track_next_by_key(ui: &mut UiState, target_key: &str, fallback_track: U
         ui.playback_tracks.len() - 1
     };
 
-    queue_track_next_in_playback_order(&mut ui.playback_order, current_index, target_index)
+    session::queue_track_next_in_playback_order(&mut ui.playback_order, current_index, target_index)
 }
 
 fn finalize_queue_change(state: &Rc<RefCell<UiState>>) {
@@ -9205,59 +9075,6 @@ mod tests {
             .map(|(_, track)| track.item_id.as_deref())
             .collect::<Vec<_>>();
         assert_eq!(queued_ids, vec![Some("track-3")]);
-    }
-
-    #[test]
-    fn move_upcoming_track_reorders_visible_queue_without_touching_current_track() {
-        let mut playback_order = vec![4, 0, 1, 2, 3];
-
-        let changed = move_upcoming_track_in_playback_order(&mut playback_order, 4, 0, 3, 50);
-
-        assert!(changed);
-        assert_eq!(playback_order, vec![4, 1, 2, 0, 3]);
-    }
-
-    #[test]
-    fn move_upcoming_track_ignores_no_op_moves() {
-        let mut playback_order = vec![0, 1, 2, 3];
-
-        let changed = move_upcoming_track_in_playback_order(&mut playback_order, 0, 1, 2, 50);
-
-        assert!(!changed);
-        assert_eq!(playback_order, vec![0, 1, 2, 3]);
-    }
-
-    #[test]
-    fn queue_track_next_moves_existing_track_directly_after_current() {
-        let mut playback_order = vec![0, 1, 2, 3];
-
-        let changed = queue_track_next_in_playback_order(&mut playback_order, 1, 3);
-
-        assert!(changed);
-        assert_eq!(playback_order, vec![0, 1, 3, 2]);
-    }
-
-    #[test]
-    fn queue_track_next_inserts_missing_track_directly_after_current() {
-        let mut playback_order = vec![0, 1, 2];
-
-        let changed = queue_track_next_in_playback_order(&mut playback_order, 0, 4);
-
-        assert!(changed);
-        assert_eq!(playback_order, vec![0, 4, 1, 2]);
-    }
-
-    #[test]
-    fn queue_track_next_ignores_current_or_already_next_track() {
-        let mut current_track_order = vec![0, 1, 2];
-        let current_changed = queue_track_next_in_playback_order(&mut current_track_order, 1, 1);
-        assert!(!current_changed);
-        assert_eq!(current_track_order, vec![0, 1, 2]);
-
-        let mut already_next_order = vec![0, 1, 2];
-        let next_changed = queue_track_next_in_playback_order(&mut already_next_order, 0, 1);
-        assert!(!next_changed);
-        assert_eq!(already_next_order, vec![0, 1, 2]);
     }
 
     #[test]
