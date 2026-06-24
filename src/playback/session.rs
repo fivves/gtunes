@@ -172,10 +172,52 @@ mod tests {
     }
 
     #[test]
+    fn playback_order_is_sequential_when_shuffle_is_disabled() {
+        let order = build_playback_order(4, 2, false);
+
+        assert_eq!(order, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn playback_order_clamps_start_index_for_shuffle() {
+        let order = build_playback_order(3, 99, true);
+
+        assert_eq!(order.first(), Some(&2));
+        assert_eq!(order.len(), 3);
+        for index in 0..3 {
+            assert!(order.contains(&index));
+        }
+    }
+
+    #[test]
+    fn next_and_previous_indices_follow_playback_order() {
+        let order = vec![2, 0, 3, 1];
+
+        assert_eq!(next_playback_index(&order, 0), Some(3));
+        assert_eq!(previous_playback_index(&order, 0), Some(2));
+        assert_eq!(next_playback_index(&order, 1), None);
+        assert_eq!(previous_playback_index(&order, 2), None);
+    }
+
+    #[test]
     fn queued_indices_follow_playback_order_after_current_track() {
         let queued = queued_indices_with_limit(&[0, 1, 2], 1, 50);
 
         assert_eq!(queued, vec![2]);
+    }
+
+    #[test]
+    fn queued_indices_respect_limit() {
+        let queued = queued_indices_with_limit(&[0, 1, 2, 3], 0, 2);
+
+        assert_eq!(queued, vec![1, 2]);
+    }
+
+    #[test]
+    fn upcoming_track_count_counts_after_current_index() {
+        assert_eq!(upcoming_track_count(&[0, 1, 2, 3], 1), 2);
+        assert_eq!(upcoming_track_count(&[0, 1, 2, 3], 3), 0);
+        assert_eq!(upcoming_track_count(&[0, 1, 2, 3], 99), 0);
     }
 
     #[test]

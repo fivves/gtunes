@@ -96,6 +96,10 @@ background integrations should not implicitly drive playback state.
      radio isolation, fallback state, and persisted restore behavior.
    - Prefer pure state tests that do not require GTK or a live GStreamer
      pipeline.
+   - Progress: `src/playback/session.rs` now has focused tests for playback
+     order construction, shuffle start behavior, next/previous navigation,
+     queued index limits, upcoming counts, drag reordering, and queue-next
+     mutation.
 
 ## Follow-Up Candidates
 
