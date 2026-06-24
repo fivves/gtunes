@@ -128,6 +128,8 @@ background integrations should not implicitly drive playback state.
    - Progress: playback-order rebuild count selection now lives in
      `session::PlaybackSession`; `window.rs` passes the visible library count
      instead of deciding between active queue length and library length.
+   - Progress: radio-mode exit now lives in `session::PlaybackSession`;
+     `window.rs` no longer mutates the playback mode enum directly.
 
 3. [x] Preserve position during direct-play fallback.
    - Capture the current playback position before retrying with a Jellyfin
@@ -200,6 +202,8 @@ background integrations should not implicitly drive playback state.
      shuffle, mode, current item, and queue state.
    - Progress: `PlaybackSession` tests now cover playback-order rebuilds using
      visible library count when no queue is active and queue count when queued.
+   - Progress: `PlaybackSession` tests now cover leaving radio mode without
+     disturbing current item, queue, order, or shuffle state.
 
 ## Follow-Up Candidates
 

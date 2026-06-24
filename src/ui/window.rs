@@ -6212,7 +6212,7 @@ fn resume_playback(state: &Rc<RefCell<UiState>>) {
                 drop(ui);
                 if !resume_radio_station(state) {
                     let mut ui = state.borrow_mut();
-                    ui.playback_session.mode.set_library();
+                    ui.playback_session.leave_radio_mode();
                     ui.playback_status.set_text("Radio station is unavailable");
                     update_play_button(&ui);
                     sync_external_playback_status(&mut ui);
