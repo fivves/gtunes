@@ -296,15 +296,6 @@ struct CachedLibrary {
     playlists: Vec<UiPlaylist>,
 }
 
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-struct PersistedPlaybackState {
-    version: u8,
-    current_item_id: String,
-    ordered_item_ids: Vec<String>,
-    position_secs: u64,
-    shuffle_enabled: bool,
-}
-
 enum ConnectionMessage {
     Authenticated(JellyfinSession),
     Status(String),
@@ -4445,7 +4436,6 @@ fn save_library_view_settings(settings: LibraryViewSettings) {
 const LIBRARY_VIEW_SETTINGS_KEY: &str = "library.view.settings";
 const KEEP_PLAYING_WHILE_CLOSED_KEY: &str = "player.keep_playing_while_closed";
 const PLAYBACK_STATE_KEY: &str = "player.playback.state";
-const PLAYBACK_STATE_VERSION: u8 = 1;
 const PLAYBACK_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(5);
 
 fn load_keep_playing_while_closed() -> bool {
@@ -4473,7 +4463,7 @@ fn set_keep_playing_while_closed(state: &Rc<RefCell<UiState>>, enabled: bool) {
     }
 }
 
-fn playback_snapshot(ui: &UiState) -> Option<PersistedPlaybackState> {
+fn playback_snapshot(ui: &UiState) -> Option<session::PersistedPlaybackState> {
     if ui.current_radio_station_id.is_some() {
         return None;
     }
@@ -4485,39 +4475,25 @@ fn playback_snapshot(ui: &UiState) -> Option<PersistedPlaybackState> {
         return None;
     }
 
-    let ordered_item_ids = ordered_playback_item_ids(ui);
-    if ordered_item_ids.is_empty() {
-        return None;
-    }
-
     let position_secs = ui
         .playback
         .as_ref()
         .and_then(PlaybackEngine::position)
         .map(|position| position.as_secs())
         .unwrap_or(0);
-
-    Some(PersistedPlaybackState {
-        version: PLAYBACK_STATE_VERSION,
-        current_item_id,
-        ordered_item_ids,
-        position_secs,
-        shuffle_enabled: ui.shuffle_enabled,
-    })
-}
-
-fn ordered_playback_item_ids(ui: &UiState) -> Vec<String> {
-    if ui.playback_tracks.is_empty() {
-        return Vec::new();
-    }
-
-    let mut seen = HashSet::new();
-    ui.playback_order
+    let item_ids_by_index = ui
+        .playback_tracks
         .iter()
-        .filter_map(|index| ui.playback_tracks.get(*index))
-        .filter_map(|track| track.item_id.clone())
-        .filter(|item_id| seen.insert(item_id.clone()))
-        .collect()
+        .map(|track| track.item_id.clone())
+        .collect::<Vec<_>>();
+
+    session::playback_snapshot(
+        current_item_id,
+        &item_ids_by_index,
+        &ui.playback_order,
+        position_secs,
+        ui.shuffle_enabled,
+    )
 }
 
 fn save_playback_snapshot_now(ui: &mut UiState) {
@@ -4563,19 +4539,19 @@ fn clear_playback_snapshot() {
     }
 }
 
-fn load_playback_snapshot() -> Option<PersistedPlaybackState> {
+fn load_playback_snapshot() -> Option<session::PersistedPlaybackState> {
     let result = CacheDatabase::open_default()
         .and_then(|cache| cache.get_setting(PLAYBACK_STATE_KEY))
         .and_then(|json| {
             json.map(|json| {
-                serde_json::from_str::<PersistedPlaybackState>(&json)
+                serde_json::from_str::<session::PersistedPlaybackState>(&json)
                     .map_err(crate::cache::CacheError::from)
             })
             .transpose()
         });
 
     match result {
-        Ok(Some(snapshot)) if snapshot.version == PLAYBACK_STATE_VERSION => Some(snapshot),
+        Ok(Some(snapshot)) if snapshot.version == session::PLAYBACK_STATE_VERSION => Some(snapshot),
         Ok(Some(_)) | Ok(None) => None,
         Err(error) => {
             tracing::warn!(%error, "failed to load playback queue state");
@@ -4586,7 +4562,7 @@ fn load_playback_snapshot() -> Option<PersistedPlaybackState> {
 
 fn restore_playback_snapshot_tracks(
     library_tracks: &[UiTrack],
-    snapshot: &PersistedPlaybackState,
+    snapshot: &session::PersistedPlaybackState,
 ) -> Option<(Vec<UiTrack>, usize, Vec<usize>)> {
     let tracks_by_id = library_tracks
         .iter()
@@ -9148,8 +9124,8 @@ mod tests {
             title: "Third".to_string(),
             ..test_track()
         };
-        let snapshot = PersistedPlaybackState {
-            version: PLAYBACK_STATE_VERSION,
+        let snapshot = session::PersistedPlaybackState {
+            version: session::PLAYBACK_STATE_VERSION,
             current_item_id: "second".to_string(),
             ordered_item_ids: vec![
                 "first".to_string(),
@@ -9176,8 +9152,8 @@ mod tests {
 
     #[test]
     fn persisted_playback_restore_requires_current_track() {
-        let snapshot = PersistedPlaybackState {
-            version: PLAYBACK_STATE_VERSION,
+        let snapshot = session::PersistedPlaybackState {
+            version: session::PLAYBACK_STATE_VERSION,
             current_item_id: "missing".to_string(),
             ordered_item_ids: vec!["track-id".to_string()],
             position_secs: 0,

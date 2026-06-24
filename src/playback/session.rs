@@ -8,6 +8,17 @@ pub(crate) struct RestoredPlaybackItems {
     pub playback_order: Vec<usize>,
 }
 
+pub(crate) const PLAYBACK_STATE_VERSION: u8 = 1;
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub(crate) struct PersistedPlaybackState {
+    pub version: u8,
+    pub current_item_id: String,
+    pub ordered_item_ids: Vec<String>,
+    pub position_secs: u64,
+    pub shuffle_enabled: bool,
+}
+
 pub(crate) fn build_playback_order(
     track_count: usize,
     start_index: usize,
@@ -151,6 +162,41 @@ pub(crate) fn queue_track_next_in_playback_order(
     true
 }
 
+pub(crate) fn playback_snapshot(
+    current_item_id: String,
+    item_ids_by_index: &[Option<String>],
+    playback_order: &[usize],
+    position_secs: u64,
+    shuffle_enabled: bool,
+) -> Option<PersistedPlaybackState> {
+    if current_item_id.is_empty() {
+        return None;
+    }
+
+    let ordered_item_ids = ordered_item_ids(item_ids_by_index, playback_order);
+    if ordered_item_ids.is_empty() {
+        return None;
+    }
+
+    Some(PersistedPlaybackState {
+        version: PLAYBACK_STATE_VERSION,
+        current_item_id,
+        ordered_item_ids,
+        position_secs,
+        shuffle_enabled,
+    })
+}
+
+fn ordered_item_ids(item_ids_by_index: &[Option<String>], playback_order: &[usize]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    playback_order
+        .iter()
+        .filter_map(|index| item_ids_by_index.get(*index))
+        .filter_map(Clone::clone)
+        .filter(|item_id| seen.insert(item_id.clone()))
+        .collect()
+}
+
 pub(crate) fn restore_ordered_item_ids(
     library_item_ids: &[String],
     ordered_item_ids: &[String],
@@ -258,6 +304,32 @@ mod tests {
         assert_eq!(upcoming_track_count(&[0, 1, 2, 3], 1), 2);
         assert_eq!(upcoming_track_count(&[0, 1, 2, 3], 3), 0);
         assert_eq!(upcoming_track_count(&[0, 1, 2, 3], 99), 0);
+    }
+
+    #[test]
+    fn playback_snapshot_dedupes_ordered_item_ids() {
+        let item_ids = vec![
+            Some("first".to_string()),
+            Some("second".to_string()),
+            Some("first".to_string()),
+        ];
+
+        let snapshot = playback_snapshot("second".to_string(), &item_ids, &[0, 2, 1], 42, true)
+            .expect("snapshot builds");
+
+        assert_eq!(snapshot.version, PLAYBACK_STATE_VERSION);
+        assert_eq!(snapshot.current_item_id, "second");
+        assert_eq!(snapshot.ordered_item_ids, vec!["first", "second"]);
+        assert_eq!(snapshot.position_secs, 42);
+        assert!(snapshot.shuffle_enabled);
+    }
+
+    #[test]
+    fn playback_snapshot_requires_current_item_and_ordered_items() {
+        let item_ids = vec![Some("first".to_string())];
+
+        assert!(playback_snapshot(String::new(), &item_ids, &[0], 0, false).is_none());
+        assert!(playback_snapshot("first".to_string(), &item_ids, &[99], 0, false).is_none());
     }
 
     #[test]

@@ -75,6 +75,9 @@ background integrations should not implicitly drive playback state.
    - Progress: persisted playback restore now delegates saved item ID
      deduping, missing-track filtering, current-item lookup, and order rebuild
      to `src/playback/session.rs`.
+   - Progress: persisted playback snapshot data and ordered item ID
+     construction now live in `src/playback/session.rs`; `window.rs` only
+     gathers UI/runtime inputs and handles cache storage.
 
 3. [x] Preserve position during direct-play fallback.
    - Capture the current playback position before retrying with a Jellyfin
@@ -106,6 +109,8 @@ background integrations should not implicitly drive playback state.
    - Progress: persisted restore tests now cover saved queue deduping,
      missing library items, current item lookup, and restore failure when the
      current item is unavailable.
+   - Progress: snapshot tests now cover queue item deduping, persisted version
+     assignment, position/shuffle capture, and invalid snapshot rejection.
 
 ## Follow-Up Candidates
 
