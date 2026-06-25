@@ -84,6 +84,8 @@ struct RadioStation {
     name: String,
     url: String,
     source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    icon: Option<String>,
     #[serde(default)]
     built_in: bool,
 }
@@ -211,6 +213,7 @@ struct UiState {
     connection_password_entry: Option<gtk::PasswordEntry>,
     radio_name_entry: Option<gtk::Entry>,
     radio_url_entry: Option<gtk::Entry>,
+    radio_icon_entry: Option<gtk::Entry>,
     search_entry: Option<gtk::SearchEntry>,
     cover_art: Option<gtk::Image>,
     play_button: Option<gtk::Button>,
@@ -308,6 +311,7 @@ const COLLECTION_TILE_WIDTH: i32 = 184;
 const ARTIST_ART_SIZE: i32 = 148;
 const RADIO_CARD_CONTENT_WIDTH: i32 = 154;
 const RADIO_GRID_COLUMN_GAP: i32 = 14;
+const RADIO_DEFAULT_ICON: &str = "\u{EFBC}";
 const COLLECTION_ARTWORK_INITIAL_DELAY_MS: u64 = 24;
 const COLLECTION_ARTWORK_STAGGER_MS: u64 = 8;
 const COLLECTION_ARTWORK_MAX_STAGGERED_ITEMS: usize = 160;
@@ -340,18 +344,26 @@ struct NextUpPageView {
 }
 
 impl RadioStation {
-    fn built_in(name: &str, url: &str) -> Self {
+    fn built_in(name: &str, url: &str, icon: &str) -> Self {
         Self {
             id: format!("built-in:{name}"),
             name: name.to_string(),
             url: url.to_string(),
             source: "stream".to_string(),
+            icon: Some(icon.to_string()),
             built_in: true,
         }
     }
 
     fn source_kind(&self) -> RadioSourceKind {
         radio_source_kind_from_station(&self.source, &self.url)
+    }
+
+    fn icon_glyph(&self) -> &str {
+        self.icon
+            .as_deref()
+            .filter(|icon| !icon.trim().is_empty())
+            .unwrap_or_else(|| default_radio_icon_for_kind(self.source_kind()))
     }
 
     fn source_label(&self) -> &'static str {
@@ -689,6 +701,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         connection_password_entry: None,
         radio_name_entry: None,
         radio_url_entry: None,
+        radio_icon_entry: None,
         search_entry: None,
         cover_art: None,
         play_button: None,
@@ -3008,27 +3021,15 @@ fn radio_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
     station_area.append(&grid);
     page.append(&station_area);
 
-    let add_popover = gtk::Popover::new();
-    add_popover.add_css_class("radio-add-popover");
-    let add_panel = gtk::Box::new(Orientation::Vertical, 10);
-    add_panel.add_css_class("radio-add-panel");
-    add_panel.append(&label("Add Stream", "rail-title"));
-
-    let name_entry = gtk::Entry::new();
-    name_entry.set_placeholder_text(Some("Station name"));
-    name_entry.set_hexpand(true);
-    add_panel.append(&name_entry);
-
-    let url_entry = gtk::Entry::new();
-    url_entry.set_placeholder_text(Some("Stream, YouTube live, or Twitch URL"));
-    url_entry.set_hexpand(true);
-    add_panel.append(&url_entry);
-
-    let add_button = gtk::Button::with_label("Add Station");
-    add_button.add_css_class("connection-button");
-    add_button.add_css_class("suggested-action");
-    add_panel.append(&add_button);
-    add_popover.set_child(Some(&add_panel));
+    let radio_state = state.clone();
+    let (add_popover, name_entry, url_entry, icon_entry) = radio_station_form_popover(
+        "Add Station",
+        "Add Station",
+        "",
+        "",
+        "",
+        move |name, url, icon| persist_custom_radio_station(&radio_state, &name, &url, &icon),
+    );
 
     let add_menu = gtk::MenuButton::new();
     add_menu.add_css_class("radio-add-fab");
@@ -3041,29 +3042,11 @@ fn radio_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
     add_menu.set_margin_end(18);
     overlay.add_overlay(&add_menu);
 
-    let radio_state = state.clone();
-    let add_name_entry = name_entry.clone();
-    let add_url_entry = url_entry.clone();
-    let add_popover_for_submit = add_popover.clone();
-    add_button.connect_clicked(move |_| {
-        let name = add_name_entry.text().trim().to_string();
-        let url = add_url_entry.text().trim().to_string();
-        if name.is_empty() || url.is_empty() {
-            return;
-        }
-        if !persist_custom_radio_station(&radio_state, &name, &url) {
-            return;
-        }
-        add_name_entry.set_text("");
-        add_url_entry.set_text("");
-        add_popover_for_submit.popdown();
-        refresh_radio_page(&radio_state);
-    });
-
     {
         let mut ui = state.borrow_mut();
         ui.radio_name_entry = Some(name_entry);
         ui.radio_url_entry = Some(url_entry);
+        ui.radio_icon_entry = Some(icon_entry);
         ui.radio_grid = Some(grid);
     }
     refresh_radio_page(&state);
@@ -5175,9 +5158,21 @@ fn update_nav_selection(state: &Rc<RefCell<UiState>>) {
 
 fn built_in_radio_stations() -> Vec<RadioStation> {
     vec![
-        RadioStation::built_in("Lofi", "http://radio.cliamp.stream/lofi/stream"),
-        RadioStation::built_in("Synthwave", "http://radio.cliamp.stream/synthwave/stream"),
-        RadioStation::built_in("EDM", "http://radio.cliamp.stream/edm/stream"),
+        RadioStation::built_in(
+            "Lofi",
+            "http://radio.cliamp.stream/lofi/stream",
+            RADIO_DEFAULT_ICON,
+        ),
+        RadioStation::built_in(
+            "Synthwave",
+            "http://radio.cliamp.stream/synthwave/stream",
+            RADIO_DEFAULT_ICON,
+        ),
+        RadioStation::built_in(
+            "EDM",
+            "http://radio.cliamp.stream/edm/stream",
+            RADIO_DEFAULT_ICON,
+        ),
     ]
 }
 
@@ -5235,18 +5230,25 @@ fn current_radio_station(ui: &UiState) -> Option<RadioStation> {
         .find(|station| station.id == station_id)
 }
 
-fn persist_custom_radio_station(state: &Rc<RefCell<UiState>>, name: &str, url: &str) -> bool {
+fn persist_custom_radio_station(
+    state: &Rc<RefCell<UiState>>,
+    name: &str,
+    url: &str,
+    icon: &str,
+) -> bool {
     let Ok(parsed_url) = url.parse::<url::Url>() else {
         return false;
     };
     let source = radio_source_kind_for_url(&parsed_url);
+    let icon = icon.trim();
+    let icon = if icon.is_empty() {
+        None
+    } else {
+        Some(icon.to_string())
+    };
 
     let mut ui = state.borrow_mut();
-    if ui
-        .radio_stations
-        .iter()
-        .any(|station| station.name.eq_ignore_ascii_case(name) || station.url == url)
-    {
+    if radio_station_conflicts(&ui.radio_stations, None, name, url) {
         return false;
     }
     let next_id = SystemTime::now()
@@ -5259,10 +5261,82 @@ fn persist_custom_radio_station(state: &Rc<RefCell<UiState>>, name: &str, url: &
         name: name.to_string(),
         url: url.to_string(),
         source: source.as_str().to_string(),
+        icon,
         built_in: false,
     });
     save_radio_stations(&ui.radio_stations);
     true
+}
+
+fn update_custom_radio_station(
+    state: &Rc<RefCell<UiState>>,
+    station_id: &str,
+    name: &str,
+    url: &str,
+    icon: &str,
+) -> bool {
+    let Ok(parsed_url) = url.parse::<url::Url>() else {
+        return false;
+    };
+    let source = radio_source_kind_for_url(&parsed_url);
+    let icon = icon.trim();
+    let icon = if icon.is_empty() {
+        None
+    } else {
+        Some(icon.to_string())
+    };
+
+    let mut ui = state.borrow_mut();
+    if radio_station_conflicts(&ui.radio_stations, Some(station_id), name, url) {
+        return false;
+    }
+
+    let Some(station) = ui
+        .radio_stations
+        .iter_mut()
+        .find(|station| station.id == station_id && !station.built_in)
+    else {
+        return false;
+    };
+
+    let previous_station = station.clone();
+    station.name = name.to_string();
+    station.url = url.to_string();
+    station.source = source.as_str().to_string();
+    station.icon = icon;
+
+    let updated_station = station.clone();
+    let was_current = ui.playback_session.mode.radio_station_id() == Some(station_id);
+    let needs_restart = was_current && previous_station.url != updated_station.url;
+    save_radio_stations(&ui.radio_stations);
+    drop(ui);
+
+    if needs_restart {
+        play_radio_station(state, &updated_station);
+    } else if was_current {
+        {
+            let mut ui = state.borrow_mut();
+            set_active_radio_station_ui(&mut ui, &updated_station, None);
+            ui.playback_status.set_text("Radio station updated");
+        }
+        refresh_radio_page(state);
+    } else {
+        refresh_radio_page(state);
+    }
+
+    true
+}
+
+fn radio_station_conflicts(
+    stations: &[RadioStation],
+    ignored_station_id: Option<&str>,
+    name: &str,
+    url: &str,
+) -> bool {
+    stations.iter().any(|station| {
+        ignored_station_id != Some(station.id.as_str())
+            && (station.name.eq_ignore_ascii_case(name) || station.url == url)
+    })
 }
 
 fn refresh_radio_page(state: &Rc<RefCell<UiState>>) {
@@ -5302,6 +5376,7 @@ fn radio_station_card(state: Rc<RefCell<UiState>>, station: RadioStation) -> gtk
     }
 
     let click = gtk::GestureClick::new();
+    click.set_button(1);
     {
         let state = state.clone();
         let station = station.clone();
@@ -5310,6 +5385,28 @@ fn radio_station_card(state: Rc<RefCell<UiState>>, station: RadioStation) -> gtk
         });
     }
     card.add_controller(click);
+
+    if !station.built_in {
+        let edit_card = card.clone();
+        let edit_state = state.clone();
+        let edit_station = station.clone();
+        let edit_click = gtk::GestureClick::new();
+        edit_click.set_button(3);
+        edit_click.connect_pressed(move |gesture, _, x, y| {
+            let popover = radio_station_edit_popover(edit_state.clone(), edit_station.clone());
+            popover.set_parent(&edit_card);
+            popover.set_has_arrow(true);
+            popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
+                x as i32,
+                y as i32,
+                1,
+                1,
+            )));
+            popover.popup();
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+        });
+        card.add_controller(edit_click);
+    }
 
     let content = gtk::Box::new(Orientation::Vertical, 7);
     content.set_hexpand(true);
@@ -5323,9 +5420,7 @@ fn radio_station_card(state: Rc<RefCell<UiState>>, station: RadioStation) -> gtk
     }
     content.append(&status_row);
 
-    let icon = radio_icon(48);
-    icon.add_css_class("radio-card-icon");
-    icon.set_halign(Align::Center);
+    let icon = radio_station_icon(station.icon_glyph());
     content.append(&icon);
 
     let text = gtk::Box::new(Orientation::Vertical, 2);
@@ -5394,6 +5489,88 @@ fn radio_station_subtitle(station: &RadioStation) -> String {
     }
 }
 
+fn radio_station_form_popover<F>(
+    title: &str,
+    submit_label: &str,
+    name: &str,
+    url: &str,
+    icon: &str,
+    on_submit: F,
+) -> (gtk::Popover, gtk::Entry, gtk::Entry, gtk::Entry)
+where
+    F: Fn(String, String, String) -> bool + 'static,
+{
+    let popover = gtk::Popover::new();
+    popover.add_css_class("radio-add-popover");
+
+    let panel = gtk::Box::new(Orientation::Vertical, 10);
+    panel.add_css_class("radio-add-panel");
+    panel.append(&label(title, "rail-title"));
+
+    let name_entry = gtk::Entry::new();
+    name_entry.set_placeholder_text(Some("Station name"));
+    name_entry.set_text(name);
+    name_entry.set_hexpand(true);
+    panel.append(&name_entry);
+
+    let url_entry = gtk::Entry::new();
+    url_entry.set_placeholder_text(Some("Stream, YouTube live, or Twitch URL"));
+    url_entry.set_text(url);
+    url_entry.set_hexpand(true);
+    panel.append(&url_entry);
+
+    let icon_entry = gtk::Entry::new();
+    icon_entry.set_placeholder_text(Some("Nerd Font icon (optional)"));
+    icon_entry.set_text(icon);
+    icon_entry.set_hexpand(true);
+    icon_entry.set_max_length(1);
+    icon_entry.set_width_chars(1);
+    panel.append(&icon_entry);
+
+    let submit_button = gtk::Button::with_label(submit_label);
+    submit_button.add_css_class("connection-button");
+    submit_button.add_css_class("suggested-action");
+    panel.append(&submit_button);
+    popover.set_child(Some(&panel));
+
+    let popover_for_submit = popover.clone();
+    let name_entry_for_submit = name_entry.clone();
+    let url_entry_for_submit = url_entry.clone();
+    let icon_entry_for_submit = icon_entry.clone();
+    submit_button.connect_clicked(move |_| {
+        let name = name_entry_for_submit.text().trim().to_string();
+        let url = url_entry_for_submit.text().trim().to_string();
+        let icon = icon_entry_for_submit.text().trim().to_string();
+        if name.is_empty() || url.is_empty() {
+            return;
+        }
+        if on_submit(name, url, icon) {
+            name_entry_for_submit.set_text("");
+            url_entry_for_submit.set_text("");
+            icon_entry_for_submit.set_text("");
+            popover_for_submit.popdown();
+        }
+    });
+
+    (popover, name_entry, url_entry, icon_entry)
+}
+
+fn radio_station_edit_popover(
+    state: Rc<RefCell<UiState>>,
+    station: RadioStation,
+) -> gtk::Popover {
+    let station_id = station.id.clone();
+    let (popover, _, _, _) = radio_station_form_popover(
+        "Edit Station",
+        "Save Changes",
+        station.name.as_str(),
+        station.url.as_str(),
+        station.icon.as_deref().unwrap_or(""),
+        move |name, url, icon| update_custom_radio_station(&state, &station_id, &name, &url, &icon),
+    );
+    popover
+}
+
 fn radio_status_badge(text: &str) -> gtk::Label {
     let badge = label(text, "radio-playing-badge");
     badge.set_halign(Align::End);
@@ -5441,6 +5618,30 @@ fn radio_icon(size: i32) -> gtk::DrawingArea {
         let _ = context.stroke();
     });
     icon
+}
+
+fn radio_station_icon(icon: &str) -> gtk::Label {
+    let icon = gtk::Label::new(Some(icon));
+    icon.add_css_class("radio-card-icon");
+    icon.set_size_request(48, 48);
+    icon.set_halign(Align::Center);
+    icon.set_valign(Align::Center);
+    icon.set_xalign(0.5);
+    icon.set_justify(gtk::Justification::Center);
+    icon.set_single_line_mode(true);
+    icon.set_wrap(false);
+    icon.set_lines(1);
+    icon.set_width_chars(1);
+    icon.set_max_width_chars(1);
+    icon
+}
+
+fn default_radio_icon_for_kind(kind: RadioSourceKind) -> &'static str {
+    match kind {
+        RadioSourceKind::Stream => RADIO_DEFAULT_ICON,
+        RadioSourceKind::YouTube => RADIO_DEFAULT_ICON,
+        RadioSourceKind::Twitch => RADIO_DEFAULT_ICON,
+    }
 }
 
 fn play_radio_station(state: &Rc<RefCell<UiState>>, station: &RadioStation) {
@@ -9282,6 +9483,45 @@ mod tests {
         assert_eq!(
             radio_source_kind_from_station("local", "https://radio.example/live.mp3"),
             RadioSourceKind::Stream
+        );
+    }
+
+    #[test]
+    fn radio_station_conflicts_ignores_the_edited_station() {
+        let stations = vec![RadioStation {
+            id: "custom:1".to_string(),
+            name: "Loft".to_string(),
+            url: "https://radio.example/live.mp3".to_string(),
+            source: "stream".to_string(),
+            icon: None,
+            built_in: false,
+        }];
+
+        assert!(!radio_station_conflicts(
+            &stations,
+            Some("custom:1"),
+            "Loft",
+            "https://radio.example/live.mp3"
+        ));
+        assert!(radio_station_conflicts(
+            &stations,
+            None,
+            "Loft",
+            "https://radio.example/live.mp3"
+        ));
+    }
+
+    #[test]
+    fn radio_station_deserializes_without_icon_field() {
+        let station: RadioStation = serde_json::from_str(
+            r#"{"id":"custom:1","name":"Test","url":"https://radio.example/live.mp3","source":"stream","built_in":false}"#,
+        )
+        .expect("station");
+
+        assert_eq!(station.icon, None);
+        assert_eq!(
+            station.icon_glyph(),
+            default_radio_icon_for_kind(RadioSourceKind::Stream)
         );
     }
 
