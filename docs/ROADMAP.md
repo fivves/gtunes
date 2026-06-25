@@ -64,7 +64,7 @@ background integrations should not implicitly drive playback state.
      `update_mpris_metadata`, with Discord handled through explicit external
      playback sync helpers.
 
-2. [ ] Extract playback session state out of `src/ui/window.rs`.
+2. [x] Extract playback session state out of `src/ui/window.rs`.
    - Move queue, current item, stream kind, radio mode, and fallback state into a
      dedicated playback/session module.
    - Keep the UI responsible for rendering state, not owning playback truth.
@@ -149,7 +149,7 @@ background integrations should not implicitly drive playback state.
      timer; fallback now flows through GStreamer error events, and position
      polling only updates UI progress and snapshots.
 
-5. [ ] Add playback-session tests.
+5. [x] Add playback-session tests.
    - Cover queue advancement, shuffle ordering, gapless transition bookkeeping,
      radio isolation, fallback state, and persisted restore behavior.
    - Prefer pure state tests that do not require GTK or a live GStreamer
@@ -204,6 +204,13 @@ background integrations should not implicitly drive playback state.
      visible library count when no queue is active and queue count when queued.
    - Progress: `PlaybackSession` tests now cover leaving radio mode without
      disturbing current item, queue, order, or shuffle state.
+   - Completed by expanding `src/playback/session.rs` into the playback-state
+     home for queue, current-item, radio, restore, fallback, and gapless
+     bookkeeping, with `src/ui/window.rs` now delegating those transitions.
+   - Completed by keeping focused pure-state coverage in
+     `src/playback/session.rs` for queue advancement, shuffle ordering,
+     gapless bookkeeping, radio isolation, fallback handling, and persisted
+     restore behavior.
 
 ## Follow-Up Candidates
 
