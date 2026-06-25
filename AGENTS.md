@@ -53,6 +53,9 @@ Release pages under `docs/releases/` should focus on user-facing changes and
 not include a `Release Artifact` section or generic packaging boilerplate.
 Future release notes should describe what changed and why it matters, while the
 GitHub release asset list speaks for itself.
+Do not hard-wrap release note paragraphs or bullet text. Keep each paragraph
+and each bullet as a single logical Markdown line so GitHub can use the full
+available content width instead of preserving manual narrow line breaks.
 
 ## Security & Configuration Tips
 
