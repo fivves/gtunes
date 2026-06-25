@@ -47,6 +47,13 @@ or maintenance task. Pull requests should include a concise summary, linked
 issues when applicable, test results, and manual Jellyfin coverage. Add
 screenshots or screen recordings for visible UI changes.
 
+## Release Notes Guidelines
+
+Release pages under `docs/releases/` should focus on user-facing changes and
+not include a `Release Artifact` section or generic packaging boilerplate.
+Future release notes should describe what changed and why it matters, while the
+GitHub release asset list speaks for itself.
+
 ## Security & Configuration Tips
 
 Never commit local databases, credentials, access tokens, stream URLs, private

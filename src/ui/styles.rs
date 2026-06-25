@@ -618,6 +618,11 @@ window {
 
 .radio-card-icon {
   margin-top: 2px;
+  min-height: 48px;
+  color: @accent_bg_color;
+  font-family: "Symbols Nerd Font Propo", "Symbols Nerd Font", "Noto Sans Symbols 2", "Noto Sans Symbols2", sans-serif;
+  font-size: 32px;
+  font-weight: 700;
 }
 
 .radio-station-title {
