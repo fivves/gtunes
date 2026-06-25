@@ -5,9 +5,10 @@
 </br>
 
 gTunes is a native Linux desktop music client for Jellyfin-hosted music
-libraries. Version 1.1.3, The Next-Up Update, focuses on queue continuity,
-Discord Rich Presence, reliable Jellyfin streaming, cached sessions, album
-artwork, waveform scrubbing, and desktop media-key integration.
+libraries. Version 1.1.4, The Stability Update, is not a major feature release.
+It focuses on a more robust playback core, queue/session reliability, radio
+state handling, Discord Rich Presence integration, and desktop media-key
+integration.
 
 The app is built with Rust, GTK4, Libadwaita, GStreamer, SQLite, Reqwest, and
 Souvlaki.
@@ -43,6 +44,8 @@ Souvlaki.
 - Reset saved login, cached library data, artwork, and waveform files from the
   settings menu.
 
+gTunes 1.1.4 does not include live, synced, unsynced, embedded, or Jellyfin
+lyrics support.
 ## Requirements
 
 - Linux desktop environment with GTK4 support.
