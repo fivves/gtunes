@@ -5399,12 +5399,7 @@ fn radio_station_card(state: Rc<RefCell<UiState>>, station: RadioStation) -> gtk
             let popover = radio_station_edit_popover(edit_state.clone(), edit_station.clone());
             popover.set_parent(&edit_card);
             popover.set_has_arrow(true);
-            popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
-                x as i32,
-                y as i32,
-                1,
-                1,
-            )));
+            popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
             popover.popup();
             gesture.set_state(gtk::EventSequenceState::Claimed);
         });
@@ -5558,10 +5553,7 @@ where
     (popover, name_entry, url_entry, icon_entry)
 }
 
-fn radio_station_edit_popover(
-    state: Rc<RefCell<UiState>>,
-    station: RadioStation,
-) -> gtk::Popover {
+fn radio_station_edit_popover(state: Rc<RefCell<UiState>>, station: RadioStation) -> gtk::Popover {
     let station_id = station.id.clone();
     let (popover, _, _, _) = radio_station_form_popover(
         "Edit Station",
