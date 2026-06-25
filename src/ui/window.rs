@@ -613,11 +613,7 @@ fn format_runtime(run_time_ticks: Option<i64>) -> String {
 pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
     let window = adw::ApplicationWindow::builder()
         .application(app)
-        .title(format!(
-            "{} - {}",
-            config::APP_CODENAME,
-            config::DEVELOPER_NAME
-        ))
+        .title(config::APP_NAME)
         .default_width(1240)
         .default_height(760)
         .width_request(360)
