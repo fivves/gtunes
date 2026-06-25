@@ -43,9 +43,6 @@ Souvlaki.
 - Reset saved login, cached library data, artwork, and waveform files from the
   settings menu.
 
-gTunes 1.1.3 does not include live, synced, unsynced, embedded, or Jellyfin lyrics
-support.
-
 ## Requirements
 
 - Linux desktop environment with GTK4 support.
