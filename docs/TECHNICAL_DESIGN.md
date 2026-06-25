@@ -117,6 +117,15 @@ The search field filters the current library surface. Type-to-jump navigation
 also works when normal text inputs are not focused, allowing quick keyboard
 selection without moving to the search field.
 
+Global shortcuts provide fast navigation and playback control from anywhere in
+the main window:
+
+- `Ctrl+F` focuses library search.
+- `Ctrl+1` through `Ctrl+5` switch between Tracks, Albums, Artists, Playlists,
+  and Radio.
+- `Ctrl+S` toggles shuffle.
+- `Return` plays the selected search result.
+
 The now-playing artist and album labels are links into the matching collection
 views. Clicking the current cover art opens a larger undecorated artwork window.
 

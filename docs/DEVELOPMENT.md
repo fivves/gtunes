@@ -136,6 +136,20 @@ screenshots with private server details, or `.env` files.
 - Use batched rendering for collection grids that may contain many items.
 - Keep labels ellipsized rather than allowing layout-breaking text overflow.
 
+## Keyboard Shortcuts
+
+The main window keeps a small set of global shortcuts for navigation and
+playback:
+
+- `Ctrl+F`: focus library search.
+- `Ctrl+1`: open Tracks.
+- `Ctrl+2`: open Albums.
+- `Ctrl+3`: open Artists.
+- `Ctrl+4`: open Playlists.
+- `Ctrl+5`: open Radio.
+- `Ctrl+S`: toggle shuffle.
+- `Return`: play the selected search result.
+
 ## Jellyfin Notes
 
 - Keep Jellyfin response parsing typed with `serde` models in `src/jellyfin`.

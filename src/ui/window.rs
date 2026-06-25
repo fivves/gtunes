@@ -2163,6 +2163,7 @@ fn show_keyboard_shortcuts(parent: &gtk::Window) {
         ("Albums", "<Control>2"),
         ("Artists", "<Control>3"),
         ("Playlists", "<Control>4"),
+        ("Radio", "<Control>5"),
         ("Toggle shuffle", "<Control>S"),
         ("Play selected search result", "Return"),
     ] {
