@@ -767,6 +767,7 @@ fn connect_app_shortcuts(root: &gtk::Box, state: Rc<RefCell<UiState>>) {
                 gtk::gdk::Key::_3 => set_library_page(&state, LibraryPage::Artists),
                 gtk::gdk::Key::_4 => set_library_page(&state, LibraryPage::Playlists),
                 gtk::gdk::Key::_5 => set_library_page(&state, LibraryPage::Radio),
+                gtk::gdk::Key::s | gtk::gdk::Key::S => toggle_shuffle(&state),
                 gtk::gdk::Key::f | gtk::gdk::Key::F => {
                     if let Some(search) = state.borrow().search_entry.as_ref() {
                         search.grab_focus();
@@ -2162,6 +2163,7 @@ fn show_keyboard_shortcuts(parent: &gtk::Window) {
         ("Albums", "<Control>2"),
         ("Artists", "<Control>3"),
         ("Playlists", "<Control>4"),
+        ("Toggle shuffle", "<Control>S"),
         ("Play selected search result", "Return"),
     ] {
         list.append(&shortcut_row(title, accelerator));
