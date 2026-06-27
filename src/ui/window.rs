@@ -341,6 +341,7 @@ struct QueueRow {
 struct NextUpPageView {
     empty: gtk::Box,
     list: gtk::Box,
+    rows: Rc<RefCell<Vec<gtk::Button>>>,
 }
 
 impl RadioStation {
@@ -2531,6 +2532,8 @@ fn build_content(state: Rc<RefCell<UiState>>) -> gtk::Box {
     let stack = gtk::Stack::new();
     stack.set_hexpand(true);
     stack.set_vexpand(true);
+    stack.set_transition_type(gtk::StackTransitionType::Crossfade);
+    stack.set_transition_duration(200);
     stack.add_named(&track_table(state.clone()), Some("tracks"));
     stack.add_named(&album_grid_page(state.clone()), Some("albums"));
     stack.add_named(&artist_grid_page(state.clone()), Some("artists"));
@@ -3090,7 +3093,11 @@ fn next_up_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
 
     page.append(&list);
 
-    state.borrow_mut().next_up_view = Some(Rc::new(NextUpPageView { empty, list }));
+    state.borrow_mut().next_up_view = Some(Rc::new(NextUpPageView {
+        empty,
+        list,
+        rows: Rc::new(RefCell::new(Vec::new())),
+    }));
     rebuild_queue_list(&state);
     scroll
 }
@@ -7639,11 +7646,18 @@ fn rebuild_next_up_page(state: &Rc<RefCell<UiState>>) {
     while let Some(child) = next_up_view.list.first_child() {
         next_up_view.list.remove(&child);
     }
+    next_up_view.rows.borrow_mut().clear();
 
     for (position, (index, track)) in upcoming.into_iter().enumerate() {
-        next_up_view
-            .list
-            .append(&next_up_row(state.clone(), position, index, track));
+        let row = next_up_row(
+            state.clone(),
+            position,
+            index,
+            track,
+            next_up_view.rows.clone(),
+        );
+        next_up_view.list.append(&row);
+        next_up_view.rows.borrow_mut().push(row);
     }
 }
 
@@ -7652,6 +7666,7 @@ fn next_up_row(
     position: usize,
     track_index: usize,
     track: UiTrack,
+    rows: Rc<RefCell<Vec<gtk::Button>>>,
 ) -> gtk::Button {
     let button = gtk::Button::new();
     button.add_css_class("flat");
@@ -7749,8 +7764,13 @@ fn next_up_row(
     }
     {
         let button = button.clone();
+        let rows_end = rows.clone();
         drag_source.connect_drag_end(move |_, _, _| {
             button.remove_css_class("dragging");
+            for row in rows_end.borrow().iter() {
+                row.remove_css_class("dodge-up");
+                row.remove_css_class("dodge-down");
+            }
         });
     }
     button.add_controller(drag_source);
@@ -7758,30 +7778,53 @@ fn next_up_row(
     let drop_target = gtk::DropTarget::new(gtk::glib::Type::U32, gtk::gdk::DragAction::MOVE);
     {
         let button = button.clone();
+        let rows_motion = rows.clone();
         drop_target.connect_motion(move |_, _, y| {
+            let is_drop_after = y >= f64::from(button.height()) / 2.0;
             button.remove_css_class("drop-before");
             button.remove_css_class("drop-after");
-            if y >= f64::from(button.height()) / 2.0 {
+            if is_drop_after {
                 button.add_css_class("drop-after");
             } else {
                 button.add_css_class("drop-before");
+            }
+            let insert_at = position + usize::from(is_drop_after);
+            let rows_ref = rows_motion.borrow();
+            for (i, row) in rows_ref.iter().enumerate() {
+                row.remove_css_class("dodge-up");
+                row.remove_css_class("dodge-down");
+                if i + 1 == insert_at {
+                    row.add_css_class("dodge-up");
+                } else if i == insert_at {
+                    row.add_css_class("dodge-down");
+                }
             }
             gtk::gdk::DragAction::MOVE
         });
     }
     {
         let button = button.clone();
+        let rows_leave = rows.clone();
         drop_target.connect_leave(move |_| {
             button.remove_css_class("drop-before");
             button.remove_css_class("drop-after");
+            for row in rows_leave.borrow().iter() {
+                row.remove_css_class("dodge-up");
+                row.remove_css_class("dodge-down");
+            }
         });
     }
     {
         let state = state.clone();
         let button = button.clone();
+        let rows_drop = rows.clone();
         drop_target.connect_drop(move |_, value, _, y| {
             button.remove_css_class("drop-before");
             button.remove_css_class("drop-after");
+            for row in rows_drop.borrow().iter() {
+                row.remove_css_class("dodge-up");
+                row.remove_css_class("dodge-down");
+            }
             let Ok(from) = value.get::<u32>() else {
                 return false;
             };

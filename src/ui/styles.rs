@@ -57,15 +57,20 @@ window {
   border-radius: 999px;
   background: transparent;
   color: @window_fg_color;
-  transition: background-color 140ms ease-out, color 140ms ease-out, box-shadow 140ms ease-out;
+  transition: background-color 160ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              color 160ms ease-out,
+              box-shadow 160ms ease-out,
+              transform 180ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .icon-button:hover {
   background: alpha(@window_fg_color, .08);
+  transform: scale(1.12);
 }
 
 .icon-button:active {
   background: alpha(@window_fg_color, .13);
+  transform: scale(0.86);
 }
 
 .toolbar-button {
@@ -153,10 +158,19 @@ window {
   color: @accent_fg_color;
   background: @accent_bg_color;
   box-shadow: 0 1px 2px alpha(@window_fg_color, .14);
+  transition: background-color 160ms ease-out,
+              box-shadow 220ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              transform 180ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .play-button:hover {
-  box-shadow: 0 2px 6px alpha(@window_fg_color, .16);
+  box-shadow: 0 4px 14px alpha(@window_fg_color, .22);
+  transform: scale(1.12);
+}
+
+.play-button:active {
+  transform: scale(0.86);
+  box-shadow: 0 1px 3px alpha(@window_fg_color, .14);
 }
 
 .wave-card {
@@ -222,7 +236,8 @@ window {
   min-height: 38px;
   padding: 0 8px;
   border-radius: 7px;
-  transition: background-color 140ms ease-out, color 140ms ease-out;
+  transition: background-color 220ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              color 220ms ease-out;
 }
 
 .nav-list row:hover {
@@ -374,7 +389,9 @@ window {
   border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
-  transition: background-color 140ms ease-out, border-color 140ms ease-out, box-shadow 140ms ease-out;
+  transition: background-color 240ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              border-color 240ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              box-shadow 240ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .album-tile {
@@ -424,7 +441,8 @@ window {
   border-radius: 8px;
   background: @card_bg_color;
   box-shadow: inset 0 0 0 1px alpha(@borders, .72);
-  transition: box-shadow 140ms ease-out;
+  transition: box-shadow 260ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .album-tile:hover .album-art-frame,
@@ -432,13 +450,15 @@ window {
 .album-tile:focus-visible .album-art-frame {
   box-shadow:
     inset 0 0 0 1px alpha(@accent_bg_color, .58),
-    0 2px 8px alpha(@window_fg_color, .14);
+    0 6px 20px alpha(@window_fg_color, .18);
+  transform: scale(1.04) translateY(-3px);
 }
 
 .album-tile:active .album-art-frame {
   box-shadow:
     inset 0 0 0 1px alpha(@accent_bg_color, .72),
-    0 1px 4px alpha(@window_fg_color, .12);
+    0 2px 6px alpha(@window_fg_color, .12);
+  transform: scale(0.97);
 }
 
 .album-art {
@@ -452,7 +472,8 @@ window {
   min-height: 148px;
   border-radius: 8px;
   box-shadow: inset 0 0 0 1px alpha(@borders, .72);
-  transition: box-shadow 140ms ease-out;
+  transition: box-shadow 260ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .artist-tile:hover .artist-art,
@@ -460,7 +481,12 @@ window {
 .artist-tile:focus-visible .artist-art {
   box-shadow:
     inset 0 0 0 1px alpha(@accent_bg_color, .50),
-    0 2px 8px alpha(@window_fg_color, .12);
+    0 6px 20px alpha(@window_fg_color, .16);
+  transform: scale(1.04) translateY(-3px);
+}
+
+.artist-tile:active .artist-art {
+  transform: scale(0.97);
 }
 
 .artist-placeholder {
@@ -558,9 +584,14 @@ window {
   font-weight: 600;
 }
 
+@keyframes now-playing-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.42; }
+}
+
 .now-playing-indicator {
   color: @accent_bg_color;
-  transition: opacity 160ms ease-out;
+  animation: now-playing-pulse 1.6s ease-in-out infinite;
 }
 
 .radio-page {
@@ -598,13 +629,22 @@ window {
   border-radius: 8px;
   background: @card_bg_color;
   box-shadow: 0 1px 2px alpha(@window_fg_color, .06);
-  transition: background-color 140ms ease-out, border-color 140ms ease-out, box-shadow 140ms ease-out;
+  transition: background-color 260ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              border-color 260ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              box-shadow 260ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .radio-station-card:hover {
   border-color: alpha(@accent_bg_color, .44);
   background: mix(@card_bg_color, @accent_bg_color, .04);
-  box-shadow: 0 2px 8px alpha(@window_fg_color, .10);
+  box-shadow: 0 8px 24px alpha(@window_fg_color, .16);
+  transform: translateY(-5px) scale(1.02);
+}
+
+.radio-station-card:active {
+  transform: translateY(-1px) scale(0.98);
+  box-shadow: 0 2px 6px alpha(@window_fg_color, .10);
 }
 
 .radio-station-card-playing {
@@ -803,31 +843,68 @@ window {
   min-width: 0;
 }
 
+@keyframes next-up-enter {
+  0%   { opacity: 0; transform: translateY(16px) scale(0.96); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+
 .next-up-row {
   min-height: 72px;
   padding: 12px 16px;
   border: 1px solid alpha(@borders, .88);
   border-radius: 12px;
   background: alpha(@card_bg_color, .94);
-  transition: background-color 120ms ease-out, border-color 120ms ease-out, box-shadow 120ms ease-out;
+  animation: next-up-enter 360ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  transition: background-color 200ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              border-color 200ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              box-shadow 200ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              transform 220ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              opacity 200ms ease-out;
 }
+
+.next-up-list > button:nth-child(1)  { animation-delay: 0ms; }
+.next-up-list > button:nth-child(2)  { animation-delay: 32ms; }
+.next-up-list > button:nth-child(3)  { animation-delay: 64ms; }
+.next-up-list > button:nth-child(4)  { animation-delay: 96ms; }
+.next-up-list > button:nth-child(5)  { animation-delay: 128ms; }
+.next-up-list > button:nth-child(6)  { animation-delay: 160ms; }
+.next-up-list > button:nth-child(7)  { animation-delay: 192ms; }
+.next-up-list > button:nth-child(8)  { animation-delay: 220ms; }
+.next-up-list > button:nth-child(9)  { animation-delay: 248ms; }
+.next-up-list > button:nth-child(10) { animation-delay: 272ms; }
 
 .next-up-row:hover {
   background: alpha(@accent_bg_color, .08);
+  box-shadow: 0 2px 10px alpha(@window_fg_color, .08);
 }
 
 .next-up-row.dragging {
-  opacity: .72;
+  opacity: 0.52;
+  transform: scale(0.96) rotate(1.4deg);
+  box-shadow: 0 18px 48px alpha(@window_fg_color, .30);
+  border-color: alpha(@accent_bg_color, .46);
 }
 
 .next-up-row.drop-before {
   border-top-color: @accent_bg_color;
-  box-shadow: inset 0 3px 0 0 alpha(@accent_bg_color, .75);
+  box-shadow: inset 0 4px 0 0 alpha(@accent_bg_color, .80),
+              0 -6px 16px alpha(@accent_bg_color, .14);
+  transform: translateY(5px);
 }
 
 .next-up-row.drop-after {
   border-bottom-color: @accent_bg_color;
-  box-shadow: inset 0 -3px 0 0 alpha(@accent_bg_color, .75);
+  box-shadow: inset 0 -4px 0 0 alpha(@accent_bg_color, .80),
+              0 6px 16px alpha(@accent_bg_color, .14);
+  transform: translateY(-5px);
+}
+
+.next-up-row.dodge-up {
+  transform: translateY(-12px);
+}
+
+.next-up-row.dodge-down {
+  transform: translateY(12px);
 }
 
 .next-up-index {
