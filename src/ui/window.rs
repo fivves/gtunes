@@ -5072,7 +5072,7 @@ fn update_content_view(state: &Rc<RefCell<UiState>>, direction: NavDirection) {
         stack.set_transition_type(match direction {
             NavDirection::Forward => gtk::StackTransitionType::SlideLeft,
             NavDirection::Backward => gtk::StackTransitionType::SlideRight,
-            NavDirection::Lateral => gtk::StackTransitionType::Crossfade,
+            NavDirection::Lateral => gtk::StackTransitionType::OverDown,
         });
         stack.set_visible_child_name(&visible_child);
     }
