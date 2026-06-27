@@ -174,6 +174,7 @@ struct UiState {
     sort_column: SortColumn,
     sort_ascending: bool,
     keep_playing_while_closed: bool,
+    font_mono: bool,
     playback_session: session::PlaybackSession<UiTrack>,
     track_indicators: Vec<(String, gtk::Image)>,
     last_playback_snapshot_at: Option<Instant>,
@@ -627,6 +628,10 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
 
     let view_settings = load_library_view_settings();
     let keep_playing_while_closed = load_keep_playing_while_closed();
+    let font_mono = load_font_mono();
+    if font_mono {
+        window.add_css_class("font-mono");
+    }
     let state = Rc::new(RefCell::new(UiState {
         all_tracks: Vec::new(),
         tracks: Vec::new(),
@@ -659,6 +664,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         sort_column: view_settings.sort_column,
         sort_ascending: view_settings.sort_ascending,
         keep_playing_while_closed,
+        font_mono,
         playback_session: session::PlaybackSession::default(),
         track_indicators: Vec::new(),
         last_playback_snapshot_at: None,
@@ -2012,6 +2018,54 @@ fn settings_menu_button(state: Rc<RefCell<UiState>>) -> gtk::MenuButton {
     keep_row.append(&keep_label);
     keep_row.append(&keep_switch);
     menu.append(&keep_row);
+
+    let font_row = gtk::Box::new(Orientation::Horizontal, 12);
+    font_row.add_css_class("settings-switch-row");
+    font_row.set_margin_top(2);
+    font_row.set_margin_bottom(6);
+    font_row.set_margin_start(6);
+    font_row.set_margin_end(6);
+    let font_label = label("Font Style", "settings-menu-label");
+    font_label.set_hexpand(true);
+    font_label.set_halign(Align::Start);
+    let font_btn_default = gtk::ToggleButton::builder()
+        .icon_name("font-x-generic-symbolic")
+        .tooltip_text("Default")
+        .active(!state.borrow().font_mono)
+        .build();
+    font_btn_default.add_css_class("font-style-toggle");
+    let font_btn_mono = gtk::ToggleButton::builder()
+        .icon_name("utilities-terminal-symbolic")
+        .tooltip_text("Monospace")
+        .active(state.borrow().font_mono)
+        .group(&font_btn_default)
+        .build();
+    font_btn_mono.add_css_class("font-style-toggle");
+    let font_toggle_box = gtk::Box::new(Orientation::Horizontal, 0);
+    font_toggle_box.add_css_class("linked");
+    font_toggle_box.append(&font_btn_default);
+    font_toggle_box.append(&font_btn_mono);
+    {
+        let state = state.clone();
+        let settings = settings.clone();
+        font_btn_mono.connect_toggled(move |btn| {
+            let mono = btn.is_active();
+            set_font_mono(&state, mono);
+            if let Some(window) = settings
+                .root()
+                .and_then(|r| r.downcast::<gtk::Window>().ok())
+            {
+                if mono {
+                    window.add_css_class("font-mono");
+                } else {
+                    window.remove_css_class("font-mono");
+                }
+            }
+        });
+    }
+    font_row.append(&font_label);
+    font_row.append(&font_toggle_box);
+    menu.append(&font_row);
 
     menu.append(&gtk::Separator::new(Orientation::Horizontal));
 
@@ -4421,6 +4475,7 @@ fn save_library_view_settings(settings: LibraryViewSettings) {
 
 const LIBRARY_VIEW_SETTINGS_KEY: &str = "library.view.settings";
 const KEEP_PLAYING_WHILE_CLOSED_KEY: &str = "player.keep_playing_while_closed";
+const FONT_MONO_KEY: &str = "ui.font.mono";
 const PLAYBACK_STATE_KEY: &str = "player.playback.state";
 const PLAYBACK_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -4446,6 +4501,26 @@ fn set_keep_playing_while_closed(state: &Rc<RefCell<UiState>>, enabled: bool) {
         )
     }) {
         tracing::warn!(%error, "failed to save close behavior setting");
+    }
+}
+
+fn load_font_mono() -> bool {
+    match CacheDatabase::open_default().and_then(|cache| cache.get_setting(FONT_MONO_KEY)) {
+        Ok(Some(value)) => value == "true",
+        Ok(None) => false,
+        Err(error) => {
+            tracing::warn!(%error, "failed to load font style setting");
+            false
+        }
+    }
+}
+
+fn set_font_mono(state: &Rc<RefCell<UiState>>, mono: bool) {
+    state.borrow_mut().font_mono = mono;
+    if let Err(error) = CacheDatabase::open_default().and_then(|cache| {
+        cache.set_setting(FONT_MONO_KEY, if mono { "true" } else { "false" })
+    }) {
+        tracing::warn!(%error, "failed to save font style setting");
     }
 }
 

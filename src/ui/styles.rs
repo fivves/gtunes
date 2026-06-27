@@ -1,4 +1,14 @@
 pub const APP_CSS: &str = r#"
+.font-mono * {
+  font-family: "JetBrainsMono Nerd Font", "JetBrains Mono", monospace;
+}
+
+.font-style-toggle {
+  padding: 4px 8px;
+  min-width: 0;
+  min-height: 0;
+}
+
 window {
   background: @window_bg_color;
   color: @window_fg_color;
