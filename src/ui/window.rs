@@ -1085,6 +1085,12 @@ enum VisibleLibraryContent {
     NextUp,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NavDirection {
+    Forward,
+    Backward,
+}
+
 #[derive(Clone, Debug)]
 struct CollectionReturnTarget {
     content: VisibleLibraryContent,
@@ -2456,7 +2462,7 @@ fn apply_first_time_setup_state(state: &Rc<RefCell<UiState>>) {
 
     refresh_track_model(state);
     refresh_collection_grids(state);
-    update_content_view(state);
+    update_content_view(state, NavDirection::Forward);
 }
 
 fn build_body(state: Rc<RefCell<UiState>>) -> gtk::Box {
@@ -2532,7 +2538,6 @@ fn build_content(state: Rc<RefCell<UiState>>) -> gtk::Box {
     let stack = gtk::Stack::new();
     stack.set_hexpand(true);
     stack.set_vexpand(true);
-    stack.set_transition_type(gtk::StackTransitionType::Crossfade);
     stack.set_transition_duration(200);
     stack.add_named(&track_table(state.clone()), Some("tracks"));
     stack.add_named(&album_grid_page(state.clone()), Some("albums"));
@@ -2545,7 +2550,7 @@ fn build_content(state: Rc<RefCell<UiState>>) -> gtk::Box {
 
     content.append(&stack);
     refresh_collection_grids(&state);
-    update_content_view(&state);
+    update_content_view(&state, NavDirection::Forward);
     content
 }
 
@@ -4646,16 +4651,28 @@ fn set_search_query(state: &Rc<RefCell<UiState>>, query: &str) {
         refresh_track_model(state);
     }
     refresh_visible_collection_grid(state);
-    update_content_view(state);
+    update_content_view(state, NavDirection::Forward);
     if show_tracks {
         load_selected_cover_art(state);
         load_selected_waveform(state);
     }
 }
 
+fn library_page_order(page: LibraryPage) -> usize {
+    match page {
+        LibraryPage::Tracks => 0,
+        LibraryPage::Albums => 1,
+        LibraryPage::Artists => 2,
+        LibraryPage::Playlists => 3,
+        LibraryPage::Radio => 4,
+        LibraryPage::NextUp => 5,
+    }
+}
+
 fn set_library_page(state: &Rc<RefCell<UiState>>, page: LibraryPage) {
     let show_tracks = page == LibraryPage::Tracks;
     let mut refresh_tracks = false;
+    let old_page;
     {
         let mut ui = state.borrow_mut();
         if ui.active_page == page
@@ -4670,6 +4687,7 @@ fn set_library_page(state: &Rc<RefCell<UiState>>, page: LibraryPage) {
         {
             return;
         }
+        old_page = ui.active_page;
         ui.active_page = page;
         ui.album_filter = None;
         ui.artist_filter = None;
@@ -4690,12 +4708,17 @@ fn set_library_page(state: &Rc<RefCell<UiState>>, page: LibraryPage) {
         }
         update_page_summary(&ui);
     }
+    let direction = if library_page_order(page) >= library_page_order(old_page) {
+        NavDirection::Forward
+    } else {
+        NavDirection::Backward
+    };
     if refresh_tracks {
         refresh_track_model(state);
     }
     refresh_visible_collection_grid(state);
     update_nav_selection(state);
-    update_content_view(state);
+    update_content_view(state, direction);
     focus_active_collection_grid(state);
     if refresh_tracks {
         load_selected_cover_art(state);
@@ -4745,7 +4768,7 @@ fn show_album_tracks(state: &Rc<RefCell<UiState>>, album: &AlbumSummary) {
         update_page_summary(&ui);
     }
     refresh_track_model(state);
-    update_content_view(state);
+    update_content_view(state, NavDirection::Forward);
     load_selected_cover_art(state);
     load_selected_waveform(state);
 }
@@ -4849,7 +4872,7 @@ fn show_playlist_tracks(state: &Rc<RefCell<UiState>>, playlist: &UiPlaylist) {
         update_page_summary(&ui);
     }
     refresh_track_model(state);
-    update_content_view(state);
+    update_content_view(state, NavDirection::Forward);
     load_selected_cover_art(state);
     load_selected_waveform(state);
 }
@@ -4878,7 +4901,7 @@ fn show_artist_albums(state: &Rc<RefCell<UiState>>, artist: &ArtistSummary) {
         ));
     }
     refresh_visible_collection_grid(state);
-    update_content_view(state);
+    update_content_view(state, NavDirection::Forward);
     focus_active_collection_grid(state);
 }
 
@@ -4974,7 +4997,7 @@ fn return_to_collection_grid(state: &Rc<RefCell<UiState>>) {
     if refresh_grid {
         refresh_visible_collection_grid(state);
     }
-    update_content_view(state);
+    update_content_view(state, NavDirection::Backward);
     focus_active_collection_grid(state);
     restore_active_collection_scroll_position(state);
     pulse_collection_return_target(state, return_target);
@@ -5024,7 +5047,7 @@ fn navigate_to_now_playing_album(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn update_content_view(state: &Rc<RefCell<UiState>>) {
+fn update_content_view(state: &Rc<RefCell<UiState>>, direction: NavDirection) {
     let (
         stack,
         detail_header,
@@ -5063,6 +5086,10 @@ fn update_content_view(state: &Rc<RefCell<UiState>>) {
     };
 
     if let Some(stack) = stack.as_ref() {
+        stack.set_transition_type(match direction {
+            NavDirection::Forward => gtk::StackTransitionType::SlideLeft,
+            NavDirection::Backward => gtk::StackTransitionType::SlideRight,
+        });
         stack.set_visible_child_name(&visible_child);
     }
     if let Some(header) = detail_header.as_ref() {
@@ -6260,7 +6287,7 @@ fn apply_connection_payload(state: &Rc<RefCell<UiState>>, payload: ConnectionPay
     }
     refresh_track_model(state);
     update_nav_counts(state);
-    update_content_view(state);
+    update_content_view(state, NavDirection::Forward);
     load_selected_cover_art(state);
     load_selected_waveform(state);
     restore_persisted_playback(state);
