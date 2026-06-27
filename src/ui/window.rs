@@ -174,6 +174,7 @@ struct UiState {
     sort_column: SortColumn,
     sort_ascending: bool,
     keep_playing_while_closed: bool,
+    lateral_transition: LateralTransition,
     playback_session: session::PlaybackSession<UiTrack>,
     track_indicators: Vec<(String, gtk::Image)>,
     last_playback_snapshot_at: Option<Instant>,
@@ -627,6 +628,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
 
     let view_settings = load_library_view_settings();
     let keep_playing_while_closed = load_keep_playing_while_closed();
+    let lateral_transition = load_lateral_transition();
     let state = Rc::new(RefCell::new(UiState {
         all_tracks: Vec::new(),
         tracks: Vec::new(),
@@ -659,6 +661,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         sort_column: view_settings.sort_column,
         sort_ascending: view_settings.sort_ascending,
         keep_playing_while_closed,
+        lateral_transition,
         playback_session: session::PlaybackSession::default(),
         track_indicators: Vec::new(),
         last_playback_snapshot_at: None,
@@ -1090,6 +1093,49 @@ enum NavDirection {
     Forward,
     Backward,
     Lateral,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+enum LateralTransition {
+    #[default]
+    Crossfade,
+    OverDown,
+    OverUp,
+    RotateLeft,
+    Instant,
+}
+
+impl LateralTransition {
+    fn from_index(index: u32) -> Option<Self> {
+        match index {
+            0 => Some(Self::Crossfade),
+            1 => Some(Self::OverDown),
+            2 => Some(Self::OverUp),
+            3 => Some(Self::RotateLeft),
+            4 => Some(Self::Instant),
+            _ => None,
+        }
+    }
+
+    fn to_index(self) -> u32 {
+        match self {
+            Self::Crossfade => 0,
+            Self::OverDown => 1,
+            Self::OverUp => 2,
+            Self::RotateLeft => 3,
+            Self::Instant => 4,
+        }
+    }
+
+    fn to_gtk_transition(self) -> gtk::StackTransitionType {
+        match self {
+            Self::Crossfade => gtk::StackTransitionType::Crossfade,
+            Self::OverDown => gtk::StackTransitionType::OverDown,
+            Self::OverUp => gtk::StackTransitionType::OverUp,
+            Self::RotateLeft => gtk::StackTransitionType::RotateLeft,
+            Self::Instant => gtk::StackTransitionType::None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2011,6 +2057,32 @@ fn settings_menu_button(state: Rc<RefCell<UiState>>) -> gtk::MenuButton {
     keep_row.append(&keep_label);
     keep_row.append(&keep_switch);
     menu.append(&keep_row);
+
+    let transition_row = gtk::Box::new(Orientation::Horizontal, 12);
+    transition_row.add_css_class("settings-switch-row");
+    transition_row.set_margin_top(2);
+    transition_row.set_margin_bottom(6);
+    transition_row.set_margin_start(6);
+    transition_row.set_margin_end(6);
+    let transition_label = label("Page transition", "settings-menu-label");
+    transition_label.set_hexpand(true);
+    transition_label.set_halign(Align::Start);
+    transition_label.set_valign(Align::Center);
+    let transition_dropdown = gtk::DropDown::from_strings(&["Fade", "Drop", "Rise", "Spin", "None"]);
+    transition_dropdown.set_selected(state.borrow().lateral_transition.to_index());
+    transition_dropdown.set_valign(Align::Center);
+    {
+        let state = state.clone();
+        transition_dropdown.connect_selected_notify(move |dropdown| {
+            if let Some(transition) = LateralTransition::from_index(dropdown.selected()) {
+                set_lateral_transition(&state, transition);
+            }
+        });
+    }
+    transition_row.append(&transition_label);
+    transition_row.append(&transition_dropdown);
+    menu.append(&transition_row);
+
     menu.append(&gtk::Separator::new(Orientation::Horizontal));
 
     let refresh = menu_item_button("view-refresh-symbolic", "Refresh library");
@@ -4419,6 +4491,7 @@ fn save_library_view_settings(settings: LibraryViewSettings) {
 
 const LIBRARY_VIEW_SETTINGS_KEY: &str = "library.view.settings";
 const KEEP_PLAYING_WHILE_CLOSED_KEY: &str = "player.keep_playing_while_closed";
+const LATERAL_TRANSITION_KEY: &str = "appearance.lateral_transition";
 const PLAYBACK_STATE_KEY: &str = "player.playback.state";
 const PLAYBACK_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -4444,6 +4517,32 @@ fn set_keep_playing_while_closed(state: &Rc<RefCell<UiState>>, enabled: bool) {
         )
     }) {
         tracing::warn!(%error, "failed to save close behavior setting");
+    }
+}
+
+fn load_lateral_transition() -> LateralTransition {
+    match CacheDatabase::open_default()
+        .and_then(|cache| cache.get_setting(LATERAL_TRANSITION_KEY))
+    {
+        Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_default(),
+        Ok(None) => LateralTransition::default(),
+        Err(error) => {
+            tracing::warn!(%error, "failed to load lateral transition setting");
+            LateralTransition::default()
+        }
+    }
+}
+
+fn set_lateral_transition(state: &Rc<RefCell<UiState>>, transition: LateralTransition) {
+    state.borrow_mut().lateral_transition = transition;
+    let result = serde_json::to_string(&transition)
+        .map_err(crate::cache::CacheError::from)
+        .and_then(|json| {
+            CacheDatabase::open_default()
+                .and_then(|cache| cache.set_setting(LATERAL_TRANSITION_KEY, &json))
+        });
+    if let Err(error) = result {
+        tracing::warn!(%error, "failed to save lateral transition setting");
     }
 }
 
@@ -5040,6 +5139,7 @@ fn update_content_view(state: &Rc<RefCell<UiState>>, direction: NavDirection) {
         show_detail,
         title,
         subtitle,
+        lateral_transition,
     ) = {
         let ui = state.borrow();
         let show_detail =
@@ -5065,6 +5165,7 @@ fn update_content_view(state: &Rc<RefCell<UiState>>, direction: NavDirection) {
             show_detail,
             ui.collection_detail_title.clone().unwrap_or_default(),
             ui.collection_detail_subtitle.clone().unwrap_or_default(),
+            ui.lateral_transition,
         )
     };
 
@@ -5072,7 +5173,7 @@ fn update_content_view(state: &Rc<RefCell<UiState>>, direction: NavDirection) {
         stack.set_transition_type(match direction {
             NavDirection::Forward => gtk::StackTransitionType::SlideLeft,
             NavDirection::Backward => gtk::StackTransitionType::SlideRight,
-            NavDirection::Lateral => gtk::StackTransitionType::OverDown,
+            NavDirection::Lateral => lateral_transition.to_gtk_transition(),
         });
         stack.set_visible_child_name(&visible_child);
     }
