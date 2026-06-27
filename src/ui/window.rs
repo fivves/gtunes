@@ -174,7 +174,6 @@ struct UiState {
     sort_column: SortColumn,
     sort_ascending: bool,
     keep_playing_while_closed: bool,
-    lateral_transition: LateralTransition,
     playback_session: session::PlaybackSession<UiTrack>,
     track_indicators: Vec<(String, gtk::Image)>,
     last_playback_snapshot_at: Option<Instant>,
@@ -628,7 +627,6 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
 
     let view_settings = load_library_view_settings();
     let keep_playing_while_closed = load_keep_playing_while_closed();
-    let lateral_transition = load_lateral_transition();
     let state = Rc::new(RefCell::new(UiState {
         all_tracks: Vec::new(),
         tracks: Vec::new(),
@@ -661,7 +659,6 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         sort_column: view_settings.sort_column,
         sort_ascending: view_settings.sort_ascending,
         keep_playing_while_closed,
-        lateral_transition,
         playback_session: session::PlaybackSession::default(),
         track_indicators: Vec::new(),
         last_playback_snapshot_at: None,
@@ -1090,52 +1087,10 @@ enum VisibleLibraryContent {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NavDirection {
-    Forward,
-    Backward,
-    Lateral,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
-enum LateralTransition {
-    #[default]
-    Crossfade,
-    OverDown,
-    OverUp,
-    RotateLeft,
-    Instant,
-}
-
-impl LateralTransition {
-    fn from_index(index: u32) -> Option<Self> {
-        match index {
-            0 => Some(Self::Crossfade),
-            1 => Some(Self::OverDown),
-            2 => Some(Self::OverUp),
-            3 => Some(Self::RotateLeft),
-            4 => Some(Self::Instant),
-            _ => None,
-        }
-    }
-
-    fn to_index(self) -> u32 {
-        match self {
-            Self::Crossfade => 0,
-            Self::OverDown => 1,
-            Self::OverUp => 2,
-            Self::RotateLeft => 3,
-            Self::Instant => 4,
-        }
-    }
-
-    fn to_gtk_transition(self) -> gtk::StackTransitionType {
-        match self {
-            Self::Crossfade => gtk::StackTransitionType::Crossfade,
-            Self::OverDown => gtk::StackTransitionType::OverDown,
-            Self::OverUp => gtk::StackTransitionType::OverUp,
-            Self::RotateLeft => gtk::StackTransitionType::RotateLeft,
-            Self::Instant => gtk::StackTransitionType::None,
-        }
-    }
+    DrillForward,
+    DrillBackward,
+    PageForward,
+    PageBackward,
 }
 
 #[derive(Clone, Debug)]
@@ -2058,31 +2013,6 @@ fn settings_menu_button(state: Rc<RefCell<UiState>>) -> gtk::MenuButton {
     keep_row.append(&keep_switch);
     menu.append(&keep_row);
 
-    let transition_row = gtk::Box::new(Orientation::Horizontal, 12);
-    transition_row.add_css_class("settings-switch-row");
-    transition_row.set_margin_top(2);
-    transition_row.set_margin_bottom(6);
-    transition_row.set_margin_start(6);
-    transition_row.set_margin_end(6);
-    let transition_label = label("Page transition", "settings-menu-label");
-    transition_label.set_hexpand(true);
-    transition_label.set_halign(Align::Start);
-    transition_label.set_valign(Align::Center);
-    let transition_dropdown = gtk::DropDown::from_strings(&["Fade", "Drop", "Rise", "Spin", "None"]);
-    transition_dropdown.set_selected(state.borrow().lateral_transition.to_index());
-    transition_dropdown.set_valign(Align::Center);
-    {
-        let state = state.clone();
-        transition_dropdown.connect_selected_notify(move |dropdown| {
-            if let Some(transition) = LateralTransition::from_index(dropdown.selected()) {
-                set_lateral_transition(&state, transition);
-            }
-        });
-    }
-    transition_row.append(&transition_label);
-    transition_row.append(&transition_dropdown);
-    menu.append(&transition_row);
-
     menu.append(&gtk::Separator::new(Orientation::Horizontal));
 
     let refresh = menu_item_button("view-refresh-symbolic", "Refresh library");
@@ -2535,7 +2465,7 @@ fn apply_first_time_setup_state(state: &Rc<RefCell<UiState>>) {
 
     refresh_track_model(state);
     refresh_collection_grids(state);
-    update_content_view(state, NavDirection::Forward);
+    update_content_view(state, NavDirection::DrillForward);
 }
 
 fn build_body(state: Rc<RefCell<UiState>>) -> gtk::Box {
@@ -2623,7 +2553,7 @@ fn build_content(state: Rc<RefCell<UiState>>) -> gtk::Box {
 
     content.append(&stack);
     refresh_collection_grids(&state);
-    update_content_view(&state, NavDirection::Forward);
+    update_content_view(&state, NavDirection::DrillForward);
     content
 }
 
@@ -4491,7 +4421,6 @@ fn save_library_view_settings(settings: LibraryViewSettings) {
 
 const LIBRARY_VIEW_SETTINGS_KEY: &str = "library.view.settings";
 const KEEP_PLAYING_WHILE_CLOSED_KEY: &str = "player.keep_playing_while_closed";
-const LATERAL_TRANSITION_KEY: &str = "appearance.lateral_transition";
 const PLAYBACK_STATE_KEY: &str = "player.playback.state";
 const PLAYBACK_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -4520,31 +4449,6 @@ fn set_keep_playing_while_closed(state: &Rc<RefCell<UiState>>, enabled: bool) {
     }
 }
 
-fn load_lateral_transition() -> LateralTransition {
-    match CacheDatabase::open_default()
-        .and_then(|cache| cache.get_setting(LATERAL_TRANSITION_KEY))
-    {
-        Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_default(),
-        Ok(None) => LateralTransition::default(),
-        Err(error) => {
-            tracing::warn!(%error, "failed to load lateral transition setting");
-            LateralTransition::default()
-        }
-    }
-}
-
-fn set_lateral_transition(state: &Rc<RefCell<UiState>>, transition: LateralTransition) {
-    state.borrow_mut().lateral_transition = transition;
-    let result = serde_json::to_string(&transition)
-        .map_err(crate::cache::CacheError::from)
-        .and_then(|json| {
-            CacheDatabase::open_default()
-                .and_then(|cache| cache.set_setting(LATERAL_TRANSITION_KEY, &json))
-        });
-    if let Err(error) = result {
-        tracing::warn!(%error, "failed to save lateral transition setting");
-    }
-}
 
 fn playback_snapshot(ui: &UiState) -> Option<session::PersistedPlaybackState> {
     if ui.playback_session.mode.is_radio() {
@@ -4751,16 +4655,28 @@ fn set_search_query(state: &Rc<RefCell<UiState>>, query: &str) {
         refresh_track_model(state);
     }
     refresh_visible_collection_grid(state);
-    update_content_view(state, NavDirection::Forward);
+    update_content_view(state, NavDirection::DrillForward);
     if show_tracks {
         load_selected_cover_art(state);
         load_selected_waveform(state);
     }
 }
 
+fn library_page_order(page: LibraryPage) -> usize {
+    match page {
+        LibraryPage::Tracks => 0,
+        LibraryPage::Albums => 1,
+        LibraryPage::Artists => 2,
+        LibraryPage::Playlists => 3,
+        LibraryPage::Radio => 4,
+        LibraryPage::NextUp => 5,
+    }
+}
+
 fn set_library_page(state: &Rc<RefCell<UiState>>, page: LibraryPage) {
     let show_tracks = page == LibraryPage::Tracks;
     let mut refresh_tracks = false;
+    let old_page;
     {
         let mut ui = state.borrow_mut();
         if ui.active_page == page
@@ -4775,6 +4691,7 @@ fn set_library_page(state: &Rc<RefCell<UiState>>, page: LibraryPage) {
         {
             return;
         }
+        old_page = ui.active_page;
         ui.active_page = page;
         ui.album_filter = None;
         ui.artist_filter = None;
@@ -4795,12 +4712,17 @@ fn set_library_page(state: &Rc<RefCell<UiState>>, page: LibraryPage) {
         }
         update_page_summary(&ui);
     }
+    let direction = if library_page_order(page) >= library_page_order(old_page) {
+        NavDirection::PageForward
+    } else {
+        NavDirection::PageBackward
+    };
     if refresh_tracks {
         refresh_track_model(state);
     }
     refresh_visible_collection_grid(state);
     update_nav_selection(state);
-    update_content_view(state, NavDirection::Lateral);
+    update_content_view(state, direction);
     focus_active_collection_grid(state);
     if refresh_tracks {
         load_selected_cover_art(state);
@@ -4850,7 +4772,7 @@ fn show_album_tracks(state: &Rc<RefCell<UiState>>, album: &AlbumSummary) {
         update_page_summary(&ui);
     }
     refresh_track_model(state);
-    update_content_view(state, NavDirection::Forward);
+    update_content_view(state, NavDirection::DrillForward);
     load_selected_cover_art(state);
     load_selected_waveform(state);
 }
@@ -4954,7 +4876,7 @@ fn show_playlist_tracks(state: &Rc<RefCell<UiState>>, playlist: &UiPlaylist) {
         update_page_summary(&ui);
     }
     refresh_track_model(state);
-    update_content_view(state, NavDirection::Forward);
+    update_content_view(state, NavDirection::DrillForward);
     load_selected_cover_art(state);
     load_selected_waveform(state);
 }
@@ -4983,7 +4905,7 @@ fn show_artist_albums(state: &Rc<RefCell<UiState>>, artist: &ArtistSummary) {
         ));
     }
     refresh_visible_collection_grid(state);
-    update_content_view(state, NavDirection::Forward);
+    update_content_view(state, NavDirection::DrillForward);
     focus_active_collection_grid(state);
 }
 
@@ -5079,7 +5001,7 @@ fn return_to_collection_grid(state: &Rc<RefCell<UiState>>) {
     if refresh_grid {
         refresh_visible_collection_grid(state);
     }
-    update_content_view(state, NavDirection::Backward);
+    update_content_view(state, NavDirection::DrillBackward);
     focus_active_collection_grid(state);
     restore_active_collection_scroll_position(state);
     pulse_collection_return_target(state, return_target);
@@ -5139,7 +5061,6 @@ fn update_content_view(state: &Rc<RefCell<UiState>>, direction: NavDirection) {
         show_detail,
         title,
         subtitle,
-        lateral_transition,
     ) = {
         let ui = state.borrow();
         let show_detail =
@@ -5165,15 +5086,15 @@ fn update_content_view(state: &Rc<RefCell<UiState>>, direction: NavDirection) {
             show_detail,
             ui.collection_detail_title.clone().unwrap_or_default(),
             ui.collection_detail_subtitle.clone().unwrap_or_default(),
-            ui.lateral_transition,
         )
     };
 
     if let Some(stack) = stack.as_ref() {
         stack.set_transition_type(match direction {
-            NavDirection::Forward => gtk::StackTransitionType::SlideLeft,
-            NavDirection::Backward => gtk::StackTransitionType::SlideRight,
-            NavDirection::Lateral => lateral_transition.to_gtk_transition(),
+            NavDirection::DrillForward => gtk::StackTransitionType::SlideLeft,
+            NavDirection::DrillBackward => gtk::StackTransitionType::SlideRight,
+            NavDirection::PageForward => gtk::StackTransitionType::OverDown,
+            NavDirection::PageBackward => gtk::StackTransitionType::OverUp,
         });
         stack.set_visible_child_name(&visible_child);
     }
@@ -6372,7 +6293,7 @@ fn apply_connection_payload(state: &Rc<RefCell<UiState>>, payload: ConnectionPay
     }
     refresh_track_model(state);
     update_nav_counts(state);
-    update_content_view(state, NavDirection::Forward);
+    update_content_view(state, NavDirection::DrillForward);
     load_selected_cover_art(state);
     load_selected_waveform(state);
     restore_persisted_playback(state);
