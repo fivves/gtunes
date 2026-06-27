@@ -874,10 +874,8 @@ window {
   transition: background-color 200ms cubic-bezier(0.34, 1.56, 0.64, 1),
               border-color 200ms cubic-bezier(0.34, 1.56, 0.64, 1),
               box-shadow 200ms cubic-bezier(0.34, 1.56, 0.64, 1),
-              transform 220ms cubic-bezier(0.34, 1.56, 0.64, 1),
-              opacity 200ms ease-out,
-              margin-top 180ms cubic-bezier(0.34, 1.56, 0.64, 1),
-              margin-bottom 180ms cubic-bezier(0.34, 1.56, 0.64, 1);
+              transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              opacity 160ms ease-out;
 }
 
 .next-up-list > button:nth-child(1)  { animation-delay: 0ms; }
@@ -896,19 +894,20 @@ window {
   box-shadow: 0 2px 10px alpha(@window_fg_color, .08);
 }
 
+/* The lifted card stays in its slot as a faint ghost so neighbours can flow
+   over its position; a solid copy follows the cursor as the drag icon. */
 .next-up-row.dragging {
-  opacity: 0.48;
-  transform: scale(0.96) rotate(1.4deg);
-  box-shadow: 0 14px 40px alpha(@window_fg_color, .28);
-  border-color: alpha(@accent_bg_color, .40);
+  opacity: 0.32;
+  border-color: alpha(@accent_bg_color, .55);
 }
 
-.next-up-row.gap-above {
-  margin-top: 80px;
+/* One card slot = 72px min-height + 24px padding + 2px border + 8px row gap. */
+.next-up-row.flow-up {
+  transform: translateY(-106px);
 }
 
-.next-up-row.gap-below {
-  margin-bottom: 80px;
+.next-up-row.flow-down {
+  transform: translateY(106px);
 }
 
 .next-up-index {
