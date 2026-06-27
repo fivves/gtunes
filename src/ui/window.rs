@@ -1089,6 +1089,7 @@ enum VisibleLibraryContent {
 enum NavDirection {
     Forward,
     Backward,
+    Lateral,
 }
 
 #[derive(Clone, Debug)]
@@ -4658,21 +4659,9 @@ fn set_search_query(state: &Rc<RefCell<UiState>>, query: &str) {
     }
 }
 
-fn library_page_order(page: LibraryPage) -> usize {
-    match page {
-        LibraryPage::Tracks => 0,
-        LibraryPage::Albums => 1,
-        LibraryPage::Artists => 2,
-        LibraryPage::Playlists => 3,
-        LibraryPage::Radio => 4,
-        LibraryPage::NextUp => 5,
-    }
-}
-
 fn set_library_page(state: &Rc<RefCell<UiState>>, page: LibraryPage) {
     let show_tracks = page == LibraryPage::Tracks;
     let mut refresh_tracks = false;
-    let old_page;
     {
         let mut ui = state.borrow_mut();
         if ui.active_page == page
@@ -4687,7 +4676,6 @@ fn set_library_page(state: &Rc<RefCell<UiState>>, page: LibraryPage) {
         {
             return;
         }
-        old_page = ui.active_page;
         ui.active_page = page;
         ui.album_filter = None;
         ui.artist_filter = None;
@@ -4708,17 +4696,12 @@ fn set_library_page(state: &Rc<RefCell<UiState>>, page: LibraryPage) {
         }
         update_page_summary(&ui);
     }
-    let direction = if library_page_order(page) >= library_page_order(old_page) {
-        NavDirection::Forward
-    } else {
-        NavDirection::Backward
-    };
     if refresh_tracks {
         refresh_track_model(state);
     }
     refresh_visible_collection_grid(state);
     update_nav_selection(state);
-    update_content_view(state, direction);
+    update_content_view(state, NavDirection::Lateral);
     focus_active_collection_grid(state);
     if refresh_tracks {
         load_selected_cover_art(state);
@@ -5089,6 +5072,7 @@ fn update_content_view(state: &Rc<RefCell<UiState>>, direction: NavDirection) {
         stack.set_transition_type(match direction {
             NavDirection::Forward => gtk::StackTransitionType::SlideLeft,
             NavDirection::Backward => gtk::StackTransitionType::SlideRight,
+            NavDirection::Lateral => gtk::StackTransitionType::Crossfade,
         });
         stack.set_visible_child_name(&visible_child);
     }
