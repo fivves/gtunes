@@ -1,13 +1,6 @@
 # gTunes
 
-<img width="480" alt="image" src="https://github.com/user-attachments/assets/23286599-57b5-49eb-89bb-93480b17de65" />
-<img width="480" alt="image" src="https://github.com/user-attachments/assets/22e6f29b-fa78-4704-a153-d07e245039cf" />
-<img width="480" alt="image" src="https://github.com/user-attachments/assets/c923ae3d-9865-4709-ac75-7d9c686b5a7e" />
-<img width="480" alt="image" src="https://github.com/user-attachments/assets/e17c1218-3786-490b-98d4-ad2a3ab38946" />
-
-
-
-
+<img width="1896" height="1056" alt="image" src="https://github.com/user-attachments/assets/625abf2f-c469-44af-bb92-af8ca449cefe" />
 
 </br>
 
