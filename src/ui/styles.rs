@@ -430,9 +430,14 @@ window {
   box-shadow: 0 0 0 2px alpha(@accent_bg_color, .24), 0 2px 10px alpha(@window_fg_color, .12);
 }
 
+.artwork-loading {
+  opacity: 0;
+}
+
 .collection-art {
   border-radius: 8px;
   background: @card_bg_color;
+  transition: opacity 220ms ease-out;
 }
 
 .album-art-frame {
@@ -473,7 +478,8 @@ window {
   border-radius: 8px;
   box-shadow: inset 0 0 0 1px alpha(@borders, .72);
   transition: box-shadow 260ms cubic-bezier(0.34, 1.56, 0.64, 1),
-              transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
+              transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              opacity 220ms ease-out;
 }
 
 .artist-tile:hover .artist-art,

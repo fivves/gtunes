@@ -3367,6 +3367,7 @@ fn album_tile(album: AlbumSummary, state: Rc<RefCell<UiState>>, tile_index: usiz
     art.set_valign(Align::Fill);
     art.set_icon_name(Some("audio-x-generic-symbolic"));
     if let Some(url) = album.artwork_url.clone() {
+        art.add_css_class("artwork-loading");
         let current_url = Rc::new(RefCell::new(Some(url.clone())));
         load_collection_queue_art(Some(url), art.clone(), current_url, tile_index);
     }
@@ -3409,6 +3410,7 @@ fn artist_tile(
     avatar.set_overflow(gtk::Overflow::Hidden);
     avatar.set_pixel_size(56);
     if let Some(url) = artist.image_url.clone() {
+        avatar.add_css_class("artwork-loading");
         load_collection_picture_art(url, avatar.clone(), tile_index);
     }
     layout.append(&avatar);
@@ -3454,6 +3456,7 @@ fn playlist_tile(
     art.set_valign(Align::Fill);
     art.set_icon_name(Some("media-playlist-consecutive-symbolic"));
     if let Some(url) = playlist.thumbnail_artwork_url.clone() {
+        art.add_css_class("artwork-loading");
         let current_url = Rc::new(RefCell::new(Some(url.clone())));
         load_collection_queue_art(Some(url), art.clone(), current_url, tile_index);
     }
@@ -7861,13 +7864,20 @@ fn load_queue_art(
                 }
                 let file = gtk::gio::File::for_path(path);
                 match gtk::gdk::Texture::from_file(&file) {
-                    Ok(texture) => image.set_paintable(Some(&texture)),
-                    Err(error) => tracing::warn!(%error, "failed to decode queue artwork"),
+                    Ok(texture) => {
+                        image.set_paintable(Some(&texture));
+                        image.remove_css_class("artwork-loading");
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to decode queue artwork");
+                        image.remove_css_class("artwork-loading");
+                    }
                 }
                 gtk::glib::ControlFlow::Break
             }
             Ok(Err(error)) => {
                 tracing::warn!(%error, "failed to fetch queue artwork");
+                image.remove_css_class("artwork-loading");
                 gtk::glib::ControlFlow::Break
             }
             Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
@@ -7914,19 +7924,25 @@ fn load_picture_art(url: String, image: gtk::Image) {
                 match gtk::gdk::Texture::from_file(&file) {
                     Ok(texture) => {
                         image.remove_css_class("artist-placeholder");
+                        image.remove_css_class("artwork-loading");
                         image.set_pixel_size(ARTIST_ART_SIZE);
                         image.set_paintable(Some(&texture));
                     }
-                    Err(error) => tracing::warn!(%error, "failed to decode artist artwork"),
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to decode artist artwork");
+                        image.remove_css_class("artwork-loading");
+                    }
                 }
                 gtk::glib::ControlFlow::Break
             }
             Ok(Err(ImageFetchError::Missing)) => {
                 tracing::debug!("artist artwork is unavailable");
+                image.remove_css_class("artwork-loading");
                 gtk::glib::ControlFlow::Break
             }
             Ok(Err(error)) => {
                 tracing::warn!(%error, "failed to fetch artist artwork");
+                image.remove_css_class("artwork-loading");
                 gtk::glib::ControlFlow::Break
             }
             Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
