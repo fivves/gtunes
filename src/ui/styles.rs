@@ -875,7 +875,9 @@ window {
               border-color 200ms cubic-bezier(0.34, 1.56, 0.64, 1),
               box-shadow 200ms cubic-bezier(0.34, 1.56, 0.64, 1),
               transform 220ms cubic-bezier(0.34, 1.56, 0.64, 1),
-              opacity 200ms ease-out;
+              opacity 200ms ease-out,
+              margin-top 180ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              margin-bottom 180ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .next-up-list > button:nth-child(1)  { animation-delay: 0ms; }
@@ -895,17 +897,18 @@ window {
 }
 
 .next-up-row.dragging {
-  opacity: 0.18;
-  transform: scale(0.96);
-  box-shadow: none;
+  opacity: 0.48;
+  transform: scale(0.96) rotate(1.4deg);
+  box-shadow: 0 14px 40px alpha(@window_fg_color, .28);
+  border-color: alpha(@accent_bg_color, .40);
 }
 
-.next-up-row.dodge-up {
-  transform: translateY(-80px);
+.next-up-row.gap-above {
+  margin-top: 80px;
 }
 
-.next-up-row.dodge-down {
-  transform: translateY(80px);
+.next-up-row.gap-below {
+  margin-bottom: 80px;
 }
 
 .next-up-index {
