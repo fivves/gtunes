@@ -302,10 +302,16 @@ impl PlaybackEngine {
         while let Some(message) = self.bus.pop() {
             match message.view() {
                 gst::MessageView::Eos(..) => {
-                    self.current_item_id = None;
-                    self.current_stream_kind = None;
-                    self.state = PlaybackState::Stopped;
-                    event = Some(PlaybackEvent::EndOfStream);
+                    if self.state == PlaybackState::Paused {
+                        // EOS while paused means the HTTP keep-alive dropped, not a real
+                        // track end — advancing here would auto-play without user input.
+                        tracing::debug!("ignoring EOS while paused (HTTP connection dropped)");
+                    } else {
+                        self.current_item_id = None;
+                        self.current_stream_kind = None;
+                        self.state = PlaybackState::Stopped;
+                        event = Some(PlaybackEvent::EndOfStream);
+                    }
                 }
                 gst::MessageView::Error(error) => {
                     let message = error.error().to_string();
