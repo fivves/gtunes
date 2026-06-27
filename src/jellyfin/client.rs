@@ -30,7 +30,6 @@ pub enum JellyfinClientError {
 
 #[derive(Clone, Debug)]
 pub struct JellyfinClient {
-    http: reqwest::Client,
     blocking_http: reqwest::blocking::Client,
     server_url: Url,
     access_token: Option<String>,
@@ -49,11 +48,6 @@ impl JellyfinClient {
         }
 
         let user_agent = format!("{}/{}", config::APP_NAME, config::VERSION);
-        let http = reqwest::Client::builder()
-            .user_agent(user_agent.clone())
-            .default_headers(headers.clone())
-            .timeout(HTTP_TIMEOUT)
-            .build()?;
         let blocking_http = reqwest::blocking::Client::builder()
             .user_agent(user_agent)
             .default_headers(headers)
@@ -61,7 +55,6 @@ impl JellyfinClient {
             .build()?;
 
         Ok(Self {
-            http,
             blocking_http,
             server_url,
             access_token,
@@ -99,10 +92,6 @@ impl JellyfinClient {
 
     pub fn is_authenticated(&self) -> bool {
         self.access_token.is_some()
-    }
-
-    pub fn item_stream_url(&self, item_id: &str) -> Result<Url, JellyfinClientError> {
-        self.item_direct_stream_url(item_id)
     }
 
     pub fn item_direct_stream_url(&self, item_id: &str) -> Result<Url, JellyfinClientError> {
@@ -164,78 +153,31 @@ impl JellyfinClient {
     pub fn music_tracks_with_progress<F>(
         &self,
         user_id: &str,
-        mut progress: F,
+        progress: F,
     ) -> Result<Vec<JellyfinTrack>, JellyfinClientError>
     where
         F: FnMut(usize, Option<usize>),
     {
-        let mut tracks = Vec::new();
-        let mut start_index = 0;
-        let mut total_record_count = None;
-
-        loop {
-            let response = self.music_tracks_page(user_id, start_index, MUSIC_TRACK_PAGE_SIZE)?;
-            let page_len = response.items.len();
-
-            if total_record_count.is_none() {
-                total_record_count = response
-                    .total_record_count
-                    .map(|count| count.max(0) as usize);
-            }
-
-            tracks.extend(response.items);
-            progress(tracks.len(), total_record_count);
-
-            let reached_total = total_record_count
-                .map(|total| tracks.len() >= total)
-                .unwrap_or(false);
-            if page_len == 0 || reached_total || page_len < MUSIC_TRACK_PAGE_SIZE as usize {
-                break;
-            }
-
-            start_index += page_len as u32;
-        }
-
-        Ok(tracks)
+        fetch_all_pages(
+            |start, limit| self.music_tracks_page(user_id, start, limit),
+            MUSIC_TRACK_PAGE_SIZE,
+            progress,
+        )
     }
 
     pub fn music_track_summaries_with_progress<F>(
         &self,
         user_id: &str,
-        mut progress: F,
+        progress: F,
     ) -> Result<Vec<JellyfinItemSummary>, JellyfinClientError>
     where
         F: FnMut(usize, Option<usize>),
     {
-        let mut summaries = Vec::new();
-        let mut start_index = 0;
-        let mut total_record_count = None;
-
-        loop {
-            let response =
-                self.music_track_summaries_page(user_id, start_index, MUSIC_TRACK_PAGE_SIZE)?;
-            let page_len = response.items.len();
-
-            if total_record_count.is_none() {
-                total_record_count = response
-                    .total_record_count
-                    .map(|count| count.max(0) as usize);
-            }
-
-            summaries.extend(response.items);
-            progress(summaries.len(), total_record_count);
-
-            let reached_total = total_record_count
-                .map(|total| summaries.len() >= total)
-                .unwrap_or(false);
-            if page_len == 0 || reached_total || page_len < MUSIC_TRACK_PAGE_SIZE as usize {
-                break;
-            }
-
-            start_index += page_len as u32;
-        }
-
-        Ok(summaries)
+        fetch_all_pages(
+            |start, limit| self.music_track_summaries_page(user_id, start, limit),
+            MUSIC_TRACK_PAGE_SIZE,
+            progress,
+        )
     }
 
     fn music_tracks_page(
@@ -323,67 +265,22 @@ impl JellyfinClient {
         &self,
         user_id: &str,
     ) -> Result<Vec<JellyfinPlaylist>, JellyfinClientError> {
-        let mut playlists = Vec::new();
-        let mut start_index = 0;
-        let mut total_record_count = None;
-
-        loop {
-            let response = self.music_playlists_page(user_id, start_index, PLAYLIST_PAGE_SIZE)?;
-            let page_len = response.items.len();
-
-            if total_record_count.is_none() {
-                total_record_count = response
-                    .total_record_count
-                    .map(|count| count.max(0) as usize);
-            }
-
-            playlists.extend(response.items);
-
-            let reached_total = total_record_count
-                .map(|total| playlists.len() >= total)
-                .unwrap_or(false);
-            if page_len == 0 || reached_total || page_len < PLAYLIST_PAGE_SIZE as usize {
-                break;
-            }
-
-            start_index += page_len as u32;
-        }
-
-        Ok(playlists)
+        fetch_all_pages(
+            |start, limit| self.music_playlists_page(user_id, start, limit),
+            PLAYLIST_PAGE_SIZE,
+            |_, _| {},
+        )
     }
 
     pub fn music_playlist_summaries(
         &self,
         user_id: &str,
     ) -> Result<Vec<JellyfinItemSummary>, JellyfinClientError> {
-        let mut summaries = Vec::new();
-        let mut start_index = 0;
-        let mut total_record_count = None;
-
-        loop {
-            let response =
-                self.music_playlist_summaries_page(user_id, start_index, PLAYLIST_PAGE_SIZE)?;
-            let page_len = response.items.len();
-
-            if total_record_count.is_none() {
-                total_record_count = response
-                    .total_record_count
-                    .map(|count| count.max(0) as usize);
-            }
-
-            summaries.extend(response.items);
-
-            let reached_total = total_record_count
-                .map(|total| summaries.len() >= total)
-                .unwrap_or(false);
-            if page_len == 0 || reached_total || page_len < PLAYLIST_PAGE_SIZE as usize {
-                break;
-            }
-
-            start_index += page_len as u32;
-        }
-
-        Ok(summaries)
+        fetch_all_pages(
+            |start, limit| self.music_playlist_summaries_page(user_id, start, limit),
+            PLAYLIST_PAGE_SIZE,
+            |_, _| {},
+        )
     }
 
     fn music_playlists_page(
@@ -443,38 +340,11 @@ impl JellyfinClient {
         user_id: &str,
         playlist_id: &str,
     ) -> Result<Vec<JellyfinTrack>, JellyfinClientError> {
-        let mut tracks = Vec::new();
-        let mut start_index = 0;
-        let mut total_record_count = None;
-
-        loop {
-            let response = self.playlist_tracks_page(
-                user_id,
-                playlist_id,
-                start_index,
-                MUSIC_TRACK_PAGE_SIZE,
-            )?;
-            let page_len = response.items.len();
-
-            if total_record_count.is_none() {
-                total_record_count = response
-                    .total_record_count
-                    .map(|count| count.max(0) as usize);
-            }
-
-            tracks.extend(response.items);
-
-            let reached_total = total_record_count
-                .map(|total| tracks.len() >= total)
-                .unwrap_or(false);
-            if page_len == 0 || reached_total || page_len < MUSIC_TRACK_PAGE_SIZE as usize {
-                break;
-            }
-
-            start_index += page_len as u32;
-        }
-
-        Ok(tracks)
+        fetch_all_pages(
+            |start, limit| self.playlist_tracks_page(user_id, playlist_id, start, limit),
+            MUSIC_TRACK_PAGE_SIZE,
+            |_, _| {},
+        )
     }
 
     fn playlist_tracks_page(
@@ -506,10 +376,41 @@ impl JellyfinClient {
             .json::<JellyfinItemsResponse<JellyfinTrack>>()?;
         Ok(response)
     }
+}
 
-    pub fn http(&self) -> &reqwest::Client {
-        &self.http
+fn fetch_all_pages<T, F, P>(
+    mut fetch_page: F,
+    page_size: u32,
+    mut on_progress: P,
+) -> Result<Vec<T>, JellyfinClientError>
+where
+    F: FnMut(u32, u32) -> Result<JellyfinItemsResponse<T>, JellyfinClientError>,
+    P: FnMut(usize, Option<usize>),
+{
+    let mut items = Vec::new();
+    let mut start_index = 0u32;
+    let mut total = None;
+
+    loop {
+        let response = fetch_page(start_index, page_size)?;
+        let page_len = response.items.len();
+
+        if total.is_none() {
+            total = response.total_record_count.map(|n| n.max(0) as usize);
+        }
+
+        items.extend(response.items);
+        on_progress(items.len(), total);
+
+        let reached_total = total.map(|t| items.len() >= t).unwrap_or(false);
+        if page_len == 0 || reached_total || page_len < page_size as usize {
+            break;
+        }
+
+        start_index += page_len as u32;
     }
+
+    Ok(items)
 }
 
 pub fn stream_http_headers_for_token(token: Option<&str>) -> Vec<(String, String)> {

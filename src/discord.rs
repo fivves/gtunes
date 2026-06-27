@@ -2,10 +2,8 @@ use discord_rich_presence::{
     DiscordIpc, DiscordIpcClient,
     activity::{self, Activity},
 };
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::env;
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -106,9 +104,13 @@ pub fn artwork_cache_path(url: &str) -> PathBuf {
 }
 
 fn artwork_cache_id(url: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    url.hash(&mut hasher);
-    format!("{:x}", hasher.finish())
+    // FNV-1a 64-bit: stable across Rust versions, zero dependencies
+    const FNV_OFFSET: u64 = 14695981039346656037;
+    const FNV_PRIME: u64 = 1099511628211;
+    let hash = url
+        .bytes()
+        .fold(FNV_OFFSET, |acc, byte| (acc ^ byte as u64).wrapping_mul(FNV_PRIME));
+    format!("{hash:x}")
 }
 
 impl Drop for DiscordPresence {

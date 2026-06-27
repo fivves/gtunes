@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use super::PlaybackStreamKind;
 
@@ -118,14 +118,6 @@ impl<T> PlaybackSession<T> {
 
     pub(crate) fn previous_index(&self, current_index: usize) -> Option<usize> {
         previous_playback_index(&self.playback_order, current_index)
-    }
-
-    pub(crate) fn queued_indices_with_limit(
-        &self,
-        current_index: usize,
-        limit: usize,
-    ) -> Vec<usize> {
-        queued_indices_with_limit(&self.playback_order, current_index, limit)
     }
 
     pub(crate) fn upcoming_count(&self, current_index: usize) -> usize {
@@ -616,15 +608,20 @@ pub(crate) fn restore_ordered_item_ids(
 }
 
 fn shuffle_indices(indices: &mut [usize]) {
-    let mut seed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos() as u64)
-        .unwrap_or(0x9e37_79b9_7f4a_7c15);
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
 
-    for index in (1..indices.len()).rev() {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-        let swap_index = (seed as usize) % (index + 1);
-        indices.swap(index, swap_index);
+    // Seed from OS randomness via RandomState (same source as HashMap key randomization)
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_usize(indices.len());
+    let mut state = hasher.finish();
+
+    for i in (1..indices.len()).rev() {
+        // xorshift64 — better distribution than the previous LCG
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        indices.swap(i, (state as usize) % (i + 1));
     }
 }
 

@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 pub(crate) mod session;
 
 use gst::prelude::*;
@@ -21,8 +19,6 @@ pub enum PlaybackError {
     StateChange(#[from] gst::StateChangeError),
     #[error("GStreamer seek failed: {0}")]
     Seek(#[from] gst::glib::BoolError),
-    #[error("invalid stream URL: {0}")]
-    InvalidUrl(#[from] url::ParseError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -216,10 +212,6 @@ impl PlaybackEngine {
 
     pub fn state(&self) -> &PlaybackState {
         &self.state
-    }
-
-    pub fn current_item_id(&self) -> Option<&str> {
-        self.current_item_id.as_deref()
     }
 
     pub fn current_stream_kind(&self) -> Option<PlaybackStreamKind> {
