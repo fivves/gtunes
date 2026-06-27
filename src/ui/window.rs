@@ -343,7 +343,6 @@ struct NextUpPageView {
     empty: gtk::Box,
     list: gtk::Box,
     rows: Rc<RefCell<Vec<gtk::Button>>>,
-    drag_from: Rc<RefCell<Option<usize>>>,
 }
 
 impl RadioStation {
@@ -3142,39 +3141,14 @@ fn next_up_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
     list.add_css_class("next-up-list");
     list.set_hexpand(true);
 
-    let rows: Rc<RefCell<Vec<gtk::Button>>> = Rc::new(RefCell::new(Vec::new()));
-    let drag_from: Rc<RefCell<Option<usize>>> = Rc::new(RefCell::new(None));
-
-    // A single drop target spanning the whole list is the key to smoothness:
-    // moving between cards never triggers per-card leave/enter races, so the
-    // reflow never flickers. Cards reflow via transforms (constant height).
     let list_drop = gtk::DropTarget::new(gtk::glib::Type::U32, gtk::gdk::DragAction::MOVE);
     {
-        let rows = rows.clone();
-        let drag_from = drag_from.clone();
-        list_drop.connect_motion(move |_, _, y| {
-            if let Some(source) = *drag_from.borrow() {
-                apply_queue_flow(&rows.borrow(), source, y);
-            }
-            gtk::gdk::DragAction::MOVE
-        });
-    }
-    {
-        let rows = rows.clone();
-        list_drop.connect_leave(move |_| {
-            clear_queue_flow(&rows.borrow());
-        });
-    }
-    {
         let state = state.clone();
-        let rows = rows.clone();
-        list_drop.connect_drop(move |_, value, _, y| {
-            clear_queue_flow(&rows.borrow());
+        list_drop.connect_drop(move |_, value, _, _| {
             let Ok(from) = value.get::<u32>() else {
                 return false;
             };
-            let to_slot = queue_insertion_index(&rows.borrow(), y);
-            move_next_up_track(&state, from as usize, to_slot)
+            move_next_up_track(&state, from as usize, NEXT_UP_PAGE_LIMIT)
         });
     }
     list.add_controller(list_drop);
@@ -3184,8 +3158,7 @@ fn next_up_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
     state.borrow_mut().next_up_view = Some(Rc::new(NextUpPageView {
         empty,
         list,
-        rows,
-        drag_from,
+        rows: Rc::new(RefCell::new(Vec::new())),
     }));
     rebuild_queue_list(&state);
     scroll
@@ -7792,59 +7765,10 @@ fn rebuild_next_up_page(state: &Rc<RefCell<UiState>>) {
             position,
             index,
             track,
-            next_up_view.drag_from.clone(),
+            next_up_view.rows.clone(),
         );
         next_up_view.list.append(&row);
         next_up_view.rows.borrow_mut().push(row);
-    }
-}
-
-/// Insertion position (0..=len) for a cursor at `cursor_y` (relative to the
-/// list box), derived from the cards' real allocations so it stays stable even
-/// while cards are visually shifted by transforms.
-fn queue_insertion_index(rows: &[gtk::Button], cursor_y: f64) -> usize {
-    rows.iter()
-        .filter(|row| {
-            let alloc = row.allocation();
-            let midpoint = f64::from(alloc.y()) + f64::from(alloc.height()) / 2.0;
-            midpoint < cursor_y
-        })
-        .count()
-}
-
-fn clear_queue_flow(rows: &[gtk::Button]) {
-    for row in rows {
-        row.remove_css_class("flow-up");
-        row.remove_css_class("flow-down");
-    }
-}
-
-/// Reflow the queue so a single empty slot opens where the dragged card (at
-/// `source`) will land. Every card between the source and the gap slides
-/// exactly one slot via a transform — the source stays put as a faint ghost,
-/// so the list's total height never changes and the motion stays smooth.
-fn apply_queue_flow(rows: &[gtk::Button], source: usize, cursor_y: f64) {
-    let insert_at = queue_insertion_index(rows, cursor_y);
-    // Insertion rank once the source card is removed from the order.
-    let gap = if insert_at > source {
-        insert_at - 1
-    } else {
-        insert_at
-    };
-    for (i, row) in rows.iter().enumerate() {
-        row.remove_css_class("flow-up");
-        row.remove_css_class("flow-down");
-        if i == source {
-            continue;
-        }
-        let after_source = usize::from(i > source);
-        let rank = i - after_source;
-        let after_gap = usize::from(rank >= gap);
-        match after_gap as i32 - after_source as i32 {
-            d if d < 0 => row.add_css_class("flow-up"),
-            d if d > 0 => row.add_css_class("flow-down"),
-            _ => {}
-        }
     }
 }
 
@@ -7853,7 +7777,7 @@ fn next_up_row(
     position: usize,
     track_index: usize,
     track: UiTrack,
-    drag_from: Rc<RefCell<Option<usize>>>,
+    rows: Rc<RefCell<Vec<gtk::Button>>>,
 ) -> gtk::Button {
     let button = gtk::Button::new();
     button.add_css_class("flat");
@@ -7945,20 +7869,81 @@ fn next_up_row(
     });
     {
         let button = button.clone();
-        let drag_from = drag_from.clone();
         drag_source.connect_drag_begin(move |_, _| {
-            *drag_from.borrow_mut() = Some(position);
             button.add_css_class("dragging");
         });
     }
     {
         let button = button.clone();
+        let rows_end = rows.clone();
         drag_source.connect_drag_end(move |_, _, _| {
-            *drag_from.borrow_mut() = None;
             button.remove_css_class("dragging");
+            for row in rows_end.borrow().iter() {
+                row.remove_css_class("dodge-up");
+                row.remove_css_class("dodge-down");
+            }
         });
     }
     button.add_controller(drag_source);
+
+    let drop_target = gtk::DropTarget::new(gtk::glib::Type::U32, gtk::gdk::DragAction::MOVE);
+    {
+        let button = button.clone();
+        let rows_motion = rows.clone();
+        drop_target.connect_motion(move |_, _, y| {
+            let is_drop_after = y >= f64::from(button.height()) / 2.0;
+            button.remove_css_class("drop-before");
+            button.remove_css_class("drop-after");
+            if is_drop_after {
+                button.add_css_class("drop-after");
+            } else {
+                button.add_css_class("drop-before");
+            }
+            let insert_at = position + usize::from(is_drop_after);
+            let rows_ref = rows_motion.borrow();
+            for (i, row) in rows_ref.iter().enumerate() {
+                row.remove_css_class("dodge-up");
+                row.remove_css_class("dodge-down");
+                if i + 1 == insert_at {
+                    row.add_css_class("dodge-up");
+                } else if i == insert_at {
+                    row.add_css_class("dodge-down");
+                }
+            }
+            gtk::gdk::DragAction::MOVE
+        });
+    }
+    {
+        let button = button.clone();
+        let rows_leave = rows.clone();
+        drop_target.connect_leave(move |_| {
+            button.remove_css_class("drop-before");
+            button.remove_css_class("drop-after");
+            for row in rows_leave.borrow().iter() {
+                row.remove_css_class("dodge-up");
+                row.remove_css_class("dodge-down");
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let button = button.clone();
+        let rows_drop = rows.clone();
+        drop_target.connect_drop(move |_, value, _, y| {
+            button.remove_css_class("drop-before");
+            button.remove_css_class("drop-after");
+            for row in rows_drop.borrow().iter() {
+                row.remove_css_class("dodge-up");
+                row.remove_css_class("dodge-down");
+            }
+            let Ok(from) = value.get::<u32>() else {
+                return false;
+            };
+            let to_slot = position + usize::from(y >= f64::from(button.height()) / 2.0);
+            move_next_up_track(&state, from as usize, to_slot)
+        });
+    }
+    button.add_controller(drop_target);
 
     button
 }
