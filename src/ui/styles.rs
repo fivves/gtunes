@@ -169,7 +169,7 @@ window {
   background: @accent_bg_color;
   box-shadow: 0 1px 2px alpha(@window_fg_color, .14);
   transition: background-color 160ms ease-out,
-              box-shadow 220ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              box-shadow 220ms ease-out,
               transform 180ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
@@ -401,7 +401,7 @@ window {
   background: transparent;
   transition: background-color 240ms cubic-bezier(0.34, 1.56, 0.64, 1),
               border-color 240ms cubic-bezier(0.34, 1.56, 0.64, 1),
-              box-shadow 240ms cubic-bezier(0.34, 1.56, 0.64, 1);
+              box-shadow 240ms ease-out;
 }
 
 .album-tile {
@@ -456,7 +456,7 @@ window {
   border-radius: 8px;
   background: @card_bg_color;
   box-shadow: inset 0 0 0 1px alpha(@borders, .72);
-  transition: box-shadow 260ms cubic-bezier(0.34, 1.56, 0.64, 1),
+  transition: box-shadow 260ms ease-out,
               transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
@@ -487,7 +487,7 @@ window {
   min-height: 148px;
   border-radius: 8px;
   box-shadow: inset 0 0 0 1px alpha(@borders, .72);
-  transition: box-shadow 260ms cubic-bezier(0.34, 1.56, 0.64, 1),
+  transition: box-shadow 260ms ease-out,
               transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1),
               opacity 220ms ease-out;
 }
@@ -647,7 +647,7 @@ window {
   box-shadow: 0 1px 2px alpha(@window_fg_color, .06);
   transition: background-color 260ms cubic-bezier(0.34, 1.56, 0.64, 1),
               border-color 260ms cubic-bezier(0.34, 1.56, 0.64, 1),
-              box-shadow 260ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              box-shadow 260ms ease-out,
               transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
@@ -873,7 +873,7 @@ window {
   animation: next-up-enter 360ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
   transition: background-color 200ms cubic-bezier(0.34, 1.56, 0.64, 1),
               border-color 200ms cubic-bezier(0.34, 1.56, 0.64, 1),
-              box-shadow 200ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              box-shadow 200ms ease-out,
               transform 220ms cubic-bezier(0.34, 1.56, 0.64, 1),
               opacity 200ms ease-out;
 }
