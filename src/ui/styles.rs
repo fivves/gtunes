@@ -67,10 +67,8 @@ window {
   border-radius: 999px;
   background: transparent;
   color: @window_fg_color;
-  transition: background-color 160ms cubic-bezier(0.34, 1.56, 0.64, 1),
-              color 160ms ease-out,
-              box-shadow 160ms ease-out,
-              transform 180ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  transition: background-color 140ms ease-out,
+              transform 160ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .icon-button:hover {
@@ -168,9 +166,8 @@ window {
   color: @accent_fg_color;
   background: @accent_bg_color;
   box-shadow: 0 1px 2px alpha(@window_fg_color, .14);
-  transition: background-color 160ms ease-out,
-              box-shadow 220ms ease-out,
-              transform 180ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  transition: background-color 140ms ease-out,
+              transform 160ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .play-button:hover {
@@ -246,8 +243,8 @@ window {
   min-height: 38px;
   padding: 0 8px;
   border-radius: 7px;
-  transition: background-color 220ms cubic-bezier(0.34, 1.56, 0.64, 1),
-              color 220ms ease-out;
+  transition: background-color 140ms ease-out,
+              color 140ms ease-out;
 }
 
 .nav-list row:hover {
@@ -399,9 +396,8 @@ window {
   border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
-  transition: background-color 240ms cubic-bezier(0.34, 1.56, 0.64, 1),
-              border-color 240ms cubic-bezier(0.34, 1.56, 0.64, 1),
-              box-shadow 240ms ease-out;
+  transition: background-color 160ms ease-out,
+              border-color 160ms ease-out;
 }
 
 .album-tile {
@@ -456,8 +452,7 @@ window {
   border-radius: 8px;
   background: @card_bg_color;
   box-shadow: inset 0 0 0 1px alpha(@borders, .72);
-  transition: box-shadow 260ms ease-out,
-              transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  transition: transform 200ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .album-tile:hover .album-art-frame,
@@ -465,14 +460,14 @@ window {
 .album-tile:focus-visible .album-art-frame {
   box-shadow:
     inset 0 0 0 1px alpha(@accent_bg_color, .58),
-    0 6px 20px alpha(@window_fg_color, .18);
+    0 4px 12px alpha(@window_fg_color, .15);
   transform: scale(1.04) translateY(-3px);
 }
 
 .album-tile:active .album-art-frame {
   box-shadow:
     inset 0 0 0 1px alpha(@accent_bg_color, .72),
-    0 2px 6px alpha(@window_fg_color, .12);
+    0 1px 4px alpha(@window_fg_color, .10);
   transform: scale(0.97);
 }
 
@@ -487,9 +482,8 @@ window {
   min-height: 148px;
   border-radius: 8px;
   box-shadow: inset 0 0 0 1px alpha(@borders, .72);
-  transition: box-shadow 260ms ease-out,
-              transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1),
-              opacity 220ms ease-out;
+  transition: transform 200ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              opacity 180ms ease-out;
 }
 
 .artist-tile:hover .artist-art,
@@ -497,7 +491,7 @@ window {
 .artist-tile:focus-visible .artist-art {
   box-shadow:
     inset 0 0 0 1px alpha(@accent_bg_color, .50),
-    0 6px 20px alpha(@window_fg_color, .16);
+    0 4px 12px alpha(@window_fg_color, .13);
   transform: scale(1.04) translateY(-3px);
 }
 
@@ -645,17 +639,16 @@ window {
   border-radius: 8px;
   background: @card_bg_color;
   box-shadow: 0 1px 2px alpha(@window_fg_color, .06);
-  transition: background-color 260ms cubic-bezier(0.34, 1.56, 0.64, 1),
-              border-color 260ms cubic-bezier(0.34, 1.56, 0.64, 1),
-              box-shadow 260ms ease-out,
-              transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  transition: background-color 180ms ease-out,
+              border-color 180ms ease-out,
+              transform 200ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .radio-station-card:hover {
   border-color: alpha(@accent_bg_color, .44);
   background: mix(@card_bg_color, @accent_bg_color, .04);
-  box-shadow: 0 8px 24px alpha(@window_fg_color, .16);
-  transform: translateY(-5px) scale(1.02);
+  box-shadow: 0 4px 14px alpha(@window_fg_color, .13);
+  transform: translateY(-4px) scale(1.02);
 }
 
 .radio-station-card:active {
@@ -816,7 +809,7 @@ window {
   border-radius: 6px;
   border-bottom: 1px solid alpha(@borders, .75);
   background: transparent;
-  transition: background-color 120ms ease-out, box-shadow 120ms ease-out;
+  transition: background-color 100ms ease-out;
 }
 
 .queue-title {
@@ -860,8 +853,8 @@ window {
 }
 
 @keyframes next-up-enter {
-  0%   { opacity: 0; transform: translateY(16px) scale(0.96); }
-  100% { opacity: 1; transform: translateY(0) scale(1); }
+  0%   { opacity: 0; transform: translateY(10px); }
+  100% { opacity: 1; transform: translateY(0); }
 }
 
 .next-up-row {
@@ -870,12 +863,11 @@ window {
   border: 1px solid alpha(@borders, .88);
   border-radius: 12px;
   background: alpha(@card_bg_color, .94);
-  animation: next-up-enter 360ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
-  transition: background-color 200ms cubic-bezier(0.34, 1.56, 0.64, 1),
-              border-color 200ms cubic-bezier(0.34, 1.56, 0.64, 1),
-              box-shadow 200ms ease-out,
-              transform 220ms cubic-bezier(0.34, 1.56, 0.64, 1),
-              opacity 200ms ease-out;
+  animation: next-up-enter 260ms ease-out both;
+  transition: background-color 160ms ease-out,
+              border-color 160ms ease-out,
+              transform 180ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              opacity 160ms ease-out;
 }
 
 .next-up-list > button:nth-child(1)  { animation-delay: 0ms; }
@@ -896,22 +888,20 @@ window {
 
 .next-up-row.dragging {
   opacity: 0.52;
-  transform: scale(0.96) rotate(1.4deg);
-  box-shadow: 0 18px 48px alpha(@window_fg_color, .30);
+  transform: scale(0.96);
+  box-shadow: 0 8px 20px alpha(@window_fg_color, .20);
   border-color: alpha(@accent_bg_color, .46);
 }
 
 .next-up-row.drop-before {
   border-top-color: @accent_bg_color;
-  box-shadow: inset 0 4px 0 0 alpha(@accent_bg_color, .80),
-              0 -6px 16px alpha(@accent_bg_color, .14);
+  box-shadow: inset 0 4px 0 0 alpha(@accent_bg_color, .80);
   transform: translateY(5px);
 }
 
 .next-up-row.drop-after {
   border-bottom-color: @accent_bg_color;
-  box-shadow: inset 0 -4px 0 0 alpha(@accent_bg_color, .80),
-              0 6px 16px alpha(@accent_bg_color, .14);
+  box-shadow: inset 0 -4px 0 0 alpha(@accent_bg_color, .80);
   transform: translateY(-5px);
 }
 
