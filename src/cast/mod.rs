@@ -31,7 +31,7 @@ impl CastDevice {
 // ── CastSession — persistent session for sync'd playback ─────────────────────
 
 pub enum CastCommand {
-    Load { url: String, content_type: String, is_live: bool },
+    Load { url: String, content_type: String, is_live: bool, start_secs: f64 },
     Play,
     Pause,
     Seek(f64),
@@ -68,12 +68,12 @@ impl CastSession {
         Ok(CastSession { device, cmd_tx, event_rx })
     }
 
-    pub fn load(&self, url: String, content_type: String) {
-        let _ = self.cmd_tx.try_send(CastCommand::Load { url, content_type, is_live: false });
+    pub fn load(&self, url: String, content_type: String, start_secs: f64) {
+        let _ = self.cmd_tx.try_send(CastCommand::Load { url, content_type, is_live: false, start_secs });
     }
 
     pub fn load_live(&self, url: String, content_type: String) {
-        let _ = self.cmd_tx.try_send(CastCommand::Load { url, content_type, is_live: true });
+        let _ = self.cmd_tx.try_send(CastCommand::Load { url, content_type, is_live: true, start_secs: 0.0 });
     }
 
     pub fn play(&self) {
@@ -174,16 +174,17 @@ fn run_cast_session(
         // Drain all pending commands
         loop {
             match cmd_rx.try_recv() {
-                Ok(CastCommand::Load { url, content_type, is_live }) => {
+                Ok(CastCommand::Load { url, content_type, is_live, start_secs }) => {
                     req_id += 1;
                     media_session_id = None;
                     let stream_type = if is_live { "LIVE" } else { "BUFFERED" };
                     let json = format!(
-                        r#"{{"type":"LOAD","requestId":{req},"media":{{"contentId":"{url}","contentType":"{ct}","streamType":"{st}"}},"autoplay":true,"currentTime":0}}"#,
+                        r#"{{"type":"LOAD","requestId":{req},"media":{{"contentId":"{url}","contentType":"{ct}","streamType":"{st}"}},"autoplay":true,"currentTime":{start_secs}}}"#,
                         req = req_id,
                         url = url.replace('"', "\\\""),
                         ct = content_type,
                         st = stream_type,
+                        start_secs = start_secs,
                     );
                     if cast_send(&mut tls, "sender-0", &transport_id, MEDIA_NS, &json).is_err() {
                         let _ = event_tx.send(CastEvent::Disconnected);

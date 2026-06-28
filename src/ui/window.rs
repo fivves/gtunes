@@ -2464,8 +2464,8 @@ fn parse_duration_str(s: &str) -> f64 {
 }
 
 fn start_cast(state: &Rc<RefCell<UiState>>, device: CastDevice) {
-    // Gather track info
-    let (stream_url, content_type, duration_secs) = {
+    // Gather track info and current local playback position
+    let (stream_url, content_type, duration_secs, local_position_secs) = {
         let ui = state.borrow();
         let track = ui.playback_session
             .queue_index
@@ -2482,7 +2482,11 @@ fn start_cast(state: &Rc<RefCell<UiState>>, device: CastDevice) {
         };
         let ct = cast_content_type(&track.quality).to_string();
         let dur = parse_duration_str(&track.duration);
-        (url, ct, dur)
+        let pos = ui.playback.as_ref()
+            .and_then(|p| p.position())
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        (url, ct, dur, pos)
     };
 
     // Stop local GStreamer playback
@@ -2535,13 +2539,13 @@ fn start_cast(state: &Rc<RefCell<UiState>>, device: CastDevice) {
         CastDeviceKind::Chromecast => {
             match cast::CastSession::connect(device.clone()) {
                 Ok(session) => {
-                    session.load(stream_url, content_type);
+                    session.load(stream_url, content_type, local_position_secs);
                     {
                         let mut ui = state.borrow_mut();
                         ui.cast_session = Some(session);
                         ui.active_cast_device = Some(device.clone());
                         ui.cast_is_playing = true;
-                        ui.cast_position_secs = 0.0;
+                        ui.cast_position_secs = local_position_secs;
                         ui.cast_duration_secs = duration_secs;
                         if let Some(btn) = ui.cast_button.as_ref() {
                             btn.add_css_class("cast-active");
@@ -2562,8 +2566,9 @@ fn start_cast(state: &Rc<RefCell<UiState>>, device: CastDevice) {
 }
 
 fn stop_cast(state: &Rc<RefCell<UiState>>, device: &CastDevice) {
-    {
+    let resume_secs = {
         let mut ui = state.borrow_mut();
+        let pos = ui.cast_position_secs;
         // Send Stop command (Chromecast) or fire-and-forget stop (UPnP)
         if let Some(session) = ui.cast_session.take() {
             session.stop();
@@ -2582,10 +2587,17 @@ fn stop_cast(state: &Rc<RefCell<UiState>>, device: &CastDevice) {
             s.set_visible(false);
         }
         update_play_button(&ui);
-    }
+        pos
+    };
     refresh_cast_device_list(state);
-    // Resume local playback at the current queue position
+    // Resume local playback at the position where Cast left off
     play_selected_track(state);
+    if resume_secs > 0.5 {
+        let mut ui = state.borrow_mut();
+        if let Some(playback) = ui.playback.as_mut() {
+            let _ = playback.seek(Duration::from_secs_f64(resume_secs));
+        }
+    }
 }
 
 fn show_cast_status(state: &Rc<RefCell<UiState>>, msg: &str) {
@@ -7177,7 +7189,7 @@ fn play_selected_track(state: &Rc<RefCell<UiState>>) {
     if let Some((url, ct, dur)) = cast_url_and_type {
         let mut ui = state.borrow_mut();
         if let Some(session) = ui.cast_session.as_ref() {
-            session.load(url, ct);
+            session.load(url, ct, 0.0);
             ui.cast_position_secs = 0.0;
             ui.cast_duration_secs = dur;
             ui.cast_is_playing = true;
