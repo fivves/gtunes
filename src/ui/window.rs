@@ -2406,6 +2406,31 @@ fn cast_content_type(quality: &str) -> &'static str {
     else { "audio/mpeg" }
 }
 
+fn radio_stream_content_type(url: &url::Url) -> &'static str {
+    let path = url.path().to_lowercase();
+    if path.ends_with(".m3u8") || path.ends_with(".m3u") {
+        return "application/x-mpegURL";
+    }
+    if path.ends_with(".aac") {
+        return "audio/aac";
+    }
+    if path.ends_with(".ogg") || path.ends_with(".opus") {
+        return "audio/ogg";
+    }
+    if path.ends_with(".flac") {
+        return "audio/flac";
+    }
+    // YouTube URLs encode MIME in the query string (e.g. mime=audio%2Fmp4)
+    let query = url.query().unwrap_or("").to_lowercase();
+    if query.contains("mime=audio%2fmp4") || query.contains("mime=audio/mp4") {
+        return "audio/mp4";
+    }
+    if query.contains("mime=audio%2fwebm") || query.contains("mime=audio/webm") {
+        return "audio/webm";
+    }
+    "audio/mpeg"
+}
+
 fn parse_duration_str(s: &str) -> f64 {
     let parts: Vec<f64> = s.split(':').filter_map(|p| p.parse().ok()).collect();
     match parts.len() {
@@ -6260,7 +6285,8 @@ fn play_resolved_radio_station(
     {
         let ui = state.borrow();
         if let Some(session) = ui.cast_session.as_ref() {
-            session.load_live(stream_url.to_string(), "audio/mpeg".into());
+            let content_type = radio_stream_content_type(&stream_url);
+            session.load_live(stream_url.to_string(), content_type.into());
             let device_name = ui.active_cast_device.as_ref()
                 .map(|d| d.name.clone())
                 .unwrap_or_else(|| "device".into());
