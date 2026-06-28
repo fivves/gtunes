@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, UdpSocket};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -26,6 +27,283 @@ impl CastDevice {
         }
     }
 }
+
+// ── CastSession — persistent session for sync'd playback ─────────────────────
+
+pub enum CastCommand {
+    Load { url: String, content_type: String },
+    Play,
+    Pause,
+    Seek(f64),
+    Stop,
+}
+
+#[derive(Clone, Debug)]
+pub enum CastEvent {
+    Playing { current_time: f64 },
+    Paused { current_time: f64 },
+    TrackFinished,
+    Error(String),
+    Disconnected,
+}
+
+pub struct CastSession {
+    pub device: CastDevice,
+    cmd_tx: mpsc::SyncSender<CastCommand>,
+    event_rx: mpsc::Receiver<CastEvent>,
+}
+
+impl CastSession {
+    pub fn connect(device: CastDevice) -> Result<Self, String> {
+        let (cmd_tx, cmd_rx) = mpsc::sync_channel::<CastCommand>(16);
+        let (event_tx, event_rx) = mpsc::channel::<CastEvent>();
+
+        let host = device.host.clone();
+        let port = device.port;
+
+        std::thread::spawn(move || {
+            run_cast_session(host, port, cmd_rx, event_tx);
+        });
+
+        Ok(CastSession { device, cmd_tx, event_rx })
+    }
+
+    pub fn load(&self, url: String, content_type: String) {
+        let _ = self.cmd_tx.try_send(CastCommand::Load { url, content_type });
+    }
+
+    pub fn play(&self) {
+        let _ = self.cmd_tx.try_send(CastCommand::Play);
+    }
+
+    pub fn pause(&self) {
+        let _ = self.cmd_tx.try_send(CastCommand::Pause);
+    }
+
+    pub fn seek(&self, position_secs: f64) {
+        let _ = self.cmd_tx.try_send(CastCommand::Seek(position_secs));
+    }
+
+    pub fn stop(&self) {
+        let _ = self.cmd_tx.try_send(CastCommand::Stop);
+    }
+
+    pub fn try_recv_event(&self) -> Option<CastEvent> {
+        self.event_rx.try_recv().ok()
+    }
+}
+
+const CONNECTION_NS: &str = "urn:x-cast:com.google.cast.tp.connection";
+const HEARTBEAT_NS: &str = "urn:x-cast:com.google.cast.tp.heartbeat";
+const RECEIVER_NS: &str = "urn:x-cast:com.google.cast.receiver";
+const MEDIA_NS: &str = "urn:x-cast:com.google.cast.media";
+
+fn run_cast_session(
+    host: String,
+    port: u16,
+    cmd_rx: mpsc::Receiver<CastCommand>,
+    event_tx: mpsc::Sender<CastEvent>,
+) {
+    let addr = format!("{host}:{port}");
+    let tcp = match TcpStream::connect(&addr) {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = event_tx.send(CastEvent::Error(format!("connect: {e}")));
+            let _ = event_tx.send(CastEvent::Disconnected);
+            return;
+        }
+    };
+    tcp.set_write_timeout(Some(Duration::from_secs(5))).ok();
+    tcp.set_read_timeout(Some(Duration::from_millis(150))).ok();
+
+    let connector = match native_tls::TlsConnector::builder()
+        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_hostnames(true)
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = event_tx.send(CastEvent::Error(format!("TLS build: {e}")));
+            let _ = event_tx.send(CastEvent::Disconnected);
+            return;
+        }
+    };
+
+    let mut tls = match connector.connect(&host, tcp) {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = event_tx.send(CastEvent::Error(format!("TLS handshake: {e}")));
+            let _ = event_tx.send(CastEvent::Disconnected);
+            return;
+        }
+    };
+
+    if cast_send(&mut tls, "sender-0", "receiver-0", CONNECTION_NS,
+        r#"{"type":"CONNECT","origin":{},"userAgent":"gtunes"}"#).is_err()
+        || cast_send(&mut tls, "sender-0", "receiver-0", RECEIVER_NS,
+            r#"{"type":"LAUNCH","appId":"CC1AD845","requestId":1}"#).is_err()
+    {
+        let _ = event_tx.send(CastEvent::Disconnected);
+        return;
+    }
+
+    let transport_id = match wait_for_transport(&mut tls) {
+        Ok(id) => id,
+        Err(e) => {
+            let _ = event_tx.send(CastEvent::Error(e));
+            let _ = event_tx.send(CastEvent::Disconnected);
+            return;
+        }
+    };
+
+    if cast_send(&mut tls, "sender-0", &transport_id, CONNECTION_NS,
+        r#"{"type":"CONNECT","origin":{}}"#).is_err()
+    {
+        let _ = event_tx.send(CastEvent::Disconnected);
+        return;
+    }
+
+    let mut media_session_id: Option<u32> = None;
+    let mut req_id: u32 = 10;
+
+    loop {
+        // Drain all pending commands
+        loop {
+            match cmd_rx.try_recv() {
+                Ok(CastCommand::Load { url, content_type }) => {
+                    req_id += 1;
+                    media_session_id = None;
+                    let json = format!(
+                        r#"{{"type":"LOAD","requestId":{req},"media":{{"contentId":"{url}","contentType":"{ct}","streamType":"BUFFERED"}},"autoplay":true,"currentTime":0}}"#,
+                        req = req_id,
+                        url = url.replace('"', "\\\""),
+                        ct = content_type,
+                    );
+                    if cast_send(&mut tls, "sender-0", &transport_id, MEDIA_NS, &json).is_err() {
+                        let _ = event_tx.send(CastEvent::Disconnected);
+                        return;
+                    }
+                }
+                Ok(CastCommand::Play) => {
+                    if let Some(sid) = media_session_id {
+                        req_id += 1;
+                        let json = format!(
+                            r#"{{"type":"PLAY","mediaSessionId":{sid},"requestId":{req}}}"#,
+                            req = req_id
+                        );
+                        let _ = cast_send(&mut tls, "sender-0", &transport_id, MEDIA_NS, &json);
+                    }
+                }
+                Ok(CastCommand::Pause) => {
+                    if let Some(sid) = media_session_id {
+                        req_id += 1;
+                        let json = format!(
+                            r#"{{"type":"PAUSE","mediaSessionId":{sid},"requestId":{req}}}"#,
+                            req = req_id
+                        );
+                        let _ = cast_send(&mut tls, "sender-0", &transport_id, MEDIA_NS, &json);
+                    }
+                }
+                Ok(CastCommand::Seek(pos)) => {
+                    if let Some(sid) = media_session_id {
+                        req_id += 1;
+                        let json = format!(
+                            r#"{{"type":"SEEK","mediaSessionId":{sid},"requestId":{req},"currentTime":{pos}}}"#,
+                            req = req_id
+                        );
+                        let _ = cast_send(&mut tls, "sender-0", &transport_id, MEDIA_NS, &json);
+                    }
+                }
+                Ok(CastCommand::Stop) => {
+                    req_id += 1;
+                    let json = format!(r#"{{"type":"STOP","requestId":{}}}"#, req_id);
+                    let _ = cast_send(&mut tls, "sender-0", "receiver-0", RECEIVER_NS, &json);
+                    let _ = event_tx.send(CastEvent::Disconnected);
+                    return;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    req_id += 1;
+                    let json = format!(r#"{{"type":"STOP","requestId":{}}}"#, req_id);
+                    let _ = cast_send(&mut tls, "sender-0", "receiver-0", RECEIVER_NS, &json);
+                    let _ = event_tx.send(CastEvent::Disconnected);
+                    return;
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+            }
+        }
+
+        // Read one message (150ms timeout, error on timeout is normal)
+        match cast_read_message(&mut tls) {
+            Ok((ns, payload)) => {
+                if payload.contains("\"PING\"") || ns == HEARTBEAT_NS {
+                    let _ = cast_send(&mut tls, "sender-0", "receiver-0", HEARTBEAT_NS,
+                        r#"{"type":"PONG"}"#);
+                    continue;
+                }
+
+                if ns == MEDIA_NS && payload.contains("\"MEDIA_STATUS\"") {
+                    let player_state = json_str(&payload, "playerState").unwrap_or_default();
+                    let current_time = json_num(&payload, "currentTime").unwrap_or(0.0);
+                    let idle_reason = json_str(&payload, "idleReason");
+
+                    if let Some(sid) = json_num(&payload, "mediaSessionId").map(|n| n as u32) {
+                        media_session_id = Some(sid);
+                    }
+
+                    match player_state.as_str() {
+                        "PLAYING" => {
+                            let _ = event_tx.send(CastEvent::Playing { current_time });
+                        }
+                        "PAUSED" => {
+                            let _ = event_tx.send(CastEvent::Paused { current_time });
+                        }
+                        "IDLE" => match idle_reason.as_deref() {
+                            Some("FINISHED") => {
+                                let _ = event_tx.send(CastEvent::TrackFinished);
+                            }
+                            Some("ERROR") => {
+                                let _ = event_tx.send(CastEvent::Error("Playback error on device".into()));
+                            }
+                            _ => {}
+                        },
+                        "BUFFERING" | "" => {}
+                        _ => {}
+                    }
+                }
+            }
+            Err(e) => {
+                // 150ms timeout is normal — only treat real errors as fatal
+                if e.contains("os error 11") || e.contains("WouldBlock") || e.contains("timed out") {
+                    continue;
+                }
+                tracing::warn!("Cast connection lost: {e}");
+                let _ = event_tx.send(CastEvent::Disconnected);
+                return;
+            }
+        }
+    }
+}
+
+fn wait_for_transport(tls: &mut (impl Read + Write)) -> Result<String, String> {
+    for _ in 0..40 {
+        let (_, payload) = match cast_read_message(tls) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if payload.contains("\"PING\"") {
+            let _ = cast_send(tls, "sender-0", "receiver-0", HEARTBEAT_NS, r#"{"type":"PONG"}"#);
+            continue;
+        }
+        if payload.contains("\"RECEIVER_STATUS\"") {
+            if let Some(id) = json_str(&payload, "transportId") {
+                return Ok(id);
+            }
+        }
+    }
+    Err("timed out waiting for Cast session".into())
+}
+
+// ── Discovery ─────────────────────────────────────────────────────────────────
 
 pub fn discover_devices() -> Vec<CastDevice> {
     let upnp_handle = std::thread::spawn(|| discover_upnp(Duration::from_secs(3)));
@@ -208,7 +486,7 @@ fn xml_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-// ── Chromecast (mDNS + Cast protocol) ────────────────────────────────────────
+// ── Chromecast (mDNS discovery) ───────────────────────────────────────────────
 
 fn discover_chromecast(timeout: Duration) -> Vec<CastDevice> {
     use mdns_sd::{ServiceDaemon, ServiceEvent};
@@ -273,140 +551,18 @@ fn discover_chromecast(timeout: Duration) -> Vec<CastDevice> {
     devices
 }
 
-pub fn chromecast_play(device: &CastDevice, stream_url: &str, content_type: &str) -> Result<(), String> {
-    let addr = format!("{}:{}", device.host, device.port);
-    let tcp =
-        TcpStream::connect(&addr).map_err(|e| format!("connect {addr}: {e}"))?;
-    tcp.set_read_timeout(Some(Duration::from_secs(15))).ok();
-    tcp.set_write_timeout(Some(Duration::from_secs(5))).ok();
-
-    let connector = native_tls::TlsConnector::builder()
-        .danger_accept_invalid_certs(true)
-        .danger_accept_invalid_hostnames(true)
-        .build()
-        .map_err(|e| format!("TLS build: {e}"))?;
-    let mut tls = connector
-        .connect(&device.host, tcp)
-        .map_err(|e| format!("TLS handshake: {e}"))?;
-
-    // Connect to receiver
-    cast_send(
-        &mut tls,
-        "sender-0",
-        "receiver-0",
-        "urn:x-cast:com.google.cast.tp.connection",
-        r#"{"type":"CONNECT","origin":{},"userAgent":"gtunes"}"#,
-    )?;
-
-    // Launch Default Media Receiver
-    cast_send(
-        &mut tls,
-        "sender-0",
-        "receiver-0",
-        "urn:x-cast:com.google.cast.receiver",
-        r#"{"type":"LAUNCH","appId":"CC1AD845","requestId":1}"#,
-    )?;
-
-    // Wait for session transport ID
-    let transport_id = cast_wait_transport(&mut tls)?;
-
-    // Connect to media app session
-    cast_send(
-        &mut tls,
-        "sender-0",
-        &transport_id,
-        "urn:x-cast:com.google.cast.tp.connection",
-        r#"{"type":"CONNECT","origin":{}}"#,
-    )?;
-
-    let load_json = format!(
-        r#"{{"type":"LOAD","requestId":2,"media":{{"contentId":"{url}","contentType":"{ct}","streamType":"BUFFERED"}},"autoplay":true,"currentTime":0}}"#,
-        url = stream_url.replace('"', "\\\""),
-        ct = content_type,
-    );
-    cast_send(
-        &mut tls,
-        "sender-0",
-        &transport_id,
-        "urn:x-cast:com.google.cast.media",
-        &load_json,
-    )?;
-
-    // Wait for MEDIA_STATUS or LOAD_FAILED; respond to PINGs
-    for _ in 0..15 {
-        match cast_read_payload(&mut tls) {
-            Ok(payload) if payload.contains("\"PING\"") => {
-                let _ = cast_send(
-                    &mut tls,
-                    "sender-0",
-                    "receiver-0",
-                    "urn:x-cast:com.google.cast.tp.heartbeat",
-                    r#"{"type":"PONG"}"#,
-                );
-            }
-            Ok(payload) if payload.contains("LOAD_FAILED") => {
-                return Err(format!("LOAD_FAILED: {}", &payload[..payload.len().min(200)]));
-            }
-            Ok(payload) if payload.contains("\"MEDIA_STATUS\"") => {
-                tracing::info!("Cast MEDIA_STATUS received, playback started");
-                break;
-            }
-            Ok(_) => {}
-            Err(_) => break,
-        }
-    }
-    Ok(())
-}
-
-pub fn chromecast_stop(device: &CastDevice) -> Result<(), String> {
-    let addr = format!("{}:{}", device.host, device.port);
-    let tcp = TcpStream::connect(&addr).map_err(|e| e.to_string())?;
-    tcp.set_read_timeout(Some(Duration::from_secs(5))).ok();
-    tcp.set_write_timeout(Some(Duration::from_secs(3))).ok();
-
-    let connector = native_tls::TlsConnector::builder()
-        .danger_accept_invalid_certs(true)
-        .danger_accept_invalid_hostnames(true)
-        .build()
-        .map_err(|e| e.to_string())?;
-    let mut tls = connector
-        .connect(&device.host, tcp)
-        .map_err(|e| e.to_string())?;
-
-    cast_send(
-        &mut tls,
-        "sender-0",
-        "receiver-0",
-        "urn:x-cast:com.google.cast.tp.connection",
-        r#"{"type":"CONNECT","origin":{}}"#,
-    )?;
-    cast_send(
-        &mut tls,
-        "sender-0",
-        "receiver-0",
-        "urn:x-cast:com.google.cast.receiver",
-        r#"{"type":"STOP","requestId":1}"#,
-    )?;
-    Ok(())
-}
-
 // ── Cast protocol helpers ─────────────────────────────────────────────────────
 
-fn cast_send(
-    stream: &mut impl Write,
-    src: &str,
-    dst: &str,
-    ns: &str,
-    payload: &str,
-) -> Result<(), String> {
+fn cast_send(stream: &mut impl Write, src: &str, dst: &str, ns: &str, payload: &str) -> Result<(), String> {
     let msg = cast_encode(src, dst, ns, payload);
     let mut frame = Vec::with_capacity(4 + msg.len());
     frame.extend_from_slice(&(msg.len() as u32).to_be_bytes());
     frame.extend_from_slice(&msg);
-    stream.write_all(&frame).map_err(|e| e.to_string())
+    stream.write_all(&frame).map_err(|e| e.to_string())?;
+    stream.flush().map_err(|e| e.to_string())
 }
 
-fn cast_read_payload(stream: &mut impl Read) -> Result<String, String> {
+fn cast_read_message(stream: &mut impl Read) -> Result<(String, String), String> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).map_err(|e| e.to_string())?;
     let len = u32::from_be_bytes(len_buf) as usize;
@@ -415,33 +571,9 @@ fn cast_read_payload(stream: &mut impl Read) -> Result<String, String> {
     }
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).map_err(|e| e.to_string())?;
-    // Decode protobuf field 6 (payload_utf8)
-    pb_string_field(&buf, 6).ok_or_else(|| "no payload".to_string())
-}
-
-fn cast_wait_transport(stream: &mut (impl Read + Write)) -> Result<String, String> {
-    for _ in 0..30 {
-        let payload = match cast_read_payload(stream) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        if payload.contains("\"PING\"") {
-            let _ = cast_send(
-                stream,
-                "sender-0",
-                "receiver-0",
-                "urn:x-cast:com.google.cast.tp.heartbeat",
-                r#"{"type":"PONG"}"#,
-            );
-            continue;
-        }
-        if payload.contains("\"RECEIVER_STATUS\"") {
-            if let Some(id) = json_str(&payload, "transportId") {
-                return Ok(id);
-            }
-        }
-    }
-    Err("timed out waiting for Chromecast session".to_string())
+    let ns = pb_string_field(&buf, 4).unwrap_or_default();
+    let payload = pb_string_field(&buf, 6).unwrap_or_default();
+    Ok((ns, payload))
 }
 
 fn json_str(json: &str, key: &str) -> Option<String> {
@@ -451,15 +583,24 @@ fn json_str(json: &str, key: &str) -> Option<String> {
     Some(json[start..end].to_string())
 }
 
+fn json_num(json: &str, key: &str) -> Option<f64> {
+    let needle = format!("\"{}\":", key);
+    let start = json.find(&needle)? + needle.len();
+    let rest = json[start..].trim_start_matches(' ');
+    let end = rest.find(|c: char| c != '-' && c != '.' && !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
 // ── Protobuf encode / decode (CastMessage) ───────────────────────────────────
 
 fn cast_encode(source_id: &str, destination_id: &str, namespace: &str, payload: &str) -> Vec<u8> {
     let mut out = Vec::new();
-    pb_varint_field(&mut out, 1, 0); // protocol_version = CASTV2_1_0
+    pb_varint_field(&mut out, 1, 0);
     pb_bytes_field(&mut out, 2, source_id.as_bytes());
     pb_bytes_field(&mut out, 3, destination_id.as_bytes());
     pb_bytes_field(&mut out, 4, namespace.as_bytes());
-    pb_varint_field(&mut out, 5, 0); // payload_type = STRING
+    pb_varint_field(&mut out, 5, 0);
     pb_bytes_field(&mut out, 6, payload.as_bytes());
     out
 }
