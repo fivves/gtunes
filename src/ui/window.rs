@@ -2246,6 +2246,21 @@ fn cast_menu_button(state: Rc<RefCell<UiState>>) -> gtk::MenuButton {
         });
     }
 
+    // Right-click = instant disconnect from active cast device
+    {
+        let right_click = gtk::GestureClick::new();
+        right_click.set_button(3);
+        let state = state.clone();
+        right_click.connect_pressed(move |gesture, _, _, _| {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            let device = state.borrow().active_cast_device.clone();
+            if let Some(device) = device {
+                stop_cast(&state, &device);
+            }
+        });
+        btn.add_controller(right_click);
+    }
+
     btn
 }
 
