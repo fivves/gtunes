@@ -7104,8 +7104,16 @@ fn play_selected_track(state: &Rc<RefCell<UiState>>) {
             ui.cast_position_secs = 0.0;
             ui.cast_duration_secs = dur;
             ui.cast_is_playing = true;
-            update_play_button(&ui);
         }
+        // Update now_playing_key so the header shows the new track
+        if let Some(track) = ui.playback_session
+            .queue_index
+            .and_then(|i| ui.playback_session.queue_tracks.get(i))
+            .cloned()
+        {
+            ui.playback_session.start_library_playback(track_key(&track));
+        }
+        update_play_button(&ui);
         update_now_playing_labels(&ui);
         drop(ui);
         update_list_indicators(state);
