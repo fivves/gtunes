@@ -273,7 +273,7 @@ fn discover_chromecast(timeout: Duration) -> Vec<CastDevice> {
     devices
 }
 
-pub fn chromecast_play(device: &CastDevice, stream_url: &str) -> Result<(), String> {
+pub fn chromecast_play(device: &CastDevice, stream_url: &str, content_type: &str) -> Result<(), String> {
     let addr = format!("{}:{}", device.host, device.port);
     let tcp =
         TcpStream::connect(&addr).map_err(|e| format!("connect {addr}: {e}"))?;
@@ -319,10 +319,10 @@ pub fn chromecast_play(device: &CastDevice, stream_url: &str) -> Result<(), Stri
         r#"{"type":"CONNECT","origin":{}}"#,
     )?;
 
-    // Load media (transcode URL → MP3 for broadest compatibility)
     let load_json = format!(
-        r#"{{"type":"LOAD","requestId":2,"media":{{"contentId":"{url}","contentType":"audio/mpeg","streamType":"BUFFERED"}},"autoplay":true,"currentTime":0}}"#,
-        url = stream_url.replace('"', "\\\"")
+        r#"{{"type":"LOAD","requestId":2,"media":{{"contentId":"{url}","contentType":"{ct}","streamType":"BUFFERED"}},"autoplay":true,"currentTime":0}}"#,
+        url = stream_url.replace('"', "\\\""),
+        ct = content_type,
     );
     cast_send(
         &mut tls,
@@ -332,10 +332,10 @@ pub fn chromecast_play(device: &CastDevice, stream_url: &str) -> Result<(), Stri
         &load_json,
     )?;
 
-    // Read acknowledgement (ignore errors — device is playing)
-    for _ in 0..5 {
+    // Wait for MEDIA_STATUS or LOAD_FAILED; respond to PINGs
+    for _ in 0..15 {
         match cast_read_payload(&mut tls) {
-            Ok(payload) if payload.contains("PING") => {
+            Ok(payload) if payload.contains("\"PING\"") => {
                 let _ = cast_send(
                     &mut tls,
                     "sender-0",
@@ -344,8 +344,15 @@ pub fn chromecast_play(device: &CastDevice, stream_url: &str) -> Result<(), Stri
                     r#"{"type":"PONG"}"#,
                 );
             }
-            Ok(payload) if payload.contains("MEDIA_STATUS") || payload.contains("LOAD_FAILED") => break,
-            _ => break,
+            Ok(payload) if payload.contains("LOAD_FAILED") => {
+                return Err(format!("LOAD_FAILED: {}", &payload[..payload.len().min(200)]));
+            }
+            Ok(payload) if payload.contains("\"MEDIA_STATUS\"") => {
+                tracing::info!("Cast MEDIA_STATUS received, playback started");
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => break,
         }
     }
     Ok(())

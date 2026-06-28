@@ -2389,8 +2389,7 @@ fn cast_device_row(
 }
 
 fn start_cast(state: &Rc<RefCell<UiState>>, device: CastDevice) {
-    // Get the current stream URL
-    let (stream_url, title) = {
+    let (stream_url, content_type, title) = {
         let ui = state.borrow();
         let track = ui.playback_session
             .queue_index
@@ -2399,22 +2398,21 @@ fn start_cast(state: &Rc<RefCell<UiState>>, device: CastDevice) {
             show_cast_status(state, "No track playing");
             return;
         };
-        // For Chromecast, prefer transcode URL (MP3); for UPnP use direct
-        let url = match device.kind {
-            CastDeviceKind::Chromecast => track
-                .fallback_stream_url
-                .clone()
-                .or_else(|| track.stream_url.clone()),
-            CastDeviceKind::UPnP => track
-                .stream_url
-                .clone()
-                .or_else(|| track.fallback_stream_url.clone()),
-        };
+        let url = track.stream_url.clone()
+            .or_else(|| track.fallback_stream_url.clone());
         let Some(url) = url else {
             show_cast_status(state, "Stream URL unavailable");
             return;
         };
-        (url, track.title.clone())
+        let ct = match track.quality.to_uppercase().as_str() {
+            q if q.contains("FLAC") => "audio/flac",
+            q if q.contains("MP3") => "audio/mpeg",
+            q if q.contains("AAC") || q.contains("M4A") => "audio/aac",
+            q if q.contains("OGG") || q.contains("OPUS") => "audio/ogg",
+            q if q.contains("WAV") => "audio/wav",
+            _ => "audio/mpeg",
+        }.to_string();
+        (url, ct, track.title.clone())
     };
 
     show_cast_status(state, &format!("Connecting to {}…", device.name));
@@ -2423,10 +2421,11 @@ fn start_cast(state: &Rc<RefCell<UiState>>, device: CastDevice) {
     let device_clone = device.clone();
     let url_clone = stream_url.clone();
     let title_clone = title.clone();
+    let ct_clone = content_type.clone();
     std::thread::spawn(move || {
         let result = match device_clone.kind {
             CastDeviceKind::UPnP => cast::upnp_play(&device_clone, &url_clone, &title_clone),
-            CastDeviceKind::Chromecast => cast::chromecast_play(&device_clone, &url_clone),
+            CastDeviceKind::Chromecast => cast::chromecast_play(&device_clone, &url_clone, &ct_clone),
         };
         let _ = tx.send(result);
     });
