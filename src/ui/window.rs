@@ -6256,6 +6256,28 @@ fn play_resolved_radio_station(
     station: &RadioStation,
     stream_url: url::Url,
 ) {
+    // When a Cast session is active, send the radio stream to the device
+    {
+        let ui = state.borrow();
+        if let Some(session) = ui.cast_session.as_ref() {
+            session.load_live(stream_url.to_string(), "audio/mpeg".into());
+            let device_name = ui.active_cast_device.as_ref()
+                .map(|d| d.name.clone())
+                .unwrap_or_else(|| "device".into());
+            drop(ui);
+            let mut ui = state.borrow_mut();
+            ui.cast_is_playing = true;
+            ui.cast_position_secs = 0.0;
+            ui.cast_duration_secs = 0.0; // live — no known duration
+            let status = format!("Casting radio to {device_name}");
+            set_active_radio_station_ui(&mut ui, station, Some(&status));
+            drop(ui);
+            update_list_indicators(state);
+            refresh_radio_page(state);
+            return;
+        }
+    }
+
     let request = PlaybackRequest {
         item_id: station.id.clone(),
         stream_url,
@@ -6819,6 +6841,13 @@ fn update_now_playing_labels(state: &UiState) {
 }
 
 fn radio_playback_status_text(state: &UiState, station: &RadioStation) -> String {
+    if let Some(device) = state.active_cast_device.as_ref() {
+        return if state.cast_is_playing {
+            format!("▶ Casting radio to {}", device.name)
+        } else {
+            format!("⏸ Paused on {}", device.name)
+        };
+    }
     match state.playback.as_ref().map(PlaybackEngine::state) {
         Some(PlaybackState::Playing) => format!("Playing radio | {}", station.name),
         Some(PlaybackState::Paused) => format!("Paused radio | {}", station.name),

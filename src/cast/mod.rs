@@ -31,7 +31,7 @@ impl CastDevice {
 // ── CastSession — persistent session for sync'd playback ─────────────────────
 
 pub enum CastCommand {
-    Load { url: String, content_type: String },
+    Load { url: String, content_type: String, is_live: bool },
     Play,
     Pause,
     Seek(f64),
@@ -69,7 +69,11 @@ impl CastSession {
     }
 
     pub fn load(&self, url: String, content_type: String) {
-        let _ = self.cmd_tx.try_send(CastCommand::Load { url, content_type });
+        let _ = self.cmd_tx.try_send(CastCommand::Load { url, content_type, is_live: false });
+    }
+
+    pub fn load_live(&self, url: String, content_type: String) {
+        let _ = self.cmd_tx.try_send(CastCommand::Load { url, content_type, is_live: true });
     }
 
     pub fn play(&self) {
@@ -170,14 +174,16 @@ fn run_cast_session(
         // Drain all pending commands
         loop {
             match cmd_rx.try_recv() {
-                Ok(CastCommand::Load { url, content_type }) => {
+                Ok(CastCommand::Load { url, content_type, is_live }) => {
                     req_id += 1;
                     media_session_id = None;
+                    let stream_type = if is_live { "LIVE" } else { "BUFFERED" };
                     let json = format!(
-                        r#"{{"type":"LOAD","requestId":{req},"media":{{"contentId":"{url}","contentType":"{ct}","streamType":"BUFFERED"}},"autoplay":true,"currentTime":0}}"#,
+                        r#"{{"type":"LOAD","requestId":{req},"media":{{"contentId":"{url}","contentType":"{ct}","streamType":"{st}"}},"autoplay":true,"currentTime":0}}"#,
                         req = req_id,
                         url = url.replace('"', "\\\""),
                         ct = content_type,
+                        st = stream_type,
                     );
                     if cast_send(&mut tls, "sender-0", &transport_id, MEDIA_NS, &json).is_err() {
                         let _ = event_tx.send(CastEvent::Disconnected);
