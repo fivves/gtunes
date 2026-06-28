@@ -238,6 +238,7 @@ struct UiState {
     cast_status_label: Option<gtk::Label>,
     cast_scan_spinner: Option<gtk::Spinner>,
     active_cast_device: Option<CastDevice>,
+    last_cast_device: Option<CastDevice>,
     cast_session: Option<cast::CastSession>,
     cast_is_playing: bool,
     cast_position_secs: f64,
@@ -742,6 +743,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         cast_status_label: None,
         cast_scan_spinner: None,
         active_cast_device: None,
+        last_cast_device: None,
         cast_session: None,
         cast_is_playing: false,
         cast_position_secs: 0.0,
@@ -2246,16 +2248,21 @@ fn cast_menu_button(state: Rc<RefCell<UiState>>) -> gtk::MenuButton {
         });
     }
 
-    // Right-click = instant disconnect from active cast device
+    // Right-click = toggle: disconnect if active, reconnect to last device if not
     {
         let right_click = gtk::GestureClick::new();
         right_click.set_button(3);
         let state = state.clone();
         right_click.connect_pressed(move |gesture, _, _, _| {
             gesture.set_state(gtk::EventSequenceState::Claimed);
-            let device = state.borrow().active_cast_device.clone();
-            if let Some(device) = device {
+            let (active, last) = {
+                let ui = state.borrow();
+                (ui.active_cast_device.clone(), ui.last_cast_device.clone())
+            };
+            if let Some(device) = active {
                 stop_cast(&state, &device);
+            } else if let Some(device) = last {
+                start_cast(&state, device);
             }
         });
         btn.add_controller(right_click);
@@ -2564,7 +2571,7 @@ fn stop_cast(state: &Rc<RefCell<UiState>>, device: &CastDevice) {
             let dev = device.clone();
             std::thread::spawn(move || { let _ = cast::upnp_stop(&dev); });
         }
-        ui.active_cast_device = None;
+        ui.last_cast_device = ui.active_cast_device.take();
         ui.cast_is_playing = false;
         ui.cast_position_secs = 0.0;
         ui.cast_duration_secs = 0.0;
