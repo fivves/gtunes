@@ -644,6 +644,9 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
     let animations_enabled = load_animations_enabled();
     if !animations_enabled {
         window.add_css_class("no-animations");
+        if let Some(gtk_settings) = gtk::Settings::default() {
+            gtk_settings.set_gtk_enable_animations(false);
+        }
     }
     let font_mono = load_font_mono();
     if font_mono {
@@ -5039,6 +5042,9 @@ fn load_animations_enabled() -> bool {
 
 fn set_animations_enabled(state: &Rc<RefCell<UiState>>, enabled: bool) {
     state.borrow_mut().animations_enabled = enabled;
+    if let Some(gtk_settings) = gtk::Settings::default() {
+        gtk_settings.set_gtk_enable_animations(enabled);
+    }
     if let Err(error) = CacheDatabase::open_default().and_then(|cache| {
         cache.set_setting(
             ANIMATIONS_ENABLED_KEY,
