@@ -174,6 +174,7 @@ struct UiState {
     sort_column: SortColumn,
     sort_ascending: bool,
     keep_playing_while_closed: bool,
+    animations_enabled: bool,
     font_mono: bool,
     playback_session: session::PlaybackSession<UiTrack>,
     track_indicators: Vec<(String, gtk::Image)>,
@@ -629,6 +630,10 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
 
     let view_settings = load_library_view_settings();
     let keep_playing_while_closed = load_keep_playing_while_closed();
+    let animations_enabled = load_animations_enabled();
+    if !animations_enabled {
+        window.add_css_class("no-animations");
+    }
     let font_mono = load_font_mono();
     if font_mono {
         window.add_css_class("font-mono");
@@ -665,6 +670,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         sort_column: view_settings.sort_column,
         sort_ascending: view_settings.sort_ascending,
         keep_playing_while_closed,
+        animations_enabled,
         font_mono,
         playback_session: session::PlaybackSession::default(),
         track_indicators: Vec::new(),
@@ -2029,6 +2035,41 @@ fn settings_menu_button(state: Rc<RefCell<UiState>>) -> gtk::MenuButton {
     keep_row.append(&keep_label);
     keep_row.append(&keep_switch);
     menu.append(&keep_row);
+
+    let anim_row = gtk::Box::new(Orientation::Horizontal, 12);
+    anim_row.add_css_class("settings-switch-row");
+    anim_row.set_margin_top(2);
+    anim_row.set_margin_bottom(6);
+    anim_row.set_margin_start(6);
+    anim_row.set_margin_end(6);
+    let anim_label = label("Animations", "settings-menu-label");
+    anim_label.set_hexpand(true);
+    anim_label.set_halign(Align::Start);
+    let anim_switch = gtk::Switch::builder()
+        .active(state.borrow().animations_enabled)
+        .valign(Align::Center)
+        .build();
+    {
+        let state = state.clone();
+        let settings = settings.clone();
+        anim_switch.connect_active_notify(move |switch| {
+            let enabled = switch.is_active();
+            set_animations_enabled(&state, enabled);
+            if let Some(window) = settings
+                .root()
+                .and_then(|r| r.downcast::<gtk::Window>().ok())
+            {
+                if enabled {
+                    window.remove_css_class("no-animations");
+                } else {
+                    window.add_css_class("no-animations");
+                }
+            }
+        });
+    }
+    anim_row.append(&anim_label);
+    anim_row.append(&anim_switch);
+    menu.append(&anim_row);
 
     let font_row = gtk::Box::new(Orientation::Horizontal, 12);
     font_row.add_css_class("settings-switch-row");
@@ -4486,6 +4527,7 @@ fn save_library_view_settings(settings: LibraryViewSettings) {
 
 const LIBRARY_VIEW_SETTINGS_KEY: &str = "library.view.settings";
 const KEEP_PLAYING_WHILE_CLOSED_KEY: &str = "player.keep_playing_while_closed";
+const ANIMATIONS_ENABLED_KEY: &str = "ui.animations.enabled";
 const FONT_MONO_KEY: &str = "ui.font.mono";
 const PLAYBACK_STATE_KEY: &str = "player.playback.state";
 const PLAYBACK_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(5);
@@ -4512,6 +4554,31 @@ fn set_keep_playing_while_closed(state: &Rc<RefCell<UiState>>, enabled: bool) {
         )
     }) {
         tracing::warn!(%error, "failed to save close behavior setting");
+    }
+}
+
+fn load_animations_enabled() -> bool {
+    match CacheDatabase::open_default()
+        .and_then(|cache| cache.get_setting(ANIMATIONS_ENABLED_KEY))
+    {
+        Ok(Some(value)) => value != "false",
+        Ok(None) => true,
+        Err(error) => {
+            tracing::warn!(%error, "failed to load animations setting");
+            true
+        }
+    }
+}
+
+fn set_animations_enabled(state: &Rc<RefCell<UiState>>, enabled: bool) {
+    state.borrow_mut().animations_enabled = enabled;
+    if let Err(error) = CacheDatabase::open_default().and_then(|cache| {
+        cache.set_setting(
+            ANIMATIONS_ENABLED_KEY,
+            if enabled { "true" } else { "false" },
+        )
+    }) {
+        tracing::warn!(%error, "failed to save animations setting");
     }
 }
 
