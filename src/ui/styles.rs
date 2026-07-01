@@ -18,11 +18,6 @@ window {
   background: @window_bg_color;
 }
 
-.no-animations * {
-  transition: none;
-  animation: none;
-}
-
 .player-bar {
   padding: 14px 16px;
   border-bottom: 1px solid @borders;
@@ -1058,6 +1053,11 @@ window {
   padding: 0 10px;
   font-size: 12px;
   border-radius: 6px;
+}
+
+.no-animations * {
+  transition: none !important;
+  animation: none !important;
 }
 "#;
 
