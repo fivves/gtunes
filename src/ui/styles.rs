@@ -977,6 +977,85 @@ window {
   background: @headerbar_bg_color;
 }
 
+/* ── Cast UI ─────────────────────────────────────────────────────────────── */
+
+.cast-menu-button,
+.cast-menu-button > button {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  box-shadow: none;
+  color: @window_fg_color;
+}
+
+.cast-menu-button:hover,
+.cast-menu-button > button:hover {
+  background: alpha(@window_fg_color, .08);
+}
+
+.cast-menu-button:checked,
+.cast-menu-button > button:checked,
+.cast-menu-button:active,
+.cast-menu-button > button:active {
+  background: alpha(@window_fg_color, .13);
+  box-shadow: none;
+}
+
+.cast-menu-button.cast-active,
+.cast-menu-button.cast-active > button {
+  color: @accent_fg_color;
+  background: @accent_bg_color;
+}
+
+.cast-menu-button.cast-active:hover,
+.cast-menu-button.cast-active > button:hover {
+  background: mix(@accent_bg_color, @accent_fg_color, .12);
+}
+
+.cast-popover-title {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.cast-section-label {
+  font-size: 10px;
+  font-weight: 900;
+  color: alpha(@window_fg_color, .55);
+}
+
+.cast-status {
+  font-size: 11px;
+  color: @accent_color;
+}
+
+.cast-device-row {
+  padding: 4px 2px;
+  border-radius: 6px;
+}
+
+.cast-device-row:hover {
+  background: alpha(@window_fg_color, .05);
+}
+
+.cast-device-icon {
+  color: alpha(@window_fg_color, .72);
+}
+
+.cast-device-name {
+  font-size: 13px;
+}
+
+.cast-action-btn {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  border-radius: 6px;
+}
+
+
 .no-animations * {
   transition: none !important;
   animation: none !important;
