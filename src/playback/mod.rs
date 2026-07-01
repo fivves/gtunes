@@ -139,6 +139,7 @@ pub struct PlaybackEngine {
     state: PlaybackState,
     current_item_id: Option<String>,
     current_stream_kind: Option<PlaybackStreamKind>,
+    is_buffering: bool,
 }
 
 #[derive(Debug, Default)]
@@ -207,11 +208,20 @@ impl PlaybackEngine {
             state: PlaybackState::Stopped,
             current_item_id: None,
             current_stream_kind: None,
+            is_buffering: false,
         })
     }
 
     pub fn state(&self) -> &PlaybackState {
         &self.state
+    }
+
+    pub fn is_buffering(&self) -> bool {
+        self.is_buffering
+    }
+
+    pub fn clear_initial_loading(&mut self) {
+        self.is_buffering = false;
     }
 
     pub fn current_stream_kind(&self) -> Option<PlaybackStreamKind> {
@@ -229,6 +239,7 @@ impl PlaybackEngine {
         self.current_item_id = None;
         self.current_stream_kind = None;
         self.state = PlaybackState::Stopped;
+        self.is_buffering = true;
         self.set_http_headers(request.http_headers.clone());
         self.playbin
             .set_property("uri", request.stream_url.as_str());
@@ -254,6 +265,7 @@ impl PlaybackEngine {
         self.current_item_id = Some(request.item_id.clone());
         self.current_stream_kind = Some(request.stream_kind);
         self.state = PlaybackState::Playing;
+        self.is_buffering = true;
         Some(request)
     }
 
@@ -310,8 +322,12 @@ impl PlaybackEngine {
                         self.current_item_id = None;
                         self.current_stream_kind = None;
                         self.state = PlaybackState::Stopped;
+                        self.is_buffering = false;
                         event = Some(PlaybackEvent::EndOfStream);
                     }
+                }
+                gst::MessageView::Buffering(buffering) => {
+                    self.is_buffering = buffering.percent() < 100;
                 }
                 gst::MessageView::Error(error) => {
                     let message = error.error().to_string();
@@ -319,6 +335,7 @@ impl PlaybackEngine {
                     let item_id = self.current_item_id.clone();
                     let stream_kind = self.current_stream_kind;
                     self.state = PlaybackState::Error(message.clone());
+                    self.is_buffering = false;
                     event = Some(PlaybackEvent::Error {
                         item_id,
                         stream_kind,
@@ -338,6 +355,7 @@ impl PlaybackEngine {
         self.current_item_id = None;
         self.current_stream_kind = None;
         self.state = PlaybackState::Stopped;
+        self.is_buffering = false;
         Ok(())
     }
 

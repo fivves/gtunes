@@ -230,6 +230,7 @@ struct UiState {
     waveform_status: gtk::Label,
     waveform: Rc<RefCell<WaveformVisual>>,
     playback: Option<PlaybackEngine>,
+    loading_spinner: Option<gtk::Spinner>,
     mpris: Option<MediaControls>,
     discord_presence: Option<DiscordPresence>,
 }
@@ -725,6 +726,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
             loading_key: None,
         })),
         playback: PlaybackEngine::new().ok(),
+        loading_spinner: None,
         mpris: None,
         discord_presence: DiscordPresence::from_env(),
     }));
@@ -1839,7 +1841,16 @@ fn build_player_bar(state: Rc<RefCell<UiState>>) -> gtk::Box {
             toggle_play_pause(&state);
         });
     }
-    transport.append(&play);
+    let play_overlay = gtk::Overlay::new();
+    play_overlay.set_child(Some(&play));
+    let loading_spinner = gtk::Spinner::new();
+    loading_spinner.add_css_class("play-loading-spinner");
+    loading_spinner.set_halign(Align::Center);
+    loading_spinner.set_valign(Align::Center);
+    loading_spinner.set_visible(false);
+    play_overlay.add_overlay(&loading_spinner);
+    state.borrow_mut().loading_spinner = Some(loading_spinner);
+    transport.append(&play_overlay);
     let next = icon_button("media-skip-forward-symbolic", "Next track");
     {
         let state = state.clone();
@@ -6445,6 +6456,24 @@ fn update_play_button(state: &UiState) {
         return;
     };
 
+    let is_buffering = state
+        .playback
+        .as_ref()
+        .map(PlaybackEngine::is_buffering)
+        .unwrap_or(false);
+
+    if let Some(spinner) = state.loading_spinner.as_ref() {
+        if is_buffering {
+            spinner.set_visible(true);
+            spinner.start();
+            button.add_css_class("play-button-loading");
+        } else {
+            spinner.stop();
+            spinner.set_visible(false);
+            button.remove_css_class("play-button-loading");
+        }
+    }
+
     match state.playback.as_ref().map(PlaybackEngine::state) {
         Some(PlaybackState::Playing) => {
             button.set_icon_name("media-playback-pause-symbolic");
@@ -8517,6 +8546,13 @@ fn update_playback_position(state: &Rc<RefCell<UiState>>) {
         return;
     }
 
+    // Keep the loading spinner in sync with buffering state changes that don't
+    // produce a PlaybackEvent (e.g. buffering percent updates mid-stream).
+    {
+        let ui = state.borrow();
+        update_play_button(&ui);
+    }
+
     let (position, duration, area, elapsed, remaining) = {
         let ui = state.borrow();
         let position = ui.playback.as_ref().and_then(PlaybackEngine::position);
@@ -8554,7 +8590,17 @@ fn update_playback_position(state: &Rc<RefCell<UiState>>) {
         }
     }
 
-    if position.is_some() {
+    if let Some(position) = position {
+        // Once audio is actually flowing, clear the initial loading state.
+        // This handles streams that never emit GStreamer buffering messages.
+        if !position.is_zero() {
+            let mut ui = state.borrow_mut();
+            if let Some(playback) = ui.playback.as_mut() {
+                if playback.is_buffering() {
+                    playback.clear_initial_loading();
+                }
+            }
+        }
         save_playback_snapshot_if_due(&mut state.borrow_mut());
     }
 }
