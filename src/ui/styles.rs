@@ -170,6 +170,16 @@ window {
               transform 160ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
+.play-button-loading image {
+  opacity: 0;
+}
+
+.play-loading-spinner {
+  min-width: 20px;
+  min-height: 20px;
+  color: @accent_fg_color;
+}
+
 .play-button:hover {
   box-shadow: 0 4px 14px alpha(@window_fg_color, .22);
   transform: scale(1.12);
