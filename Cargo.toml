@@ -12,7 +12,6 @@ categories = ["multimedia::audio"]
 
 [dependencies]
 adw = { version = "0.9.1", package = "libadwaita" }
-anyhow = "1.0.102"
 directories = "6.0.0"
 discord-rich-presence = "1.1.0"
 gst = { version = "0.25.2", package = "gstreamer" }

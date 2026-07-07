@@ -389,7 +389,10 @@ fn discover_upnp(timeout: Duration) -> Vec<CastDevice> {
     let multicast: SocketAddr = "239.255.255.250:1900".parse().unwrap();
     socket.send_to(msearch.as_bytes(), multicast).ok();
 
-    let mut devices = Vec::new();
+    // Collect SSDP responses for the whole window first; fetching a device
+    // description can block for seconds and would otherwise eat the window
+    // and hide devices that answer later.
+    let mut locations = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let start = Instant::now();
     let mut buf = [0u8; 4096];
@@ -399,13 +402,16 @@ fn discover_upnp(timeout: Duration) -> Vec<CastDevice> {
             let resp = std::str::from_utf8(&buf[..len]).unwrap_or("");
             if let Some(loc) = http_header(resp, "location")
                 && seen.insert(loc.to_string())
-                && let Some(dev) = fetch_upnp_device(loc)
             {
-                devices.push(dev);
+                locations.push(loc.to_string());
             }
         }
     }
-    devices
+
+    locations
+        .iter()
+        .filter_map(|location| fetch_upnp_device(location))
+        .collect()
 }
 
 fn http_header<'a>(resp: &'a str, name: &str) -> Option<&'a str> {

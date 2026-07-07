@@ -7714,11 +7714,24 @@ fn load_full_size_artwork(url: String, picture: gtk::Picture) {
     });
 }
 
+fn image_http_client() -> Result<&'static reqwest::blocking::Client, ImageFetchError> {
+    // Artwork loads happen in bursts (one per visible tile); share one client
+    // so connections are pooled instead of paying TLS setup per image.
+    static CLIENT: std::sync::OnceLock<Option<reqwest::blocking::Client>> =
+        std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(20))
+                .build()
+                .ok()
+        })
+        .as_ref()
+        .ok_or(ImageFetchError::Request("request client failed"))
+}
+
 fn fetch_image_file(url: &str) -> Result<PathBuf, ImageFetchError> {
-    let response = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|_| ImageFetchError::Request("request client failed"))?
+    let response = image_http_client()?
         .get(url)
         .send()
         .map_err(|_| ImageFetchError::Request("request failed"))?;
