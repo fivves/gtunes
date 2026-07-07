@@ -20,7 +20,6 @@ const DISCORD_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PresencePlaybackState {
     Playing,
-    Paused,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

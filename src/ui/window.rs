@@ -1804,7 +1804,6 @@ fn sync_discord_presence(ui: &UiState) {
 
     let playback_state = match ui.playback.as_ref().map(PlaybackEngine::state) {
         Some(PlaybackState::Playing) => PresencePlaybackState::Playing,
-        Some(PlaybackState::Paused) => PresencePlaybackState::Paused,
         _ => {
             discord.clear_activity();
             return;
@@ -3064,7 +3063,21 @@ fn build_sidebar(state: Rc<RefCell<UiState>>) -> (gtk::Box, gtk::Box, gtk::Box) 
     let sidebar = gtk::Box::new(Orientation::Vertical, 4);
     sidebar.add_css_class("sidebar");
 
-    sidebar.append(&label("Library", "section-title"));
+    let library_header = label("Library", "section-title");
+    library_header.set_cursor_from_name(Some("pointer"));
+    library_header.set_tooltip_text(Some("Double-click to play random"));
+    {
+        let header_state = state.clone();
+        let header_gesture = gtk::GestureClick::new();
+        header_gesture.connect_pressed(move |_, n_press, _, _| {
+            if n_press == 2 {
+                let page = header_state.borrow().active_page;
+                play_random_for_page(&header_state, page);
+            }
+        });
+        library_header.add_controller(header_gesture);
+    }
+    sidebar.append(&library_header);
     sidebar.append(&nav_list(state.clone()));
 
     let spacer = gtk::Box::new(Orientation::Vertical, 0);
@@ -7085,6 +7098,74 @@ fn update_shuffle_button(state: &UiState) {
     }
 }
 
+fn random_index(len: usize) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_usize(len);
+    Some((hasher.finish() as usize) % len)
+}
+
+fn play_random_for_page(state: &Rc<RefCell<UiState>>, page: LibraryPage) {
+    match page {
+        LibraryPage::Tracks => {
+            let count = state.borrow().tracks.len();
+            if let Some(index) = random_index(count) {
+                play_track_at(state, index);
+            }
+        }
+        LibraryPage::Albums => {
+            let album = {
+                let ui = state.borrow();
+                random_index(ui.library_albums.len())
+                    .and_then(|i| ui.library_albums.get(i))
+                    .cloned()
+            };
+            if let Some(album) = album {
+                show_album_tracks(state, &album);
+                play_track_at(state, 0);
+            }
+        }
+        LibraryPage::Artists => {
+            let album = {
+                let ui = state.borrow();
+                random_index(ui.library_artists.len()).and_then(|i| {
+                    let artist = &ui.library_artists[i];
+                    let albums =
+                        album_summaries_for_artist_from(&ui.library_albums, &artist.key, "");
+                    random_index(albums.len()).and_then(|j| albums.into_iter().nth(j))
+                })
+            };
+            if let Some(album) = album {
+                show_album_tracks(state, &album);
+                play_track_at(state, 0);
+            }
+        }
+        LibraryPage::Playlists => {
+            let playlist = {
+                let ui = state.borrow();
+                random_index(ui.playlists.len())
+                    .and_then(|i| ui.playlists.get(i))
+                    .cloned()
+            };
+            if let Some(playlist) = playlist {
+                show_playlist_tracks(state, &playlist);
+                play_track_at(state, 0);
+            }
+        }
+        LibraryPage::Radio => {
+            let stations = radio_stations_for_display(state);
+            if let Some(idx) = random_index(stations.len()) {
+                play_radio_station(state, &stations[idx]);
+            }
+        }
+        LibraryPage::NextUp => {}
+    }
+}
+
 fn toggle_shuffle(state: &Rc<RefCell<UiState>>) {
     {
         let mut ui = state.borrow_mut();
@@ -9109,6 +9190,16 @@ fn nav_list(state: Rc<RefCell<UiState>>) -> gtk::ListBox {
             _ => {}
         }
     });
+
+    let double_click_state = state.clone();
+    let double_click = gtk::GestureClick::new();
+    double_click.connect_pressed(move |_, n_press, _, _| {
+        if n_press == 2 {
+            let page = double_click_state.borrow().active_page;
+            play_random_for_page(&double_click_state, page);
+        }
+    });
+    list.add_controller(double_click);
 
     update_nav_counts(&state);
 
