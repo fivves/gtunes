@@ -31,7 +31,12 @@ impl CastDevice {
 // ── CastSession — persistent session for sync'd playback ─────────────────────
 
 pub enum CastCommand {
-    Load { url: String, content_type: String, is_live: bool, start_secs: f64 },
+    Load {
+        url: String,
+        content_type: String,
+        is_live: bool,
+        start_secs: f64,
+    },
     Play,
     Pause,
     Seek(f64),
@@ -65,15 +70,29 @@ impl CastSession {
             run_cast_session(host, port, cmd_rx, event_tx);
         });
 
-        Ok(CastSession { device, cmd_tx, event_rx })
+        Ok(CastSession {
+            device,
+            cmd_tx,
+            event_rx,
+        })
     }
 
     pub fn load(&self, url: String, content_type: String, start_secs: f64) {
-        let _ = self.cmd_tx.try_send(CastCommand::Load { url, content_type, is_live: false, start_secs });
+        let _ = self.cmd_tx.try_send(CastCommand::Load {
+            url,
+            content_type,
+            is_live: false,
+            start_secs,
+        });
     }
 
     pub fn load_live(&self, url: String, content_type: String) {
-        let _ = self.cmd_tx.try_send(CastCommand::Load { url, content_type, is_live: true, start_secs: 0.0 });
+        let _ = self.cmd_tx.try_send(CastCommand::Load {
+            url,
+            content_type,
+            is_live: true,
+            start_secs: 0.0,
+        });
     }
 
     pub fn play(&self) {
@@ -142,10 +161,22 @@ fn run_cast_session(
         }
     };
 
-    if cast_send(&mut tls, "sender-0", "receiver-0", CONNECTION_NS,
-        r#"{"type":"CONNECT","origin":{},"userAgent":"gtunes"}"#).is_err()
-        || cast_send(&mut tls, "sender-0", "receiver-0", RECEIVER_NS,
-            r#"{"type":"LAUNCH","appId":"CC1AD845","requestId":1}"#).is_err()
+    if cast_send(
+        &mut tls,
+        "sender-0",
+        "receiver-0",
+        CONNECTION_NS,
+        r#"{"type":"CONNECT","origin":{},"userAgent":"gtunes"}"#,
+    )
+    .is_err()
+        || cast_send(
+            &mut tls,
+            "sender-0",
+            "receiver-0",
+            RECEIVER_NS,
+            r#"{"type":"LAUNCH","appId":"CC1AD845","requestId":1}"#,
+        )
+        .is_err()
     {
         let _ = event_tx.send(CastEvent::Disconnected);
         return;
@@ -160,8 +191,14 @@ fn run_cast_session(
         }
     };
 
-    if cast_send(&mut tls, "sender-0", &transport_id, CONNECTION_NS,
-        r#"{"type":"CONNECT","origin":{}}"#).is_err()
+    if cast_send(
+        &mut tls,
+        "sender-0",
+        &transport_id,
+        CONNECTION_NS,
+        r#"{"type":"CONNECT","origin":{}}"#,
+    )
+    .is_err()
     {
         let _ = event_tx.send(CastEvent::Disconnected);
         return;
@@ -174,7 +211,12 @@ fn run_cast_session(
         // Drain all pending commands
         loop {
             match cmd_rx.try_recv() {
-                Ok(CastCommand::Load { url, content_type, is_live, start_secs }) => {
+                Ok(CastCommand::Load {
+                    url,
+                    content_type,
+                    is_live,
+                    start_secs,
+                }) => {
                     req_id += 1;
                     media_session_id = None;
                     let stream_type = if is_live { "LIVE" } else { "BUFFERED" };
@@ -243,8 +285,13 @@ fn run_cast_session(
         match cast_read_message(&mut tls) {
             Ok((ns, payload)) => {
                 if payload.contains("\"PING\"") || ns == HEARTBEAT_NS {
-                    let _ = cast_send(&mut tls, "sender-0", "receiver-0", HEARTBEAT_NS,
-                        r#"{"type":"PONG"}"#);
+                    let _ = cast_send(
+                        &mut tls,
+                        "sender-0",
+                        "receiver-0",
+                        HEARTBEAT_NS,
+                        r#"{"type":"PONG"}"#,
+                    );
                     continue;
                 }
 
@@ -269,7 +316,8 @@ fn run_cast_session(
                                 let _ = event_tx.send(CastEvent::TrackFinished);
                             }
                             Some("ERROR") => {
-                                let _ = event_tx.send(CastEvent::Error("Playback error on device".into()));
+                                let _ = event_tx
+                                    .send(CastEvent::Error("Playback error on device".into()));
                             }
                             _ => {}
                         },
@@ -280,7 +328,8 @@ fn run_cast_session(
             }
             Err(e) => {
                 // 150ms timeout is normal — only treat real errors as fatal
-                if e.contains("os error 11") || e.contains("WouldBlock") || e.contains("timed out") {
+                if e.contains("os error 11") || e.contains("WouldBlock") || e.contains("timed out")
+                {
                     continue;
                 }
                 tracing::warn!("Cast connection lost: {e}");
@@ -298,7 +347,13 @@ fn wait_for_transport(tls: &mut (impl Read + Write)) -> Result<String, String> {
             Err(_) => continue,
         };
         if payload.contains("\"PING\"") {
-            let _ = cast_send(tls, "sender-0", "receiver-0", HEARTBEAT_NS, r#"{"type":"PONG"}"#);
+            let _ = cast_send(
+                tls,
+                "sender-0",
+                "receiver-0",
+                HEARTBEAT_NS,
+                r#"{"type":"PONG"}"#,
+            );
             continue;
         }
         if payload.contains("\"RECEIVER_STATUS\"") {
@@ -332,7 +387,9 @@ fn discover_upnp(timeout: Duration) -> Vec<CastDevice> {
         Ok(s) => s,
         Err(_) => return vec![],
     };
-    socket.set_read_timeout(Some(Duration::from_millis(400))).ok();
+    socket
+        .set_read_timeout(Some(Duration::from_millis(400)))
+        .ok();
     socket.set_multicast_loop_v4(true).ok();
 
     let msearch = concat!(
@@ -387,8 +444,7 @@ fn fetch_upnp_device(location: &str) -> Option<CastDevice> {
         .ok()?;
     let xml = client.get(location).send().ok()?.text().ok()?;
 
-    let name = xml_text(&xml, "friendlyName")
-        .unwrap_or_else(|| "Unknown Device".to_string());
+    let name = xml_text(&xml, "friendlyName").unwrap_or_else(|| "Unknown Device".to_string());
     let av_path = find_av_transport_control_url(&xml)?;
 
     let parsed: url::Url = location.parse().ok()?;
@@ -399,7 +455,11 @@ fn fetch_upnp_device(location: &str) -> Option<CastDevice> {
     let av_transport_url = if av_path.starts_with("http") {
         av_path
     } else {
-        format!("{}/{}", base.trim_end_matches('/'), av_path.trim_start_matches('/'))
+        format!(
+            "{}/{}",
+            base.trim_end_matches('/'),
+            av_path.trim_start_matches('/')
+        )
     };
 
     Some(CastDevice {
@@ -419,7 +479,11 @@ fn xml_text(xml: &str, tag: &str) -> Option<String> {
     let after_tag = xml[start..].find('>')? + start + 1;
     let end = xml[after_tag..].find(&close)? + after_tag;
     let value = xml[after_tag..end].trim();
-    if value.is_empty() { None } else { Some(value.to_string()) }
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }
 
 fn find_av_transport_control_url(xml: &str) -> Option<String> {
@@ -445,18 +509,33 @@ pub fn upnp_play(device: &CastDevice, stream_url: &str, _title: &str) -> Result<
          <CurrentURIMetaData></CurrentURIMetaData>",
         xml_escape(stream_url)
     );
-    soap(&device.av_transport_url, SVC, "SetAVTransportURI", &set_body)
-        .map_err(|e| format!("SetAVTransportURI: {e}"))?;
-    soap(&device.av_transport_url, SVC, "Play", "<InstanceID>0</InstanceID><Speed>1</Speed>")
-        .map_err(|e| format!("Play: {e}"))?;
+    soap(
+        &device.av_transport_url,
+        SVC,
+        "SetAVTransportURI",
+        &set_body,
+    )
+    .map_err(|e| format!("SetAVTransportURI: {e}"))?;
+    soap(
+        &device.av_transport_url,
+        SVC,
+        "Play",
+        "<InstanceID>0</InstanceID><Speed>1</Speed>",
+    )
+    .map_err(|e| format!("Play: {e}"))?;
     Ok(())
 }
 
 pub fn upnp_stop(device: &CastDevice) -> Result<(), String> {
     const SVC: &str = "urn:schemas-upnp-org:service:AVTransport:1";
-    soap(&device.av_transport_url, SVC, "Stop", "<InstanceID>0</InstanceID>")
-        .map(|_| ())
-        .map_err(|e| format!("Stop: {e}"))
+    soap(
+        &device.av_transport_url,
+        SVC,
+        "Stop",
+        "<InstanceID>0</InstanceID>",
+    )
+    .map(|_| ())
+    .map_err(|e| format!("Stop: {e}"))
 }
 
 fn soap(url: &str, service: &str, action: &str, body: &str) -> Result<String, String> {
@@ -560,7 +639,13 @@ fn discover_chromecast(timeout: Duration) -> Vec<CastDevice> {
 
 // ── Cast protocol helpers ─────────────────────────────────────────────────────
 
-fn cast_send(stream: &mut impl Write, src: &str, dst: &str, ns: &str, payload: &str) -> Result<(), String> {
+fn cast_send(
+    stream: &mut impl Write,
+    src: &str,
+    dst: &str,
+    ns: &str,
+    payload: &str,
+) -> Result<(), String> {
     let msg = cast_encode(src, dst, ns, payload);
     let mut frame = Vec::with_capacity(4 + msg.len());
     frame.extend_from_slice(&(msg.len() as u32).to_be_bytes());
@@ -594,7 +679,8 @@ fn json_num(json: &str, key: &str) -> Option<f64> {
     let needle = format!("\"{}\":", key);
     let start = json.find(&needle)? + needle.len();
     let rest = json[start..].trim_start_matches(' ');
-    let end = rest.find(|c: char| c != '-' && c != '.' && !c.is_ascii_digit())
+    let end = rest
+        .find(|c: char| c != '-' && c != '.' && !c.is_ascii_digit())
         .unwrap_or(rest.len());
     rest[..end].parse().ok()
 }

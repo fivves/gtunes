@@ -13,6 +13,7 @@ use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::cache::{CacheDatabase, JellyfinSession};
+use crate::cast::{self, CastDevice, CastDeviceKind, CastEvent};
 use crate::config;
 use crate::discord::{
     DiscordPresence, PresenceActivity, PresencePlaybackState, artwork_cache_path,
@@ -25,7 +26,6 @@ use crate::playback::{
     ExternalStreamSource, PlaybackEngine, PlaybackEvent, PlaybackRequest, PlaybackState,
     PlaybackStreamKind, resolve_external_stream_url, session,
 };
-use crate::cast::{self, CastDevice, CastDeviceKind, CastEvent};
 use crate::waveform::{WaveformKey, WaveformSummary};
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -2377,7 +2377,9 @@ fn populate_cast_device_list(state: &Rc<RefCell<UiState>>, devices: Vec<CastDevi
         spinner.stop();
     }
 
-    let Some(device_box) = ui.cast_device_box.as_ref() else { return };
+    let Some(device_box) = ui.cast_device_box.as_ref() else {
+        return;
+    };
 
     // Clear placeholder
     while let Some(child) = device_box.first_child() {
@@ -2395,8 +2397,14 @@ fn populate_cast_device_list(state: &Rc<RefCell<UiState>>, devices: Vec<CastDevi
     }
 
     // Group by kind
-    let upnp: Vec<_> = devices.iter().filter(|d| d.kind == CastDeviceKind::UPnP).collect();
-    let chromecasts: Vec<_> = devices.iter().filter(|d| d.kind == CastDeviceKind::Chromecast).collect();
+    let upnp: Vec<_> = devices
+        .iter()
+        .filter(|d| d.kind == CastDeviceKind::UPnP)
+        .collect();
+    let chromecasts: Vec<_> = devices
+        .iter()
+        .filter(|d| d.kind == CastDeviceKind::Chromecast)
+        .collect();
     let had_upnp = !upnp.is_empty();
 
     if had_upnp {
@@ -2474,12 +2482,19 @@ fn cast_device_row(
 
 fn cast_content_type(quality: &str) -> &'static str {
     let q = quality.to_uppercase();
-    if q.contains("FLAC") { "audio/flac" }
-    else if q.contains("MP3") { "audio/mpeg" }
-    else if q.contains("AAC") || q.contains("M4A") { "audio/aac" }
-    else if q.contains("OGG") || q.contains("OPUS") { "audio/ogg" }
-    else if q.contains("WAV") { "audio/wav" }
-    else { "audio/mpeg" }
+    if q.contains("FLAC") {
+        "audio/flac"
+    } else if q.contains("MP3") {
+        "audio/mpeg"
+    } else if q.contains("AAC") || q.contains("M4A") {
+        "audio/aac"
+    } else if q.contains("OGG") || q.contains("OPUS") {
+        "audio/ogg"
+    } else if q.contains("WAV") {
+        "audio/wav"
+    } else {
+        "audio/mpeg"
+    }
 }
 
 fn radio_stream_content_type(url: &url::Url) -> &'static str {
@@ -2521,14 +2536,17 @@ fn start_cast(state: &Rc<RefCell<UiState>>, device: CastDevice) {
     // Gather track info and current local playback position
     let (stream_url, content_type, duration_secs, local_position_secs) = {
         let ui = state.borrow();
-        let track = ui.playback_session
+        let track = ui
+            .playback_session
             .queue_index
             .and_then(|i| ui.playback_session.queue_tracks.get(i));
         let Some(track) = track else {
             show_cast_status(state, "No track selected");
             return;
         };
-        let url = track.stream_url.clone()
+        let url = track
+            .stream_url
+            .clone()
             .or_else(|| track.fallback_stream_url.clone());
         let Some(url) = url else {
             show_cast_status(state, "Stream URL unavailable");
@@ -2536,7 +2554,9 @@ fn start_cast(state: &Rc<RefCell<UiState>>, device: CastDevice) {
         };
         let ct = cast_content_type(&track.quality).to_string();
         let dur = parse_duration_str(&track.duration);
-        let pos = ui.playback.as_ref()
+        let pos = ui
+            .playback
+            .as_ref()
             .and_then(|p| p.position())
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
@@ -2564,29 +2584,27 @@ fn start_cast(state: &Rc<RefCell<UiState>>, device: CastDevice) {
             });
             let state = state.clone();
             let dev_name = device.name.clone();
-            gtk::glib::timeout_add_local(Duration::from_millis(100), move || {
-                match rx.try_recv() {
-                    Ok(Ok(())) => {
-                        {
-                            let mut ui = state.borrow_mut();
-                            ui.active_cast_device = Some(device.clone());
-                            if let Some(btn) = ui.cast_button.as_ref() {
-                                btn.add_css_class("cast-active");
-                            }
+            gtk::glib::timeout_add_local(Duration::from_millis(100), move || match rx.try_recv() {
+                Ok(Ok(())) => {
+                    {
+                        let mut ui = state.borrow_mut();
+                        ui.active_cast_device = Some(device.clone());
+                        if let Some(btn) = ui.cast_button.as_ref() {
+                            btn.add_css_class("cast-active");
                         }
-                        show_cast_status(&state, &format!("Casting to {dev_name}"));
-                        refresh_cast_device_list(&state);
-                        gtk::glib::ControlFlow::Break
                     }
-                    Ok(Err(e)) => {
-                        show_cast_status(&state, &format!("Error: {e}"));
-                        gtk::glib::ControlFlow::Break
-                    }
-                    Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
-                    Err(_) => {
-                        show_cast_status(&state, "Connection failed");
-                        gtk::glib::ControlFlow::Break
-                    }
+                    show_cast_status(&state, &format!("Casting to {dev_name}"));
+                    refresh_cast_device_list(&state);
+                    gtk::glib::ControlFlow::Break
+                }
+                Ok(Err(e)) => {
+                    show_cast_status(&state, &format!("Error: {e}"));
+                    gtk::glib::ControlFlow::Break
+                }
+                Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
+                Err(_) => {
+                    show_cast_status(&state, "Connection failed");
+                    gtk::glib::ControlFlow::Break
                 }
             });
         }
@@ -2628,7 +2646,9 @@ fn stop_cast(state: &Rc<RefCell<UiState>>, device: &CastDevice) {
             session.stop();
         } else if device.kind == CastDeviceKind::UPnP {
             let dev = device.clone();
-            std::thread::spawn(move || { let _ = cast::upnp_stop(&dev); });
+            std::thread::spawn(move || {
+                let _ = cast::upnp_stop(&dev);
+            });
         }
         ui.last_cast_device = ui.active_cast_device.take();
         ui.cast_is_playing = false;
@@ -2665,7 +2685,9 @@ fn show_cast_status(state: &Rc<RefCell<UiState>>, msg: &str) {
 fn refresh_cast_device_list(state: &Rc<RefCell<UiState>>) {
     // Re-render the device list with updated active state
     let ui = state.borrow();
-    let Some(device_box) = ui.cast_device_box.as_ref() else { return };
+    let Some(device_box) = ui.cast_device_box.as_ref() else {
+        return;
+    };
     let active_id = ui.active_cast_device.as_ref().map(|d| d.id.clone());
 
     // Collect existing device rows (skip section labels and placeholder)
@@ -5041,8 +5063,7 @@ fn set_keep_playing_while_closed(state: &Rc<RefCell<UiState>>, enabled: bool) {
 }
 
 fn load_animations_enabled() -> bool {
-    match CacheDatabase::open_default()
-        .and_then(|cache| cache.get_setting(ANIMATIONS_ENABLED_KEY))
+    match CacheDatabase::open_default().and_then(|cache| cache.get_setting(ANIMATIONS_ENABLED_KEY))
     {
         Ok(Some(value)) => value != "false",
         Ok(None) => true,
@@ -5081,13 +5102,12 @@ fn load_font_mono() -> bool {
 
 fn set_font_mono(state: &Rc<RefCell<UiState>>, mono: bool) {
     state.borrow_mut().font_mono = mono;
-    if let Err(error) = CacheDatabase::open_default().and_then(|cache| {
-        cache.set_setting(FONT_MONO_KEY, if mono { "true" } else { "false" })
-    }) {
+    if let Err(error) = CacheDatabase::open_default()
+        .and_then(|cache| cache.set_setting(FONT_MONO_KEY, if mono { "true" } else { "false" }))
+    {
         tracing::warn!(%error, "failed to save font style setting");
     }
 }
-
 
 fn playback_snapshot(ui: &UiState) -> Option<session::PersistedPlaybackState> {
     if ui.playback_session.mode.is_radio() {
@@ -6418,7 +6438,9 @@ fn play_resolved_radio_station(
         if let Some(session) = ui.cast_session.as_ref() {
             let content_type = radio_stream_content_type(&stream_url);
             session.load_live(stream_url.to_string(), content_type.into());
-            let device_name = ui.active_cast_device.as_ref()
+            let device_name = ui
+                .active_cast_device
+                .as_ref()
                 .map(|d| d.name.clone())
                 .unwrap_or_else(|| "device".into());
             drop(ui);
@@ -7068,7 +7090,10 @@ fn update_play_button(state: &UiState) {
     let is_playing = if state.cast_session.is_some() {
         state.cast_is_playing
     } else {
-        matches!(state.playback.as_ref().map(PlaybackEngine::state), Some(PlaybackState::Playing))
+        matches!(
+            state.playback.as_ref().map(PlaybackEngine::state),
+            Some(PlaybackState::Playing)
+        )
     };
 
     if is_playing {
@@ -7355,11 +7380,15 @@ fn play_selected_track(state: &Rc<RefCell<UiState>>) {
     let cast_url_and_type: Option<(String, String, f64)> = {
         let ui = state.borrow();
         if ui.cast_session.is_some() {
-            let track = ui.playback_session
+            let track = ui
+                .playback_session
                 .queue_index
                 .and_then(|i| ui.playback_session.queue_tracks.get(i));
             track.and_then(|t| {
-                let url = t.stream_url.clone().or_else(|| t.fallback_stream_url.clone())?;
+                let url = t
+                    .stream_url
+                    .clone()
+                    .or_else(|| t.fallback_stream_url.clone())?;
                 let ct = cast_content_type(&t.quality).to_string();
                 let dur = parse_duration_str(&t.duration);
                 Some((url, ct, dur))
@@ -7378,12 +7407,14 @@ fn play_selected_track(state: &Rc<RefCell<UiState>>) {
             ui.cast_is_playing = true;
         }
         // Update now_playing_key so the header shows the new track
-        if let Some(track) = ui.playback_session
+        if let Some(track) = ui
+            .playback_session
             .queue_index
             .and_then(|i| ui.playback_session.queue_tracks.get(i))
             .cloned()
         {
-            ui.playback_session.start_library_playback(track_key(&track));
+            ui.playback_session
+                .start_library_playback(track_key(&track));
         }
         update_play_button(&ui);
         update_now_playing_labels(&ui);
@@ -9370,7 +9401,10 @@ fn update_cast_progress_labels(ui: &UiState, position_secs: f64, duration_secs: 
         let progress = (position_secs / duration_secs).clamp(0.0, 1.0);
         ui.waveform.borrow_mut().progress = progress;
         let remaining = (duration_secs - position_secs).max(0.0);
-        ui.remaining_label.set_text(&format!("-{}", format_duration(Duration::from_secs_f64(remaining))));
+        ui.remaining_label.set_text(&format!(
+            "-{}",
+            format_duration(Duration::from_secs_f64(remaining))
+        ));
         if let Some(area) = ui.wave_area.as_ref() {
             area.queue_draw();
         }
@@ -9791,9 +9825,12 @@ fn seek_waveform(state: &Rc<RefCell<UiState>>, area: &gtk::DrawingArea, x: f64) 
         ui.cast_position_secs = pos_secs;
         let dur = ui.cast_duration_secs;
         ui.waveform.borrow_mut().progress = progress;
-        ui.elapsed_label.set_text(&format_duration(Duration::from_secs_f64(pos_secs)));
-        ui.remaining_label.set_text(&format!("-{}",
-            format_duration(Duration::from_secs_f64((dur - pos_secs).max(0.0)))));
+        ui.elapsed_label
+            .set_text(&format_duration(Duration::from_secs_f64(pos_secs)));
+        ui.remaining_label.set_text(&format!(
+            "-{}",
+            format_duration(Duration::from_secs_f64((dur - pos_secs).max(0.0)))
+        ));
         if let Some(area) = ui.wave_area.as_ref() {
             area.queue_draw();
         }

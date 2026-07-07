@@ -124,6 +124,15 @@ impl<T> PlaybackSession<T> {
         upcoming_track_count(&self.playback_order, current_index)
     }
 
+    #[cfg(test)]
+    pub(crate) fn queued_indices_with_limit(
+        &self,
+        current_index: usize,
+        limit: usize,
+    ) -> Vec<usize> {
+        queued_indices_with_limit(&self.playback_order, current_index, limit)
+    }
+
     pub(crate) fn move_upcoming_track(
         &mut self,
         current_index: usize,

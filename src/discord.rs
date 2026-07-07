@@ -106,9 +106,9 @@ fn artwork_cache_id(url: &str) -> String {
     // FNV-1a 64-bit: stable across Rust versions, zero dependencies
     const FNV_OFFSET: u64 = 14695981039346656037;
     const FNV_PRIME: u64 = 1099511628211;
-    let hash = url
-        .bytes()
-        .fold(FNV_OFFSET, |acc, byte| (acc ^ byte as u64).wrapping_mul(FNV_PRIME));
+    let hash = url.bytes().fold(FNV_OFFSET, |acc, byte| {
+        (acc ^ byte as u64).wrapping_mul(FNV_PRIME)
+    });
     format!("{hash:x}")
 }
 
