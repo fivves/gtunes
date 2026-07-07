@@ -2850,11 +2850,20 @@ fn connect_player_bar_responsive_layout(
     actions: &gtk::Overlay,
     playback_status: &gtk::Label,
 ) {
+    // A tick callback would keep the frame clock running at the monitor
+    // refresh rate even while idle; a coarse timer is enough to follow
+    // window resizes.
+    let player = player.downgrade();
     let actions = actions.clone();
     let playback_status = playback_status.clone();
-    player.add_tick_callback(move |player, _| {
-        let width = player.allocated_width();
-        if width > 0 {
+    let last_width = Cell::new(0);
+    gtk::glib::timeout_add_local(Duration::from_millis(200), move || {
+        let Some(player) = player.upgrade() else {
+            return gtk::glib::ControlFlow::Break;
+        };
+        let width = player.width();
+        if width > 0 && width != last_width.get() {
+            last_width.set(width);
             actions.set_visible(width >= 560);
             playback_status.set_visible(width >= 720);
         }
