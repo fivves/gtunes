@@ -6121,6 +6121,14 @@ fn radio_station_card(state: Rc<RefCell<UiState>>, station: RadioStation) -> gtk
             popover.set_parent(&edit_card);
             popover.set_has_arrow(true);
             popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+            // Each right-click builds a fresh popover; drop it from the widget
+            // tree when dismissed instead of accumulating them on the card.
+            popover.connect_closed(|popover| {
+                let popover = popover.clone();
+                gtk::glib::idle_add_local_once(move || {
+                    popover.unparent();
+                });
+            });
             popover.popup();
             gesture.set_state(gtk::EventSequenceState::Claimed);
         });
@@ -9880,7 +9888,9 @@ fn seek_waveform(state: &Rc<RefCell<UiState>>, area: &gtk::DrawingArea, x: f64) 
                 "-{}",
                 format_duration(duration.saturating_sub(position))
             ));
-            save_playback_snapshot_now(&mut ui);
+            // Scrubbing fires this per drag event; the throttled save avoids a
+            // sqlite write for every pixel of movement.
+            save_playback_snapshot_if_due(&mut ui);
         }
         Err(error) => ui
             .playback_status
