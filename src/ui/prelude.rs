@@ -33,8 +33,12 @@ pub(crate) use crate::playback::{
 };
 pub(crate) use crate::waveform::{WaveformKey, WaveformSummary};
 
+pub(crate) use super::artwork::*;
+pub(crate) use super::integrations::*;
 pub(crate) use super::library::*;
 pub(crate) use super::models::*;
+pub(crate) use super::persistence::*;
+pub(crate) use super::shortcuts::*;
 pub(crate) use super::state::*;
 pub(crate) use super::widgets::*;
 pub(crate) use super::window::*;

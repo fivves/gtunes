@@ -1,6 +1,10 @@
+pub(crate) mod artwork;
+pub(crate) mod integrations;
 pub(crate) mod library;
 pub(crate) mod models;
+pub(crate) mod persistence;
 mod prelude;
+pub(crate) mod shortcuts;
 pub(crate) mod state;
 pub mod styles;
 pub(crate) mod widgets;
