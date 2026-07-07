@@ -5310,7 +5310,7 @@ fn sort_track_slice(
     if let Some(selected_key) = selected_key {
         *selected_index = tracks
             .iter()
-            .position(|track| track_key(track) == selected_key)
+            .position(|track| track_has_key(track, selected_key))
             .unwrap_or(0);
     } else {
         *selected_index = 0;
@@ -5486,7 +5486,7 @@ fn restore_persisted_playback(state: &Rc<RefCell<UiState>>) {
             },
             &ui.tracks,
             fallback_selected_index,
-            |queued, visible| track_key(queued) == track_key(visible),
+            same_track,
             track_key,
         ) else {
             return;
@@ -6772,7 +6772,7 @@ fn queue_track_next(ui: &mut UiState, target_track: UiTrack) -> bool {
         &ui.tracks,
         ui.selected_index,
         target_track,
-        |queued, target| track_key(queued) == track_key(target),
+        same_track,
     )
 }
 
@@ -6861,6 +6861,23 @@ fn track_key(track: &UiTrack) -> String {
         .unwrap_or_else(|| format!("{}\u{1f}{}\u{1f}{}", track.title, track.artist, track.album))
 }
 
+fn track_has_key(track: &UiTrack, key: &str) -> bool {
+    match track.item_id.as_deref() {
+        Some(item_id) => item_id == key,
+        None => track_key(track) == key,
+    }
+}
+
+fn same_track(left: &UiTrack, right: &UiTrack) -> bool {
+    match (left.item_id.as_deref(), right.item_id.as_deref()) {
+        (Some(left_id), Some(right_id)) => left_id == right_id,
+        (None, None) => {
+            left.title == right.title && left.artist == right.artist && left.album == right.album
+        }
+        _ => false,
+    }
+}
+
 fn track_key_if_same_album(track: &UiTrack, album_key_value: &str) -> Option<String> {
     (album_key(track) == album_key_value).then(|| track_key(track))
 }
@@ -6871,11 +6888,11 @@ fn preferred_refresh_track_key(
     selected_key: Option<&str>,
 ) -> Option<String> {
     now_playing_key
-        .filter(|key| tracks.iter().any(|track| track_key(track) == *key))
+        .filter(|key| tracks.iter().any(|track| track_has_key(track, key)))
         .map(|key| key.to_string())
         .or_else(|| {
             selected_key
-                .filter(|key| tracks.iter().any(|track| track_key(track) == *key))
+                .filter(|key| tracks.iter().any(|track| track_has_key(track, key)))
                 .map(|key| key.to_string())
         })
 }
@@ -6897,12 +6914,14 @@ fn find_track_by_key<'a>(state: &'a UiState, key: &str) -> Option<&'a UiTrack> {
     state
         .all_tracks
         .iter()
-        .find(|track| track_key(track) == key)
-        .or_else(|| state.tracks.iter().find(|track| track_key(track) == key))
+        .find(|track| track_has_key(track, key))
+        .or_else(|| state.tracks.iter().find(|track| track_has_key(track, key)))
 }
 
 fn compare_text(left: &str, right: &str) -> Ordering {
-    left.to_lowercase().cmp(&right.to_lowercase())
+    left.chars()
+        .flat_map(char::to_lowercase)
+        .cmp(right.chars().flat_map(char::to_lowercase))
 }
 
 fn compare_artist_album_track(left: &UiTrack, right: &UiTrack) -> Ordering {
@@ -7371,12 +7390,9 @@ fn play_track_at_with_order(state: &Rc<RefCell<UiState>>, index: usize, rebuild_
     let (selected_index, visible_index) = {
         let mut ui = state.borrow_mut();
         let ui = &mut *ui;
-        let selection = ui.playback_session.select_library_track(
-            &ui.tracks,
-            index,
-            rebuild_order,
-            |queued, visible| track_key(queued) == track_key(visible),
-        );
+        let selection =
+            ui.playback_session
+                .select_library_track(&ui.tracks, index, rebuild_order, same_track);
         ui.selected_index = selection.selected_index;
 
         update_now_playing_labels(ui);
@@ -8886,9 +8902,12 @@ fn scroll_to_now_playing(state: &Rc<RefCell<UiState>>) {
 
     let idx = {
         let ui = state.borrow();
-        ui.tracks
-            .iter()
-            .position(|t| Some(track_key(t)) == ui.playback_session.now_playing_key)
+        ui.tracks.iter().position(|t| {
+            ui.playback_session
+                .now_playing_key
+                .as_deref()
+                .is_some_and(|key| track_has_key(t, key))
+        })
     };
 
     let Some(idx) = idx else {
@@ -9681,7 +9700,7 @@ fn apply_gapless_transition(state: &Rc<RefCell<UiState>>) -> bool {
             if let Some(visible_index) = ui
                 .tracks
                 .iter()
-                .position(|visible| track_key(visible) == track_key(&track))
+                .position(|visible| same_track(visible, &track))
             {
                 ui.selected_index = visible_index;
             }
