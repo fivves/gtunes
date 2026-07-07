@@ -34,13 +34,17 @@ pub(crate) use crate::playback::{
 pub(crate) use crate::waveform::{WaveformKey, WaveformSummary};
 
 pub(crate) use super::artwork::*;
+pub(crate) use super::cast_ui::*;
+pub(crate) use super::collections::*;
 pub(crate) use super::connection::*;
 pub(crate) use super::integrations::*;
 pub(crate) use super::library::*;
 pub(crate) use super::models::*;
 pub(crate) use super::persistence::*;
 pub(crate) use super::playback_controls::*;
+pub(crate) use super::player_bar::*;
 pub(crate) use super::queue::*;
+pub(crate) use super::radio::*;
 pub(crate) use super::shortcuts::*;
 pub(crate) use super::state::*;
 pub(crate) use super::tracklist::*;
