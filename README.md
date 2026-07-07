@@ -206,7 +206,8 @@ src/
   jellyfin/           Jellyfin HTTP client and typed API models.
   main.rs             Tracing and GStreamer initialization.
   playback/           GStreamer playback engine, queue handoff, and seeking.
-  ui/                 GTK4/Libadwaita window, widgets, state, and styles.
+  ui/                 GTK4/Libadwaita interface, one module per concern;
+                      window.rs only assembles the window.
   waveform/           Waveform generation, summaries, and cache files.
 docs/
   DEVELOPMENT.md      Contributor setup, workflow, and troubleshooting.

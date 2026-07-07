@@ -12,8 +12,16 @@ Main module boundaries:
 
 - `src/app.rs`: application startup, CSS setup, and GTK activation.
 - `src/config.rs`: app ID, app name, developer name, and package version.
-- `src/ui/`: Libadwaita window, widgets, state wiring, CSS, background worker
-  polling, library views, queue, artwork, waveform UI, and settings.
+- `src/ui/`: the Libadwaita interface, split into focused modules:
+  `window.rs` (window assembly only), `state.rs` (UiState and view enums),
+  `models.rs` (UI-facing track/playlist/station models), `library.rs`
+  (summaries, filtering, sorting), `tracklist.rs`, `collections.rs`,
+  `queue.rs`, `playback_controls.rs`, `player_bar.rs`, `radio.rs`,
+  `cast_ui.rs`, `connection.rs`, `persistence.rs`, `artwork.rs`,
+  `integrations.rs` (MPRIS/Discord), `shortcuts.rs`, `widgets.rs`,
+  `styles.rs`, and a shared `prelude.rs`. Put new UI behavior in the module
+  that owns the concern (or a new module registered in `mod.rs` and
+  `prelude.rs`) — do not grow `window.rs` back into a catch-all.
 - `src/jellyfin/`: Jellyfin client methods, stream/image URL construction, HTTP
   headers, pagination, playlists, and typed API models.
 - `src/playback/`: GStreamer playback state, source header setup, seeking,

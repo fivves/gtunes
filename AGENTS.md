@@ -5,12 +5,52 @@
 gTunes is a Rust 2024 GTK4/Libadwaita desktop client for Jellyfin music
 libraries. Source lives in `src/`: `main.rs` initializes tracing and
 GStreamer, `app.rs` starts the GTK application, and `config.rs` stores package
-metadata. Feature areas are split into `src/ui/` for windows, widgets, styles,
-and state wiring; `src/jellyfin/` for the typed API client and models;
+metadata. Feature areas are split into `src/ui/` for the interface (see the
+layout below); `src/jellyfin/` for the typed API client and models;
 `src/playback/` for GStreamer playback; `src/cache/` for SQLite schema and
 local state; and `src/waveform/` for waveform generation and cache files.
 Contributor docs are under `docs/`, and AppImage packaging is in
 `scripts/build-appimage.sh`.
+
+### UI Module Layout
+
+`src/ui/` was deliberately split from a single 10k-line `window.rs` into
+focused modules. Keep this shape: do not grow `window.rs` back into a
+catch-all. `window.rs` is window assembly only (root layout, sidebar, nav
+list, bottom bar, close handling) — new behavior belongs in the module that
+owns that concern:
+
+- `state.rs`: `UiState` and view enums (`LibraryPage`, `SortColumn`, ...).
+- `models.rs`: `UiTrack`/`UiPlaylist`/`RadioStation`, Jellyfin conversions,
+  track/album/artist key helpers.
+- `library.rs`: album/artist summaries, filtering, and sorting (pure logic).
+- `tracklist.rs`: the ColumnView track table and its selection/scroll helpers.
+- `collections.rs`: album/artist/playlist grids, tiles, page navigation.
+- `queue.rs`: sidebar queue card, Next Up page, queue mutations,
+  drag-and-drop.
+- `playback_controls.rs`: transport actions, gapless transitions, transcode
+  fallback, the playback timer.
+- `player_bar.rs`: player bar, settings menu, waveform widget, now-playing
+  labels.
+- `radio.rs`: radio page and station management.
+- `cast_ui.rs`: cast popover, device list, and cast event pump (the wire
+  protocol lives in `src/cast/`).
+- `connection.rs`: Jellyfin connect/reconnect UI, fetch workers, library
+  cache, cache reset.
+- `persistence.rs`: settings keys and playback snapshots.
+- `artwork.rs`: image fetching/caching and cover-art loaders.
+- `integrations.rs`: MPRIS and Discord presence sync.
+- `shortcuts.rs`: key controller and invisible search.
+- `widgets.rs`: small shared widget constructors (`label`, `icon_button`,
+  ...).
+- `prelude.rs`: the shared import surface; new modules start with
+  `use super::prelude::*;` and get re-exported from the prelude.
+- `tests.rs`: UI unit tests (add new tests here or next to the logic they
+  cover).
+
+When adding a feature that fits none of these, add a new module and register
+it in `mod.rs` and `prelude.rs` instead of expanding an unrelated one. If a
+module grows past roughly 1,500 lines, split it along the same pattern.
 
 ## Build, Test, and Development Commands
 

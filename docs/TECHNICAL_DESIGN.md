@@ -41,7 +41,13 @@ gTunes 1.0 does not support lyrics.
 `ui`
 : Builds the Libadwaita interface, owns UI state, connects widgets to
   application behavior, handles background worker polling, and coordinates
-  library, playback, artwork, waveform, and MPRIS updates.
+  library, playback, artwork, waveform, and MPRIS updates. Internally split
+  into focused modules (`state`, `models`, `library`, `tracklist`,
+  `collections`, `queue`, `playback_controls`, `player_bar`, `radio`,
+  `cast_ui`, `connection`, `persistence`, `artwork`, `integrations`,
+  `shortcuts`, `widgets`) that share imports through `ui::prelude`;
+  `window.rs` only assembles the window from these pieces and must stay that
+  way.
 
 `jellyfin`
 : Owns authentication, typed Jellyfin models, item and image URLs, direct and

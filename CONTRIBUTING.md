@@ -39,6 +39,9 @@ cache reset.
 ## Code Guidelines
 
 - Prefer existing module boundaries over adding new abstractions.
+- Put new UI behavior in the `src/ui/` module that owns the concern (or a new
+  module registered in `mod.rs` and `prelude.rs`); `src/ui/window.rs` is
+  window assembly only and must not grow back into a catch-all.
 - Keep UI work consistent with GTK4 and Libadwaita conventions.
 - Do not block the GTK UI thread on network, disk, image decoding, cache reset,
   or waveform work.
