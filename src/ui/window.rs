@@ -241,6 +241,7 @@ struct UiState {
     cast_scan_spinner: Option<gtk::Spinner>,
     active_cast_device: Option<CastDevice>,
     last_cast_device: Option<CastDevice>,
+    last_cast_devices: Vec<CastDevice>,
     cast_session: Option<cast::CastSession>,
     cast_is_playing: bool,
     cast_position_secs: f64,
@@ -755,6 +756,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         cast_scan_spinner: None,
         active_cast_device: None,
         last_cast_device: None,
+        last_cast_devices: Vec::new(),
         cast_session: None,
         cast_is_playing: false,
         cast_position_secs: 0.0,
@@ -2371,22 +2373,32 @@ fn start_cast_scan(state: &Rc<RefCell<UiState>>) {
 }
 
 fn populate_cast_device_list(state: &Rc<RefCell<UiState>>, devices: Vec<CastDevice>) {
-    let ui = state.borrow();
-
-    if let Some(spinner) = ui.cast_scan_spinner.as_ref() {
-        spinner.stop();
-    }
-
-    let Some(device_box) = ui.cast_device_box.as_ref() else {
+    let (device_box, active_id) = {
+        let mut ui = state.borrow_mut();
+        if let Some(spinner) = ui.cast_scan_spinner.as_ref() {
+            spinner.stop();
+        }
+        ui.last_cast_devices = devices.clone();
+        (
+            ui.cast_device_box.clone(),
+            ui.active_cast_device.as_ref().map(|d| d.id.clone()),
+        )
+    };
+    let Some(device_box) = device_box else {
         return;
     };
+    render_cast_device_list(state, &device_box, &devices, active_id.as_deref());
+}
 
-    // Clear placeholder
+fn render_cast_device_list(
+    state: &Rc<RefCell<UiState>>,
+    device_box: &gtk::Box,
+    devices: &[CastDevice],
+    active_id: Option<&str>,
+) {
     while let Some(child) = device_box.first_child() {
         device_box.remove(&child);
     }
-
-    let active_id = ui.active_cast_device.as_ref().map(|d| d.id.as_str());
 
     if devices.is_empty() {
         let empty = label("No devices found on network", "meta");
@@ -2683,20 +2695,22 @@ fn show_cast_status(state: &Rc<RefCell<UiState>>, msg: &str) {
 }
 
 fn refresh_cast_device_list(state: &Rc<RefCell<UiState>>) {
-    // Re-render the device list with updated active state
-    let ui = state.borrow();
-    let Some(device_box) = ui.cast_device_box.as_ref() else {
+    let (device_box, devices, active_id) = {
+        let ui = state.borrow();
+        (
+            ui.cast_device_box.clone(),
+            ui.last_cast_devices.clone(),
+            ui.active_cast_device.as_ref().map(|d| d.id.clone()),
+        )
+    };
+    let Some(device_box) = device_box else {
         return;
     };
-    let active_id = ui.active_cast_device.as_ref().map(|d| d.id.clone());
-
-    // Collect existing device rows (skip section labels and placeholder)
-    // Instead just trigger a fresh scan
-    drop(ui);
-    // Only re-scan if popover is visible
-    // Since we just changed state, re-populate will be handled next time popover opens
-    // For immediate feedback, update just the button states by rebuilding the list
-    let _ = active_id; // used above
+    // Nothing scanned yet — keep the current placeholder untouched.
+    if devices.is_empty() {
+        return;
+    }
+    render_cast_device_list(state, &device_box, &devices, active_id.as_deref());
 }
 
 fn menu_item_button(icon_name: &str, title: &str) -> gtk::Button {
@@ -9483,10 +9497,10 @@ fn update_playback_position(state: &Rc<RefCell<UiState>>) {
         // This handles streams that never emit GStreamer buffering messages.
         if !position.is_zero() {
             let mut ui = state.borrow_mut();
-            if let Some(playback) = ui.playback.as_mut() {
-                if playback.is_buffering() {
-                    playback.clear_initial_loading();
-                }
+            if let Some(playback) = ui.playback.as_mut()
+                && playback.is_buffering()
+            {
+                playback.clear_initial_loading();
             }
         }
         save_playback_snapshot_if_due(&mut state.borrow_mut());

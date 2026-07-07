@@ -19,15 +19,6 @@ pub struct CastDevice {
     pub av_transport_url: String,
 }
 
-impl CastDevice {
-    pub fn kind_label(&self) -> &'static str {
-        match self.kind {
-            CastDeviceKind::UPnP => "UPnP/DLNA",
-            CastDeviceKind::Chromecast => "Chromecast",
-        }
-    }
-}
-
 // ── CastSession — persistent session for sync'd playback ─────────────────────
 
 pub enum CastCommand {
@@ -53,7 +44,6 @@ pub enum CastEvent {
 }
 
 pub struct CastSession {
-    pub device: CastDevice,
     cmd_tx: mpsc::SyncSender<CastCommand>,
     event_rx: mpsc::Receiver<CastEvent>,
 }
@@ -70,11 +60,7 @@ impl CastSession {
             run_cast_session(host, port, cmd_rx, event_tx);
         });
 
-        Ok(CastSession {
-            device,
-            cmd_tx,
-            event_rx,
-        })
+        Ok(CastSession { cmd_tx, event_rx })
     }
 
     pub fn load(&self, url: String, content_type: String, start_secs: f64) {
@@ -356,10 +342,10 @@ fn wait_for_transport(tls: &mut (impl Read + Write)) -> Result<String, String> {
             );
             continue;
         }
-        if payload.contains("\"RECEIVER_STATUS\"") {
-            if let Some(id) = json_str(&payload, "transportId") {
-                return Ok(id);
-            }
+        if payload.contains("\"RECEIVER_STATUS\"")
+            && let Some(id) = json_str(&payload, "transportId")
+        {
+            return Ok(id);
         }
     }
     Err("timed out waiting for Cast session".into())
@@ -409,18 +395,14 @@ fn discover_upnp(timeout: Duration) -> Vec<CastDevice> {
     let mut buf = [0u8; 4096];
 
     while start.elapsed() < timeout {
-        match socket.recv_from(&mut buf) {
-            Ok((len, _)) => {
-                let resp = std::str::from_utf8(&buf[..len]).unwrap_or("");
-                if let Some(loc) = http_header(resp, "location") {
-                    if seen.insert(loc.to_string()) {
-                        if let Some(dev) = fetch_upnp_device(loc) {
-                            devices.push(dev);
-                        }
-                    }
-                }
+        if let Ok((len, _)) = socket.recv_from(&mut buf) {
+            let resp = std::str::from_utf8(&buf[..len]).unwrap_or("");
+            if let Some(loc) = http_header(resp, "location")
+                && seen.insert(loc.to_string())
+                && let Some(dev) = fetch_upnp_device(loc)
+            {
+                devices.push(dev);
             }
-            Err(_) => {}
         }
     }
     devices
@@ -428,10 +410,10 @@ fn discover_upnp(timeout: Duration) -> Vec<CastDevice> {
 
 fn http_header<'a>(resp: &'a str, name: &str) -> Option<&'a str> {
     for line in resp.lines() {
-        if let Some(colon) = line.find(':') {
-            if line[..colon].trim().eq_ignore_ascii_case(name) {
-                return Some(line[colon + 1..].trim());
-            }
+        if let Some(colon) = line.find(':')
+            && line[..colon].trim().eq_ignore_ascii_case(name)
+        {
+            return Some(line[colon + 1..].trim());
         }
     }
     None
