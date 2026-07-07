@@ -1,123 +1,7 @@
-use adw::prelude::*;
-use gtk::glib::object::IsA;
-use gtk::{Align, Orientation};
-use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, PlatformConfig};
-use std::cell::{Cell, RefCell};
-use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
-use std::fmt;
-use std::path::PathBuf;
-use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-use std::sync::{Mutex, mpsc};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-use crate::cache::{CacheDatabase, JellyfinSession};
-use crate::cast::{self, CastDevice, CastDeviceKind, CastEvent};
-use crate::config;
-use crate::discord::{
-    DiscordPresence, PresenceActivity, PresencePlaybackState, artwork_cache_path,
-};
-use crate::jellyfin::{
-    JellyfinClient, JellyfinClientError, JellyfinItemSummary, JellyfinPlaylist, JellyfinTrack,
-    stream_http_headers_for_token,
-};
-use crate::playback::{
-    ExternalStreamSource, PlaybackEngine, PlaybackEvent, PlaybackRequest, PlaybackState,
-    PlaybackStreamKind, resolve_external_stream_url, session,
-};
-use crate::waveform::{WaveformKey, WaveformSummary};
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-struct UiTrack {
-    item_id: Option<String>,
-    #[serde(default)]
-    date_last_saved: Option<String>,
-    #[serde(default)]
-    album_id: Option<String>,
-    media_source_id: Option<String>,
-    stream_url: Option<String>,
-    #[serde(default)]
-    fallback_stream_url: Option<String>,
-    #[serde(skip)]
-    stream_http_headers: Vec<(String, String)>,
-    artwork_url: Option<String>,
-    thumbnail_artwork_url: Option<String>,
-    title: String,
-    artist: String,
-    #[serde(default)]
-    album_artist: Option<String>,
-    #[serde(default)]
-    artist_images: Vec<UiArtistImage>,
-    album: String,
-    disc_number: Option<i32>,
-    track_number: Option<i32>,
-    #[serde(default)]
-    album_position: Option<usize>,
-    duration: String,
-    quality: String,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-struct UiArtistImage {
-    key: String,
-    name: String,
-    thumbnail_url: String,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-struct UiPlaylist {
-    id: String,
-    name: String,
-    #[serde(default)]
-    date_last_saved: Option<String>,
-    #[serde(default)]
-    artwork_url: Option<String>,
-    #[serde(default)]
-    thumbnail_artwork_url: Option<String>,
-    #[serde(default)]
-    tracks: Vec<UiTrack>,
-}
-
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-struct RadioStation {
-    id: String,
-    name: String,
-    url: String,
-    source: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    icon: Option<String>,
-    #[serde(default)]
-    built_in: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RadioSourceKind {
-    Stream,
-    YouTube,
-    Twitch,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
-enum SortColumn {
-    Title,
-    Artist,
-    Album,
-    Duration,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LibraryPage {
-    Tracks,
-    Albums,
-    Artists,
-    Playlists,
-    Radio,
-    NextUp,
-}
+use super::prelude::*;
 
 #[derive(Debug)]
-enum ImageFetchError {
+pub(crate) enum ImageFetchError {
     Missing,
     HttpStatus(reqwest::StatusCode),
     Request(&'static str),
@@ -136,9 +20,9 @@ impl fmt::Display for ImageFetchError {
 }
 
 #[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
-struct LibraryViewSettings {
-    sort_column: SortColumn,
-    sort_ascending: bool,
+pub(crate) struct LibraryViewSettings {
+    pub(crate) sort_column: SortColumn,
+    pub(crate) sort_ascending: bool,
 }
 
 impl Default for LibraryViewSettings {
@@ -150,480 +34,95 @@ impl Default for LibraryViewSettings {
     }
 }
 
-struct UiState {
-    all_tracks: Vec<UiTrack>,
-    tracks: Vec<UiTrack>,
-    playlists: Vec<UiPlaylist>,
-    radio_stations: Vec<RadioStation>,
-    track_filter_signature: TrackFilterSignature,
-    library_albums: Vec<AlbumSummary>,
-    library_artists: Vec<ArtistSummary>,
-    collection_render_generation: u64,
-    active_page: LibraryPage,
-    album_filter: Option<String>,
-    artist_filter: Option<String>,
-    playlist_filter: Option<String>,
-    collection_detail_title: Option<String>,
-    collection_detail_subtitle: Option<String>,
-    collection_detail_parent_search_query: Option<String>,
-    collection_return_target: Option<CollectionReturnTarget>,
-    collection_parent_return_target: Option<CollectionReturnTarget>,
-    selected_index: usize,
-    search_query: String,
-    connection_generation: u64,
-    jellyfin_connected: bool,
-    sort_column: SortColumn,
-    sort_ascending: bool,
-    keep_playing_while_closed: bool,
-    animations_enabled: bool,
-    font_mono: bool,
-    playback_session: session::PlaybackSession<UiTrack>,
-    track_indicators: Vec<(String, gtk::Image)>,
-    last_playback_snapshot_at: Option<Instant>,
-    library_stack: Option<gtk::Stack>,
-    album_grid: Option<gtk::FlowBox>,
-    artist_grid: Option<gtk::FlowBox>,
-    playlist_grid: Option<gtk::FlowBox>,
-    album_grid_scroll_value: f64,
-    artist_grid_scroll_value: f64,
-    playlist_grid_scroll_value: f64,
-    radio_grid: Option<gtk::FlowBox>,
-    detail_header: Option<gtk::Box>,
-    detail_title_label: Option<gtk::Label>,
-    detail_subtitle_label: Option<gtk::Label>,
-    nav_list: Option<gtk::ListBox>,
-    nav_track_count: Option<gtk::Label>,
-    nav_album_count: Option<gtk::Label>,
-    nav_artist_count: Option<gtk::Label>,
-    nav_playlist_count: Option<gtk::Label>,
-    nav_radio_count: Option<gtk::Label>,
-    track_model: gtk::StringList,
-    track_selection: Option<gtk::SingleSelection>,
-    track_stack: Option<gtk::Stack>,
-    track_empty: Option<gtk::Label>,
-    track_empty_detail: Option<gtk::Label>,
-    now_title: gtk::Label,
-    now_meta: gtk::Label,
-    playback_status: gtk::Label,
-    page_summary: gtk::Label,
-    connection_status: gtk::Label,
-    connection_detail: gtk::Label,
-    sync_spinner: Option<gtk::Spinner>,
-    connection_card: Option<gtk::Box>,
-    connection_form_status: Option<gtk::Label>,
-    connection_server_entry: Option<gtk::Entry>,
-    connection_username_entry: Option<gtk::Entry>,
-    connection_password_entry: Option<gtk::PasswordEntry>,
-    radio_name_entry: Option<gtk::Entry>,
-    radio_url_entry: Option<gtk::Entry>,
-    radio_icon_entry: Option<gtk::Entry>,
-    search_entry: Option<gtk::SearchEntry>,
-    cover_art: Option<gtk::Image>,
-    play_button: Option<gtk::Button>,
-    shuffle_button: Option<gtk::Button>,
-    refresh_button: Option<gtk::Button>,
-    reconnect_button: Option<gtk::Button>,
-    queue_view: Option<Rc<QueueView>>,
-    sidebar_queue_card: Option<gtk::Box>,
-    next_up_view: Option<Rc<NextUpPageView>>,
-    wave_area: Option<gtk::DrawingArea>,
-    elapsed_label: gtk::Label,
-    remaining_label: gtk::Label,
-    waveform_status: gtk::Label,
-    waveform: Rc<RefCell<WaveformVisual>>,
-    playback: Option<PlaybackEngine>,
-    loading_spinner: Option<gtk::Spinner>,
-    mpris: Option<MediaControls>,
-    discord_presence: Option<DiscordPresence>,
-    cast_button: Option<gtk::MenuButton>,
-    cast_device_box: Option<gtk::Box>,
-    cast_status_label: Option<gtk::Label>,
-    cast_scan_spinner: Option<gtk::Spinner>,
-    active_cast_device: Option<CastDevice>,
-    last_cast_device: Option<CastDevice>,
-    last_cast_devices: Vec<CastDevice>,
-    cast_session: Option<cast::CastSession>,
-    cast_is_playing: bool,
-    cast_position_secs: f64,
-    cast_duration_secs: f64,
-}
-
 #[derive(Debug)]
-struct InvisibleSearchState {
-    query: String,
-    last_input_at: Instant,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct TrackFilterSignature {
-    album_filter: Option<String>,
-    artist_filter: Option<String>,
-    playlist_filter: Option<String>,
-    search_query: String,
-    sort_column: SortColumn,
-    sort_ascending: bool,
-}
-
-impl UiState {
-    fn is_track_list_visible(&self) -> bool {
-        self.active_page == LibraryPage::Tracks
-            || self.album_filter.is_some()
-            || self.playlist_filter.is_some()
-    }
-
-    fn current_track_filter_signature(&self) -> TrackFilterSignature {
-        TrackFilterSignature {
-            album_filter: self.album_filter.clone(),
-            artist_filter: self.artist_filter.clone(),
-            playlist_filter: self.playlist_filter.clone(),
-            search_query: self.search_query.clone(),
-            sort_column: self.sort_column,
-            sort_ascending: self.sort_ascending,
-        }
-    }
-
-    fn track_filter_is_current(&self) -> bool {
-        self.track_filter_signature == self.current_track_filter_signature()
-    }
+pub(crate) struct InvisibleSearchState {
+    pub(crate) query: String,
+    pub(crate) last_input_at: Instant,
 }
 
 #[derive(Clone, Debug)]
-struct WaveformVisual {
-    peaks: Vec<f32>,
-    progress: f64,
-    loaded_key: Option<WaveformKey>,
-    loading_key: Option<WaveformKey>,
+pub(crate) struct WaveformVisual {
+    pub(crate) peaks: Vec<f32>,
+    pub(crate) progress: f64,
+    pub(crate) loaded_key: Option<WaveformKey>,
+    pub(crate) loading_key: Option<WaveformKey>,
 }
 
 #[derive(Clone, Debug)]
-struct ConnectionPayload {
-    session: JellyfinSession,
-    tracks: Vec<UiTrack>,
-    playlists: Vec<UiPlaylist>,
+pub(crate) struct ConnectionPayload {
+    pub(crate) session: JellyfinSession,
+    pub(crate) tracks: Vec<UiTrack>,
+    pub(crate) playlists: Vec<UiPlaylist>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
-struct CachedLibrary {
-    tracks: Vec<UiTrack>,
+pub(crate) struct CachedLibrary {
+    pub(crate) tracks: Vec<UiTrack>,
     #[serde(default)]
-    playlists: Vec<UiPlaylist>,
+    pub(crate) playlists: Vec<UiPlaylist>,
 }
 
-enum ConnectionMessage {
+pub(crate) enum ConnectionMessage {
     Authenticated(JellyfinSession),
     Status(String),
     Progress { loaded: usize, total: Option<usize> },
     Finished(Result<ConnectionPayload, String>),
 }
 
-const PLAYER_ACTION_EDGE_INSET: i32 = 0;
-const LEFT_SIDEBAR_CONTENT_WIDTH: i32 = 220;
-const SIDEBAR_COVER_ART_IMAGE_SIZE: u32 = LEFT_SIDEBAR_CONTENT_WIDTH as u32;
-const LEFT_SIDEBAR_WIDTH: i32 = LEFT_SIDEBAR_CONTENT_WIDTH + 20;
-const ACTION_PANEL_WIDTH: i32 = 130;
-const ALBUM_ART_SIZE: i32 = 168;
-const COLLECTION_TILE_WIDTH: i32 = 184;
-const ARTIST_ART_SIZE: i32 = 148;
-const RADIO_CARD_CONTENT_WIDTH: i32 = 154;
-const RADIO_GRID_COLUMN_GAP: i32 = 14;
-const RADIO_DEFAULT_ICON: &str = "\u{EFBC}";
-const COLLECTION_ARTWORK_INITIAL_DELAY_MS: u64 = 24;
-const COLLECTION_ARTWORK_STAGGER_MS: u64 = 8;
-const COLLECTION_ARTWORK_MAX_STAGGERED_ITEMS: usize = 160;
-const COLLECTION_TILE_INITIAL_BATCH: usize = 24;
-const COLLECTION_TILE_IDLE_BATCH: usize = 24;
-const COLLECTION_RETURN_HIGHLIGHT_MS: u64 = 850;
-const INVISIBLE_SEARCH_TIMEOUT: Duration = Duration::from_millis(1_200);
-const NEXT_UP_PAGE_LIMIT: usize = 50;
-const RADIO_STATIONS_KEY: &str = "radio.stations";
-static CONNECTION_GENERATION: AtomicU64 = AtomicU64::new(0);
-static CACHE_RESET_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) const PLAYER_ACTION_EDGE_INSET: i32 = 0;
 
-struct QueueView {
-    empty: gtk::Label,
-    rows: Vec<QueueRow>,
+pub(crate) const ACTION_PANEL_WIDTH: i32 = 130;
+
+pub(crate) const ALBUM_ART_SIZE: i32 = 168;
+
+pub(crate) const COLLECTION_TILE_WIDTH: i32 = 184;
+
+pub(crate) const ARTIST_ART_SIZE: i32 = 148;
+
+pub(crate) const RADIO_CARD_CONTENT_WIDTH: i32 = 154;
+
+pub(crate) const RADIO_GRID_COLUMN_GAP: i32 = 14;
+
+pub(crate) const COLLECTION_ARTWORK_INITIAL_DELAY_MS: u64 = 24;
+
+pub(crate) const COLLECTION_ARTWORK_STAGGER_MS: u64 = 8;
+
+pub(crate) const COLLECTION_ARTWORK_MAX_STAGGERED_ITEMS: usize = 160;
+
+pub(crate) const COLLECTION_TILE_INITIAL_BATCH: usize = 24;
+
+pub(crate) const COLLECTION_TILE_IDLE_BATCH: usize = 24;
+
+pub(crate) const COLLECTION_RETURN_HIGHLIGHT_MS: u64 = 850;
+
+pub(crate) const INVISIBLE_SEARCH_TIMEOUT: Duration = Duration::from_millis(1_200);
+
+pub(crate) const NEXT_UP_PAGE_LIMIT: usize = 50;
+
+pub(crate) const RADIO_STATIONS_KEY: &str = "radio.stations";
+
+pub(crate) static CONNECTION_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) static CACHE_RESET_LOCK: Mutex<()> = Mutex::new(());
+
+pub(crate) struct QueueView {
+    pub(crate) empty: gtk::Label,
+    pub(crate) rows: Vec<QueueRow>,
 }
 
-struct QueueRow {
-    button: gtk::Button,
-    art: gtk::Image,
-    title: gtk::Label,
-    artist: gtk::Label,
-    track_index: Rc<RefCell<Option<usize>>>,
-    artwork_url: Rc<RefCell<Option<String>>>,
+pub(crate) struct QueueRow {
+    pub(crate) button: gtk::Button,
+    pub(crate) art: gtk::Image,
+    pub(crate) title: gtk::Label,
+    pub(crate) artist: gtk::Label,
+    pub(crate) track_index: Rc<RefCell<Option<usize>>>,
+    pub(crate) artwork_url: Rc<RefCell<Option<String>>>,
 }
 
-struct NextUpPageView {
-    empty: gtk::Box,
-    list: gtk::Box,
-    rows: Rc<RefCell<Vec<gtk::Button>>>,
-}
-
-impl RadioStation {
-    fn built_in(name: &str, url: &str, icon: &str) -> Self {
-        Self {
-            id: format!("built-in:{name}"),
-            name: name.to_string(),
-            url: url.to_string(),
-            source: "stream".to_string(),
-            icon: Some(icon.to_string()),
-            built_in: true,
-        }
-    }
-
-    fn source_kind(&self) -> RadioSourceKind {
-        radio_source_kind_from_station(&self.source, &self.url)
-    }
-
-    fn icon_glyph(&self) -> &str {
-        self.icon
-            .as_deref()
-            .filter(|icon| !icon.trim().is_empty())
-            .unwrap_or_else(|| default_radio_icon_for_kind(self.source_kind()))
-    }
-
-    fn source_label(&self) -> &'static str {
-        self.source_kind().label()
-    }
-
-    fn mpris_source_label(&self) -> &'static str {
-        self.source_kind().mpris_label()
-    }
-}
-
-impl RadioSourceKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Stream => "stream",
-            Self::YouTube => "youtube",
-            Self::Twitch => "twitch",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Stream => "Stream",
-            Self::YouTube => "YouTube Live",
-            Self::Twitch => "Twitch Live",
-        }
-    }
-
-    fn mpris_label(self) -> &'static str {
-        match self {
-            Self::Stream => "Radio Stream",
-            Self::YouTube => "Youtube Stream",
-            Self::Twitch => "Twitch Stream",
-        }
-    }
-
-    fn external_source(self) -> Option<ExternalStreamSource> {
-        match self {
-            Self::Stream => None,
-            Self::YouTube => Some(ExternalStreamSource::YouTube),
-            Self::Twitch => Some(ExternalStreamSource::Twitch),
-        }
-    }
-}
-
-fn radio_source_kind_from_station(source: &str, raw_url: &str) -> RadioSourceKind {
-    match source {
-        "youtube" => RadioSourceKind::YouTube,
-        "twitch" => RadioSourceKind::Twitch,
-        _ => raw_url
-            .parse::<url::Url>()
-            .ok()
-            .map(|url| radio_source_kind_for_url(&url))
-            .unwrap_or(RadioSourceKind::Stream),
-    }
-}
-
-fn radio_source_kind_for_url(url: &url::Url) -> RadioSourceKind {
-    let Some(host) = url
-        .host_str()
-        .map(|host| host.trim_end_matches('.').to_ascii_lowercase())
-    else {
-        return RadioSourceKind::Stream;
-    };
-    let host = host.strip_prefix("www.").unwrap_or(host.as_str());
-
-    if host == "youtu.be"
-        || host == "youtube.com"
-        || host.ends_with(".youtube.com")
-        || host == "youtube-nocookie.com"
-        || host.ends_with(".youtube-nocookie.com")
-    {
-        RadioSourceKind::YouTube
-    } else if host == "twitch.tv" || host.ends_with(".twitch.tv") {
-        RadioSourceKind::Twitch
-    } else {
-        RadioSourceKind::Stream
-    }
-}
-
-impl UiTrack {
-    fn from_jellyfin(track: JellyfinTrack, client: &JellyfinClient) -> Self {
-        let artist_items = track.artist_items.clone();
-        let album_artist_items = track.album_artists.clone();
-        let artist = if !track.artists.is_empty() {
-            track.artists.join(", ")
-        } else if !artist_items.is_empty() {
-            artist_items
-                .iter()
-                .map(|artist| artist.name.clone())
-                .collect::<Vec<_>>()
-                .join(", ")
-        } else {
-            "Unknown Artist".to_string()
-        };
-        let album_artist = track.album_artist.clone();
-        let artist_images =
-            artist_image_urls(album_artist_items.iter().chain(artist_items.iter()), client);
-
-        let quality = track
-            .container
-            .or_else(|| {
-                track
-                    .media_sources
-                    .first()
-                    .and_then(|source| source.container.clone())
-            })
-            .unwrap_or_else(|| "stream".to_string())
-            .split(',')
-            .next()
-            .unwrap_or("stream")
-            .trim()
-            .to_uppercase();
-        let stream_url = client
-            .item_direct_stream_url(&track.id)
-            .ok()
-            .map(|url| url.to_string());
-        let fallback_stream_url = client
-            .item_transcode_stream_url(&track.id)
-            .ok()
-            .map(|url| url.to_string());
-        let stream_http_headers = client.stream_http_headers();
-        let media_source_id = track
-            .media_sources
-            .first()
-            .map(|source| source.id.clone())
-            .unwrap_or_else(|| track.id.clone());
-        let artwork_item_id = track.album_id.as_deref().unwrap_or(&track.id);
-        let artwork_url = client
-            .item_image_url(artwork_item_id, "Primary")
-            .ok()
-            .map(|url| url.to_string());
-        let thumbnail_artwork_url = client
-            .item_image_url_with_size(
-                artwork_item_id,
-                "Primary",
-                Some(SIDEBAR_COVER_ART_IMAGE_SIZE),
-            )
-            .ok()
-            .map(|url| url.to_string());
-
-        Self {
-            item_id: Some(track.id),
-            date_last_saved: track.date_last_saved,
-            album_id: track.album_id,
-            media_source_id: Some(media_source_id),
-            stream_url,
-            fallback_stream_url,
-            stream_http_headers,
-            artwork_url,
-            thumbnail_artwork_url,
-            title: track.name,
-            artist,
-            album_artist,
-            artist_images,
-            album: track.album.unwrap_or_else(|| "Unknown Album".to_string()),
-            disc_number: track.parent_index_number,
-            track_number: track.index_number,
-            album_position: None,
-            duration: format_runtime(track.run_time_ticks),
-            quality,
-        }
-    }
-
-    fn artist_thumbnail_url_for(&self, artist: &str) -> Option<String> {
-        let key = artist_key(artist);
-        self.artist_images
-            .iter()
-            .find(|image| image.key == key)
-            .or_else(|| {
-                if artist == self.artist && self.artist_images.len() == 1 {
-                    self.artist_images.first()
-                } else {
-                    None
-                }
-            })
-            .map(|image| image.thumbnail_url.clone())
-    }
-}
-
-impl UiPlaylist {
-    fn from_jellyfin(
-        playlist: JellyfinPlaylist,
-        tracks: Vec<UiTrack>,
-        client: &JellyfinClient,
-    ) -> Self {
-        let artwork_url = client
-            .item_image_url(&playlist.id, "Primary")
-            .ok()
-            .map(|url| url.to_string());
-        let thumbnail_artwork_url = client
-            .item_image_url_with_size(&playlist.id, "Primary", Some(160))
-            .ok()
-            .map(|url| url.to_string())
-            .or_else(|| {
-                tracks
-                    .iter()
-                    .find_map(|track| track.thumbnail_artwork_url.clone())
-            });
-
-        Self {
-            id: playlist.id,
-            name: playlist.name,
-            date_last_saved: playlist.date_last_saved,
-            artwork_url,
-            thumbnail_artwork_url,
-            tracks,
-        }
-    }
-}
-
-fn artist_image_urls<'a>(
-    artists: impl Iterator<Item = &'a crate::jellyfin::JellyfinNameId>,
-    client: &JellyfinClient,
-) -> Vec<UiArtistImage> {
-    let mut images = Vec::new();
-    for artist in artists {
-        let key = artist_key(&artist.name);
-        if images.iter().any(|image: &UiArtistImage| image.key == key) {
-            continue;
-        }
-        if let Some(thumbnail_url) = client
-            .item_image_url_with_size(&artist.id, "Primary", Some(160))
-            .ok()
-            .map(|url| url.to_string())
-        {
-            images.push(UiArtistImage {
-                key,
-                name: artist.name.clone(),
-                thumbnail_url,
-            });
-        }
-    }
-    images
-}
-
-fn format_runtime(run_time_ticks: Option<i64>) -> String {
-    let Some(ticks) = run_time_ticks else {
-        return "--:--".to_string();
-    };
-    let total_seconds = (ticks / 10_000_000).max(0);
-    let minutes = total_seconds / 60;
-    let seconds = total_seconds % 60;
-    format!("{minutes}:{seconds:02}")
+pub(crate) struct NextUpPageView {
+    pub(crate) empty: gtk::Box,
+    pub(crate) list: gtk::Box,
+    pub(crate) rows: Rc<RefCell<Vec<gtk::Button>>>,
 }
 
 pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
@@ -775,7 +274,10 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
     window
 }
 
-fn connect_window_close_request(window: &adw::ApplicationWindow, state: Rc<RefCell<UiState>>) {
+pub(crate) fn connect_window_close_request(
+    window: &adw::ApplicationWindow,
+    state: Rc<RefCell<UiState>>,
+) {
     window.connect_close_request(move |window| {
         if state.borrow().keep_playing_while_closed {
             window.set_visible(false);
@@ -789,7 +291,7 @@ fn connect_window_close_request(window: &adw::ApplicationWindow, state: Rc<RefCe
     });
 }
 
-fn connect_app_shortcuts(root: &gtk::Box, state: Rc<RefCell<UiState>>) {
+pub(crate) fn connect_app_shortcuts(root: &gtk::Box, state: Rc<RefCell<UiState>>) {
     let controller = gtk::EventControllerKey::new();
     controller.set_propagation_phase(gtk::PropagationPhase::Capture);
     let invisible_search = Rc::new(RefCell::new(InvisibleSearchState {
@@ -926,7 +428,9 @@ fn connect_app_shortcuts(root: &gtk::Box, state: Rc<RefCell<UiState>>) {
     root.add_controller(controller);
 }
 
-fn active_invisible_search_query(search: &Rc<RefCell<InvisibleSearchState>>) -> Option<String> {
+pub(crate) fn active_invisible_search_query(
+    search: &Rc<RefCell<InvisibleSearchState>>,
+) -> Option<String> {
     let search = search.borrow();
     if search.query.is_empty()
         || Instant::now().duration_since(search.last_input_at) > INVISIBLE_SEARCH_TIMEOUT
@@ -937,7 +441,7 @@ fn active_invisible_search_query(search: &Rc<RefCell<InvisibleSearchState>>) -> 
     Some(search.query.clone())
 }
 
-fn search_entry_has_focus(state: &Rc<RefCell<UiState>>) -> bool {
+pub(crate) fn search_entry_has_focus(state: &Rc<RefCell<UiState>>) -> bool {
     state
         .borrow()
         .search_entry
@@ -945,14 +449,14 @@ fn search_entry_has_focus(state: &Rc<RefCell<UiState>>) -> bool {
         .is_some_and(widget_has_focus_within)
 }
 
-fn clear_search_entry(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn clear_search_entry(state: &Rc<RefCell<UiState>>) {
     let entry = state.borrow().search_entry.clone();
     if let Some(entry) = entry {
         entry.set_text("");
     }
 }
 
-fn text_input_has_focus(state: &Rc<RefCell<UiState>>) -> bool {
+pub(crate) fn text_input_has_focus(state: &Rc<RefCell<UiState>>) -> bool {
     let ui = state.borrow();
     ui.search_entry
         .as_ref()
@@ -979,7 +483,7 @@ fn text_input_has_focus(state: &Rc<RefCell<UiState>>) -> bool {
             .is_some_and(widget_has_focus_within)
 }
 
-fn widget_has_focus_within(widget: &impl IsA<gtk::Widget>) -> bool {
+pub(crate) fn widget_has_focus_within(widget: &impl IsA<gtk::Widget>) -> bool {
     let widget = widget.as_ref();
     widget.has_focus()
         || widget.is_focus()
@@ -988,7 +492,7 @@ fn widget_has_focus_within(widget: &impl IsA<gtk::Widget>) -> bool {
             .is_some_and(|child| widget_has_focus_within(&child))
 }
 
-fn navigate_invisible_search(state: &Rc<RefCell<UiState>>, query: &str) -> bool {
+pub(crate) fn navigate_invisible_search(state: &Rc<RefCell<UiState>>, query: &str) -> bool {
     let normalized_query = query.trim().to_lowercase();
     if normalized_query.is_empty() {
         return false;
@@ -1060,7 +564,10 @@ fn navigate_invisible_search(state: &Rc<RefCell<UiState>>, query: &str) -> bool 
     true
 }
 
-fn activate_invisible_collection_match(state: &Rc<RefCell<UiState>>, query: &str) -> bool {
+pub(crate) fn activate_invisible_collection_match(
+    state: &Rc<RefCell<UiState>>,
+    query: &str,
+) -> bool {
     let normalized_query = query.trim().to_lowercase();
     if normalized_query.is_empty() {
         return false;
@@ -1115,65 +622,7 @@ fn activate_invisible_collection_match(state: &Rc<RefCell<UiState>>, query: &str
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum VisibleLibraryContent {
-    Tracks,
-    Albums,
-    Artists,
-    Playlists,
-    Radio,
-    NextUp,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum NavDirection {
-    DrillForward,
-    DrillBackward,
-    PageForward,
-    PageBackward,
-}
-
-#[derive(Clone, Debug)]
-struct CollectionReturnTarget {
-    content: VisibleLibraryContent,
-    key: String,
-}
-
-fn visible_library_content(ui: &UiState) -> VisibleLibraryContent {
-    let show_detail =
-        ui.album_filter.is_some() || ui.artist_filter.is_some() || ui.playlist_filter.is_some();
-    match (ui.active_page, show_detail) {
-        (LibraryPage::Tracks, _) => VisibleLibraryContent::Tracks,
-        (LibraryPage::Albums, false) => VisibleLibraryContent::Albums,
-        (LibraryPage::Albums, true) => VisibleLibraryContent::Tracks,
-        (LibraryPage::Artists, false) => VisibleLibraryContent::Artists,
-        (LibraryPage::Artists, true) if ui.album_filter.is_none() => VisibleLibraryContent::Albums,
-        (LibraryPage::Artists, true) => VisibleLibraryContent::Tracks,
-        (LibraryPage::Playlists, false) => VisibleLibraryContent::Playlists,
-        (LibraryPage::Playlists, true) => VisibleLibraryContent::Tracks,
-        (LibraryPage::Radio, _) => VisibleLibraryContent::Radio,
-        (LibraryPage::NextUp, _) => VisibleLibraryContent::NextUp,
-    }
-}
-
-fn visible_album_summaries(ui: &UiState) -> Vec<AlbumSummary> {
-    if ui.active_page == LibraryPage::Artists {
-        ui.artist_filter
-            .as_deref()
-            .map(|selected_artist_key| {
-                album_summaries_for_artist_from(
-                    &ui.library_albums,
-                    selected_artist_key,
-                    &ui.search_query,
-                )
-            })
-            .unwrap_or_else(|| filter_album_summaries(&ui.library_albums, &ui.search_query))
-    } else {
-        filter_album_summaries(&ui.library_albums, &ui.search_query)
-    }
-}
-
-fn invisible_track_search_rank(track: &UiTrack, query: &str) -> Option<(u8, u8, usize)> {
+pub(crate) fn invisible_track_search_rank(track: &UiTrack, query: &str) -> Option<(u8, u8, usize)> {
     [
         (track.title.as_str(), 0),
         (track.artist.as_str(), 1),
@@ -1187,7 +636,7 @@ fn invisible_track_search_rank(track: &UiTrack, query: &str) -> Option<(u8, u8, 
     .min()
 }
 
-fn invisible_search_rank<'a>(
+pub(crate) fn invisible_search_rank<'a>(
     texts: impl IntoIterator<Item = &'a str>,
     query: &str,
 ) -> Option<(u8, u8, usize)> {
@@ -1201,7 +650,7 @@ fn invisible_search_rank<'a>(
         .min()
 }
 
-fn invisible_text_search_rank(text: &str, query: &str) -> Option<(u8, usize)> {
+pub(crate) fn invisible_text_search_rank(text: &str, query: &str) -> Option<(u8, usize)> {
     let normalized_text = text.to_lowercase();
     let full_match_index = normalized_text.find(query)?;
     let word_match_index = normalized_text
@@ -1219,7 +668,7 @@ fn invisible_text_search_rank(text: &str, query: &str) -> Option<(u8, usize)> {
     Some((rank, full_match_index))
 }
 
-fn is_word_boundary(text: &str, index: usize) -> bool {
+pub(crate) fn is_word_boundary(text: &str, index: usize) -> bool {
     if index == 0 {
         return true;
     }
@@ -1230,7 +679,7 @@ fn is_word_boundary(text: &str, index: usize) -> bool {
         .is_none_or(|character| !character.is_alphanumeric())
 }
 
-fn select_track_for_navigation(state: &Rc<RefCell<UiState>>, index: usize) {
+pub(crate) fn select_track_for_navigation(state: &Rc<RefCell<UiState>>, index: usize) {
     let selected_index = {
         let mut ui = state.borrow_mut();
         if ui.tracks.is_empty() {
@@ -1253,7 +702,7 @@ fn select_track_for_navigation(state: &Rc<RefCell<UiState>>, index: usize) {
     load_selected_waveform(state);
 }
 
-fn scroll_track_list_to_index(state: &Rc<RefCell<UiState>>, index: usize) {
+pub(crate) fn scroll_track_list_to_index(state: &Rc<RefCell<UiState>>, index: usize) {
     let (stack, track_count) = {
         let ui = state.borrow();
         (ui.track_stack.clone(), ui.tracks.len())
@@ -1275,7 +724,7 @@ fn scroll_track_list_to_index(state: &Rc<RefCell<UiState>>, index: usize) {
     }
 }
 
-fn focus_collection_item(state: &Rc<RefCell<UiState>>, index: usize) {
+pub(crate) fn focus_collection_item(state: &Rc<RefCell<UiState>>, index: usize) {
     let (grid, visible_content) = {
         let ui = state.borrow();
         let grid = match visible_library_content(&ui) {
@@ -1309,7 +758,7 @@ fn focus_collection_item(state: &Rc<RefCell<UiState>>, index: usize) {
     }
 }
 
-fn escape_back_or_top(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn escape_back_or_top(state: &Rc<RefCell<UiState>>) {
     if has_collection_detail_open(state) {
         return_to_collection_grid(state);
     } else {
@@ -1317,12 +766,12 @@ fn escape_back_or_top(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn has_collection_detail_open(state: &Rc<RefCell<UiState>>) -> bool {
+pub(crate) fn has_collection_detail_open(state: &Rc<RefCell<UiState>>) -> bool {
     let ui = state.borrow();
     ui.album_filter.is_some() || ui.artist_filter.is_some() || ui.playlist_filter.is_some()
 }
 
-fn focus_active_content(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn focus_active_content(state: &Rc<RefCell<UiState>>) {
     if state.borrow().is_track_list_visible() {
         focus_track_list(state);
     } else {
@@ -1330,7 +779,7 @@ fn focus_active_content(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn focus_active_content_top(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn focus_active_content_top(state: &Rc<RefCell<UiState>>) {
     if state.borrow().is_track_list_visible() {
         let has_tracks = !state.borrow().tracks.is_empty();
         if has_tracks {
@@ -1345,7 +794,7 @@ fn focus_active_content_top(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn focus_track_list(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn focus_track_list(state: &Rc<RefCell<UiState>>) {
     let Some(scroll) = track_list_scroll(state) else {
         return;
     };
@@ -1360,13 +809,13 @@ fn focus_track_list(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn scroll_track_list_to_top(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn scroll_track_list_to_top(state: &Rc<RefCell<UiState>>) {
     if let Some(scroll) = track_list_scroll(state) {
         scroll.vadjustment().set_value(0.0);
     }
 }
 
-fn track_list_scroll(state: &Rc<RefCell<UiState>>) -> Option<gtk::ScrolledWindow> {
+pub(crate) fn track_list_scroll(state: &Rc<RefCell<UiState>>) -> Option<gtk::ScrolledWindow> {
     state
         .borrow()
         .track_stack
@@ -1375,7 +824,7 @@ fn track_list_scroll(state: &Rc<RefCell<UiState>>) -> Option<gtk::ScrolledWindow
         .and_then(|child| child.downcast::<gtk::ScrolledWindow>().ok())
 }
 
-fn scroll_active_collection_grid_to_top(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn scroll_active_collection_grid_to_top(state: &Rc<RefCell<UiState>>) {
     let Some(grid) = active_collection_grid(state) else {
         return;
     };
@@ -1385,7 +834,7 @@ fn scroll_active_collection_grid_to_top(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn collection_grid_scroll(grid: &gtk::FlowBox) -> Option<gtk::ScrolledWindow> {
+pub(crate) fn collection_grid_scroll(grid: &gtk::FlowBox) -> Option<gtk::ScrolledWindow> {
     let mut parent = grid.parent();
     while let Some(widget) = parent {
         if let Ok(scroll) = widget.clone().downcast::<gtk::ScrolledWindow>() {
@@ -1396,7 +845,7 @@ fn collection_grid_scroll(grid: &gtk::FlowBox) -> Option<gtk::ScrolledWindow> {
     None
 }
 
-fn activate_focused_collection_item(state: &Rc<RefCell<UiState>>) -> bool {
+pub(crate) fn activate_focused_collection_item(state: &Rc<RefCell<UiState>>) -> bool {
     let Some(grid) = active_collection_grid(state) else {
         return false;
     };
@@ -1420,13 +869,13 @@ fn activate_focused_collection_item(state: &Rc<RefCell<UiState>>) -> bool {
     false
 }
 
-fn collection_child_button(child: &gtk::FlowBoxChild) -> Option<gtk::Button> {
+pub(crate) fn collection_child_button(child: &gtk::FlowBoxChild) -> Option<gtk::Button> {
     child
         .first_child()
         .and_then(|widget| widget.downcast::<gtk::Button>().ok())
 }
 
-fn active_collection_grid(state: &Rc<RefCell<UiState>>) -> Option<gtk::FlowBox> {
+pub(crate) fn active_collection_grid(state: &Rc<RefCell<UiState>>) -> Option<gtk::FlowBox> {
     let ui = state.borrow();
     match visible_library_content(&ui) {
         VisibleLibraryContent::Albums => ui.album_grid.clone(),
@@ -1437,7 +886,7 @@ fn active_collection_grid(state: &Rc<RefCell<UiState>>) -> Option<gtk::FlowBox> 
     }
 }
 
-fn active_collection_grid_and_content(
+pub(crate) fn active_collection_grid_and_content(
     state: &Rc<RefCell<UiState>>,
 ) -> Option<(VisibleLibraryContent, gtk::FlowBox)> {
     let ui = state.borrow();
@@ -1452,7 +901,7 @@ fn active_collection_grid_and_content(
     Some((content, grid))
 }
 
-fn collection_return_target_for_key(
+pub(crate) fn collection_return_target_for_key(
     state: &Rc<RefCell<UiState>>,
     key: String,
 ) -> Option<CollectionReturnTarget> {
@@ -1460,7 +909,7 @@ fn collection_return_target_for_key(
     Some(CollectionReturnTarget { content, key })
 }
 
-fn save_active_collection_scroll_position(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn save_active_collection_scroll_position(state: &Rc<RefCell<UiState>>) {
     let Some((content, grid)) = active_collection_grid_and_content(state) else {
         return;
     };
@@ -1472,7 +921,7 @@ fn save_active_collection_scroll_position(state: &Rc<RefCell<UiState>>) {
     set_collection_scroll_value(&mut ui, content, value);
 }
 
-fn restore_active_collection_scroll_position(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn restore_active_collection_scroll_position(state: &Rc<RefCell<UiState>>) {
     let Some((content, grid)) = active_collection_grid_and_content(state) else {
         return;
     };
@@ -1486,7 +935,11 @@ fn restore_active_collection_scroll_position(state: &Rc<RefCell<UiState>>) {
     restore_collection_scroll(scroll, value);
 }
 
-fn set_collection_scroll_value(ui: &mut UiState, content: VisibleLibraryContent, value: f64) {
+pub(crate) fn set_collection_scroll_value(
+    ui: &mut UiState,
+    content: VisibleLibraryContent,
+    value: f64,
+) {
     match content {
         VisibleLibraryContent::Albums => ui.album_grid_scroll_value = value,
         VisibleLibraryContent::Artists => ui.artist_grid_scroll_value = value,
@@ -1497,7 +950,7 @@ fn set_collection_scroll_value(ui: &mut UiState, content: VisibleLibraryContent,
     }
 }
 
-fn collection_scroll_value(ui: &UiState, content: VisibleLibraryContent) -> f64 {
+pub(crate) fn collection_scroll_value(ui: &UiState, content: VisibleLibraryContent) -> f64 {
     match content {
         VisibleLibraryContent::Albums => ui.album_grid_scroll_value,
         VisibleLibraryContent::Artists => ui.artist_grid_scroll_value,
@@ -1508,7 +961,7 @@ fn collection_scroll_value(ui: &UiState, content: VisibleLibraryContent) -> f64 
     }
 }
 
-fn restore_collection_scroll(scroll: gtk::ScrolledWindow, value: f64) {
+pub(crate) fn restore_collection_scroll(scroll: gtk::ScrolledWindow, value: f64) {
     let attempts = Rc::new(Cell::new(0usize));
     gtk::glib::idle_add_local(move || {
         let adj = scroll.vadjustment();
@@ -1525,7 +978,7 @@ fn restore_collection_scroll(scroll: gtk::ScrolledWindow, value: f64) {
     });
 }
 
-fn pulse_collection_return_target(
+pub(crate) fn pulse_collection_return_target(
     state: &Rc<RefCell<UiState>>,
     target: Option<CollectionReturnTarget>,
 ) {
@@ -1557,7 +1010,7 @@ fn pulse_collection_return_target(
     });
 }
 
-fn collection_return_target_button(
+pub(crate) fn collection_return_target_button(
     state: &Rc<RefCell<UiState>>,
     target: &CollectionReturnTarget,
 ) -> Option<gtk::Button> {
@@ -1575,7 +1028,7 @@ fn collection_return_target_button(
         .and_then(|child| collection_child_button(&child))
 }
 
-fn collection_grid_for_content(
+pub(crate) fn collection_grid_for_content(
     ui: &UiState,
     content: VisibleLibraryContent,
 ) -> Option<gtk::FlowBox> {
@@ -1589,7 +1042,10 @@ fn collection_grid_for_content(
     }
 }
 
-fn collection_return_target_index(ui: &UiState, target: &CollectionReturnTarget) -> Option<usize> {
+pub(crate) fn collection_return_target_index(
+    ui: &UiState,
+    target: &CollectionReturnTarget,
+) -> Option<usize> {
     match target.content {
         VisibleLibraryContent::Albums => visible_album_summaries(ui)
             .iter()
@@ -1608,7 +1064,7 @@ fn collection_return_target_index(ui: &UiState, target: &CollectionReturnTarget)
     }
 }
 
-fn setup_mpris(state: Rc<RefCell<UiState>>) {
+pub(crate) fn setup_mpris(state: Rc<RefCell<UiState>>) {
     let config = PlatformConfig {
         dbus_name: "org.mpris.MediaPlayer2.gtunes",
         display_name: "gTunes",
@@ -1637,7 +1093,10 @@ fn setup_mpris(state: Rc<RefCell<UiState>>) {
     }
 }
 
-fn poll_mpris_events(receiver: mpsc::Receiver<MediaControlEvent>, state: Rc<RefCell<UiState>>) {
+pub(crate) fn poll_mpris_events(
+    receiver: mpsc::Receiver<MediaControlEvent>,
+    state: Rc<RefCell<UiState>>,
+) {
     gtk::glib::timeout_add_local(Duration::from_millis(100), move || {
         loop {
             match receiver.try_recv() {
@@ -1649,7 +1108,7 @@ fn poll_mpris_events(receiver: mpsc::Receiver<MediaControlEvent>, state: Rc<RefC
     });
 }
 
-fn handle_mpris_event(state: &Rc<RefCell<UiState>>, event: MediaControlEvent) {
+pub(crate) fn handle_mpris_event(state: &Rc<RefCell<UiState>>, event: MediaControlEvent) {
     match event {
         MediaControlEvent::Play => resume_playback(state),
         MediaControlEvent::Pause => pause_playback(state),
@@ -1706,7 +1165,7 @@ fn handle_mpris_event(state: &Rc<RefCell<UiState>>, event: MediaControlEvent) {
     }
 }
 
-fn update_mpris_status(ui: &mut UiState) {
+pub(crate) fn update_mpris_status(ui: &mut UiState) {
     let Some(mpris) = ui.mpris.as_mut() else {
         return;
     };
@@ -1728,7 +1187,7 @@ fn update_mpris_status(ui: &mut UiState) {
     }
 }
 
-fn update_mpris_metadata(ui: &mut UiState) {
+pub(crate) fn update_mpris_metadata(ui: &mut UiState) {
     if let Some(station) = current_radio_station(ui) {
         let artist = station.mpris_source_label().to_string();
         let title = station.name;
@@ -1783,23 +1242,23 @@ fn update_mpris_metadata(ui: &mut UiState) {
     }
 }
 
-fn sync_external_playback_status(ui: &mut UiState) {
+pub(crate) fn sync_external_playback_status(ui: &mut UiState) {
     sync_discord_presence(ui);
     update_mpris_status(ui);
 }
 
-fn sync_external_playback_metadata(ui: &mut UiState) {
+pub(crate) fn sync_external_playback_metadata(ui: &mut UiState) {
     sync_discord_presence(ui);
     update_mpris_metadata(ui);
 }
 
-fn sync_external_playback(ui: &mut UiState) {
+pub(crate) fn sync_external_playback(ui: &mut UiState) {
     sync_discord_presence(ui);
     update_mpris_metadata(ui);
     update_mpris_status(ui);
 }
 
-fn sync_discord_presence(ui: &UiState) {
+pub(crate) fn sync_discord_presence(ui: &UiState) {
     let Some(discord) = ui.discord_presence.as_ref() else {
         return;
     };
@@ -1847,7 +1306,7 @@ fn sync_discord_presence(ui: &UiState) {
     });
 }
 
-fn build_player_bar(state: Rc<RefCell<UiState>>) -> gtk::Box {
+pub(crate) fn build_player_bar(state: Rc<RefCell<UiState>>) -> gtk::Box {
     let player = gtk::Box::new(Orientation::Horizontal, 14);
     player.add_css_class("player-bar");
     player.set_valign(Align::Start);
@@ -2022,7 +1481,7 @@ fn build_player_bar(state: Rc<RefCell<UiState>>) -> gtk::Box {
     player
 }
 
-fn settings_menu_button(state: Rc<RefCell<UiState>>) -> gtk::MenuButton {
+pub(crate) fn settings_menu_button(state: Rc<RefCell<UiState>>) -> gtk::MenuButton {
     let settings = gtk::MenuButton::builder()
         .icon_name("emblem-system-symbolic")
         .tooltip_text("Settings")
@@ -2236,7 +1695,7 @@ fn settings_menu_button(state: Rc<RefCell<UiState>>) -> gtk::MenuButton {
     settings
 }
 
-fn cast_menu_button(state: Rc<RefCell<UiState>>) -> gtk::MenuButton {
+pub(crate) fn cast_menu_button(state: Rc<RefCell<UiState>>) -> gtk::MenuButton {
     let btn = gtk::MenuButton::builder()
         .icon_name("send-to-symbolic")
         .tooltip_text("Cast to device")
@@ -2327,7 +1786,7 @@ fn cast_menu_button(state: Rc<RefCell<UiState>>) -> gtk::MenuButton {
     btn
 }
 
-fn start_cast_scan(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn start_cast_scan(state: &Rc<RefCell<UiState>>) {
     // Clear device list and show scanning indicator
     {
         let ui = state.borrow();
@@ -2372,7 +1831,7 @@ fn start_cast_scan(state: &Rc<RefCell<UiState>>) {
     });
 }
 
-fn populate_cast_device_list(state: &Rc<RefCell<UiState>>, devices: Vec<CastDevice>) {
+pub(crate) fn populate_cast_device_list(state: &Rc<RefCell<UiState>>, devices: Vec<CastDevice>) {
     let (device_box, active_id) = {
         let mut ui = state.borrow_mut();
         if let Some(spinner) = ui.cast_scan_spinner.as_ref() {
@@ -2390,7 +1849,7 @@ fn populate_cast_device_list(state: &Rc<RefCell<UiState>>, devices: Vec<CastDevi
     render_cast_device_list(state, &device_box, &devices, active_id.as_deref());
 }
 
-fn render_cast_device_list(
+pub(crate) fn render_cast_device_list(
     state: &Rc<RefCell<UiState>>,
     device_box: &gtk::Box,
     devices: &[CastDevice],
@@ -2442,7 +1901,7 @@ fn render_cast_device_list(
     }
 }
 
-fn cast_device_row(
+pub(crate) fn cast_device_row(
     state: &Rc<RefCell<UiState>>,
     device: &CastDevice,
     active_id: Option<&str>,
@@ -2492,7 +1951,7 @@ fn cast_device_row(
     row
 }
 
-fn cast_content_type(quality: &str) -> &'static str {
+pub(crate) fn cast_content_type(quality: &str) -> &'static str {
     let q = quality.to_uppercase();
     if q.contains("FLAC") {
         "audio/flac"
@@ -2509,7 +1968,7 @@ fn cast_content_type(quality: &str) -> &'static str {
     }
 }
 
-fn radio_stream_content_type(url: &url::Url) -> &'static str {
+pub(crate) fn radio_stream_content_type(url: &url::Url) -> &'static str {
     let path = url.path().to_lowercase();
     if path.ends_with(".m3u8") || path.ends_with(".m3u") {
         return "application/x-mpegURL";
@@ -2534,17 +1993,7 @@ fn radio_stream_content_type(url: &url::Url) -> &'static str {
     "audio/mpeg"
 }
 
-fn parse_duration_str(s: &str) -> f64 {
-    let parts: Vec<f64> = s.split(':').filter_map(|p| p.parse().ok()).collect();
-    match parts.len() {
-        3 => parts[0] * 3600.0 + parts[1] * 60.0 + parts[2],
-        2 => parts[0] * 60.0 + parts[1],
-        1 => parts[0],
-        _ => 0.0,
-    }
-}
-
-fn start_cast(state: &Rc<RefCell<UiState>>, device: CastDevice) {
+pub(crate) fn start_cast(state: &Rc<RefCell<UiState>>, device: CastDevice) {
     // Gather track info and current local playback position
     let (stream_url, content_type, duration_secs, local_position_secs) = {
         let ui = state.borrow();
@@ -2649,7 +2098,7 @@ fn start_cast(state: &Rc<RefCell<UiState>>, device: CastDevice) {
     }
 }
 
-fn stop_cast(state: &Rc<RefCell<UiState>>, device: &CastDevice) {
+pub(crate) fn stop_cast(state: &Rc<RefCell<UiState>>, device: &CastDevice) {
     let resume_secs = {
         let mut ui = state.borrow_mut();
         let pos = ui.cast_position_secs;
@@ -2686,7 +2135,7 @@ fn stop_cast(state: &Rc<RefCell<UiState>>, device: &CastDevice) {
     }
 }
 
-fn show_cast_status(state: &Rc<RefCell<UiState>>, msg: &str) {
+pub(crate) fn show_cast_status(state: &Rc<RefCell<UiState>>, msg: &str) {
     let ui = state.borrow();
     if let Some(s) = ui.cast_status_label.as_ref() {
         s.set_text(msg);
@@ -2694,7 +2143,7 @@ fn show_cast_status(state: &Rc<RefCell<UiState>>, msg: &str) {
     }
 }
 
-fn refresh_cast_device_list(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn refresh_cast_device_list(state: &Rc<RefCell<UiState>>) {
     let (device_box, devices, active_id) = {
         let ui = state.borrow();
         (
@@ -2713,29 +2162,8 @@ fn refresh_cast_device_list(state: &Rc<RefCell<UiState>>) {
     render_cast_device_list(state, &device_box, &devices, active_id.as_deref());
 }
 
-fn menu_item_button(icon_name: &str, title: &str) -> gtk::Button {
-    let button = gtk::Button::new();
-    button.add_css_class("flat");
-    button.add_css_class("settings-menu-item");
-    button.set_halign(Align::Fill);
-
-    let row = gtk::Box::new(Orientation::Horizontal, 12);
-    row.set_margin_top(7);
-    row.set_margin_bottom(7);
-    row.set_margin_start(8);
-    row.set_margin_end(8);
-    row.set_halign(Align::Fill);
-    row.append(&gtk::Image::from_icon_name(icon_name));
-    let title = label(title, "settings-menu-label");
-    title.set_hexpand(true);
-    title.set_halign(Align::Start);
-    row.append(&title);
-    button.set_child(Some(&row));
-    button
-}
-
 #[allow(deprecated)]
-fn show_keyboard_shortcuts(parent: &gtk::Window) {
+pub(crate) fn show_keyboard_shortcuts(parent: &gtk::Window) {
     let shortcuts = gtk::Window::builder()
         .transient_for(parent)
         .modal(true)
@@ -2793,7 +2221,7 @@ fn show_keyboard_shortcuts(parent: &gtk::Window) {
 }
 
 #[allow(deprecated)]
-fn shortcut_row(title: &str, accelerator: &str) -> gtk::ListBoxRow {
+pub(crate) fn shortcut_row(title: &str, accelerator: &str) -> gtk::ListBoxRow {
     let row = gtk::ListBoxRow::new();
     row.set_activatable(false);
     row.set_selectable(false);
@@ -2817,7 +2245,7 @@ fn shortcut_row(title: &str, accelerator: &str) -> gtk::ListBoxRow {
     row
 }
 
-fn show_about_window(parent: &gtk::Window) {
+pub(crate) fn show_about_window(parent: &gtk::Window) {
     let about = gtk::AboutDialog::builder()
         .transient_for(parent)
         .modal(true)
@@ -2833,7 +2261,7 @@ fn show_about_window(parent: &gtk::Window) {
     about.present();
 }
 
-fn quit_application(parent: &gtk::Window, state: &Rc<RefCell<UiState>>) {
+pub(crate) fn quit_application(parent: &gtk::Window, state: &Rc<RefCell<UiState>>) {
     let mut ui = state.borrow_mut();
     save_playback_snapshot_now(&mut ui);
     stop_playback(&mut ui);
@@ -2845,7 +2273,7 @@ fn quit_application(parent: &gtk::Window, state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn connect_player_bar_responsive_layout(
+pub(crate) fn connect_player_bar_responsive_layout(
     player: &gtk::Box,
     actions: &gtk::Overlay,
     playback_status: &gtk::Label,
@@ -2872,7 +2300,7 @@ fn connect_player_bar_responsive_layout(
 }
 
 #[allow(deprecated)]
-fn confirm_database_reset(parent: &gtk::Window, state: Rc<RefCell<UiState>>) {
+pub(crate) fn confirm_database_reset(parent: &gtk::Window, state: Rc<RefCell<UiState>>) {
     let dialog = gtk::MessageDialog::builder()
         .transient_for(parent)
         .modal(true)
@@ -2902,7 +2330,7 @@ fn confirm_database_reset(parent: &gtk::Window, state: Rc<RefCell<UiState>>) {
     dialog.present();
 }
 
-fn reset_database_and_cache(state: Rc<RefCell<UiState>>) {
+pub(crate) fn reset_database_and_cache(state: Rc<RefCell<UiState>>) {
     {
         let mut ui = state.borrow_mut();
         ui.connection_generation = CONNECTION_GENERATION
@@ -2968,7 +2396,7 @@ fn reset_database_and_cache(state: Rc<RefCell<UiState>>) {
     });
 }
 
-fn apply_first_time_setup_state(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn apply_first_time_setup_state(state: &Rc<RefCell<UiState>>) {
     let (
         search_entry,
         server_entry,
@@ -3088,7 +2516,7 @@ fn apply_first_time_setup_state(state: &Rc<RefCell<UiState>>) {
     update_content_view(state, NavDirection::DrillForward);
 }
 
-fn build_body(state: Rc<RefCell<UiState>>) -> gtk::Box {
+pub(crate) fn build_body(state: Rc<RefCell<UiState>>) -> gtk::Box {
     let outer = gtk::Box::new(Orientation::Horizontal, 0);
     outer.add_css_class("main-paned");
     outer.set_hexpand(true);
@@ -3104,7 +2532,7 @@ fn build_body(state: Rc<RefCell<UiState>>) -> gtk::Box {
     outer
 }
 
-fn build_sidebar(state: Rc<RefCell<UiState>>) -> (gtk::Box, gtk::Box, gtk::Box) {
+pub(crate) fn build_sidebar(state: Rc<RefCell<UiState>>) -> (gtk::Box, gtk::Box, gtk::Box) {
     let sidebar = gtk::Box::new(Orientation::Vertical, 4);
     sidebar.add_css_class("sidebar");
 
@@ -3138,7 +2566,7 @@ fn build_sidebar(state: Rc<RefCell<UiState>>) -> (gtk::Box, gtk::Box, gtk::Box) 
     (sidebar, queue, cover)
 }
 
-fn sidebar_cover_art(state: Rc<RefCell<UiState>>) -> gtk::Box {
+pub(crate) fn sidebar_cover_art(state: Rc<RefCell<UiState>>) -> gtk::Box {
     let frame = gtk::Box::new(Orientation::Vertical, 0);
     frame.add_css_class("sidebar-cover-frame");
     frame.set_size_request(LEFT_SIDEBAR_CONTENT_WIDTH, LEFT_SIDEBAR_CONTENT_WIDTH);
@@ -3163,7 +2591,7 @@ fn sidebar_cover_art(state: Rc<RefCell<UiState>>) -> gtk::Box {
     frame
 }
 
-fn build_content(state: Rc<RefCell<UiState>>) -> gtk::Box {
+pub(crate) fn build_content(state: Rc<RefCell<UiState>>) -> gtk::Box {
     let content = gtk::Box::new(Orientation::Vertical, 0);
     content.add_css_class("content");
     content.set_hexpand(true);
@@ -3191,7 +2619,7 @@ fn build_content(state: Rc<RefCell<UiState>>) -> gtk::Box {
     content
 }
 
-fn detail_header(state: Rc<RefCell<UiState>>) -> gtk::Box {
+pub(crate) fn detail_header(state: Rc<RefCell<UiState>>) -> gtk::Box {
     let detail_header = gtk::Box::new(Orientation::Horizontal, 10);
     detail_header.add_css_class("detail-header");
     detail_header.set_visible(false);
@@ -3231,7 +2659,7 @@ fn detail_header(state: Rc<RefCell<UiState>>) -> gtk::Box {
     detail_header
 }
 
-fn connection_card(state: Rc<RefCell<UiState>>) -> gtk::Box {
+pub(crate) fn connection_card(state: Rc<RefCell<UiState>>) -> gtk::Box {
     let card = gtk::Box::new(Orientation::Vertical, 8);
     card.add_css_class("connection-card");
     state.borrow_mut().connection_card = Some(card.clone());
@@ -3345,7 +2773,7 @@ fn connection_card(state: Rc<RefCell<UiState>>) -> gtk::Box {
     card
 }
 
-fn poll_connection_result(
+pub(crate) fn poll_connection_result(
     receiver: mpsc::Receiver<ConnectionMessage>,
     state: Rc<RefCell<UiState>>,
     status: gtk::Label,
@@ -3421,7 +2849,7 @@ fn poll_connection_result(
     });
 }
 
-fn refresh_jellyfin_library(state: Rc<RefCell<UiState>>, button: gtk::Button) {
+pub(crate) fn refresh_jellyfin_library(state: Rc<RefCell<UiState>>, button: gtk::Button) {
     let generation = state.borrow().connection_generation;
     button.set_sensitive(false);
     set_library_loading(&state, "Refreshing Jellyfin library");
@@ -3440,7 +2868,7 @@ fn refresh_jellyfin_library(state: Rc<RefCell<UiState>>, button: gtk::Button) {
     poll_connection_result(receiver, state, status, Some(button), generation);
 }
 
-fn set_refresh_button_connected_state(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn set_refresh_button_connected_state(state: &Rc<RefCell<UiState>>) {
     let (button, connected) = {
         let ui = state.borrow();
         (ui.refresh_button.clone(), ui.jellyfin_connected)
@@ -3450,14 +2878,14 @@ fn set_refresh_button_connected_state(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn set_reconnect_button_needed(state: &Rc<RefCell<UiState>>, needed: bool) {
+pub(crate) fn set_reconnect_button_needed(state: &Rc<RefCell<UiState>>, needed: bool) {
     if let Some(button) = state.borrow().reconnect_button.as_ref() {
         button.set_visible(needed);
         button.set_sensitive(needed);
     }
 }
 
-fn set_reconnect_button_error_state(state: &Rc<RefCell<UiState>>, error: &str) {
+pub(crate) fn set_reconnect_button_error_state(state: &Rc<RefCell<UiState>>, error: &str) {
     if !error_needs_reconnect(error) {
         set_reconnect_button_needed(state, false);
         return;
@@ -3470,11 +2898,11 @@ fn set_reconnect_button_error_state(state: &Rc<RefCell<UiState>>, error: &str) {
     set_reconnect_button_needed(state, has_session);
 }
 
-fn error_needs_reconnect(error: &str) -> bool {
+pub(crate) fn error_needs_reconnect(error: &str) -> bool {
     error.contains("reconnect")
 }
 
-fn set_library_loading(state: &Rc<RefCell<UiState>>, message: &str) {
+pub(crate) fn set_library_loading(state: &Rc<RefCell<UiState>>, message: &str) {
     let ui = state.borrow();
     ui.connection_status.set_text("Loading library");
     ui.connection_detail.set_text(message);
@@ -3485,7 +2913,7 @@ fn set_library_loading(state: &Rc<RefCell<UiState>>, message: &str) {
     }
 }
 
-fn set_library_loaded(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn set_library_loaded(state: &Rc<RefCell<UiState>>) {
     let ui = state.borrow();
     if let Some(spinner) = ui.sync_spinner.as_ref() {
         spinner.stop();
@@ -3493,57 +2921,14 @@ fn set_library_loaded(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn library_progress_text(loaded: usize, total: Option<usize>) -> String {
+pub(crate) fn library_progress_text(loaded: usize, total: Option<usize>) -> String {
     match total {
         Some(total) if total > 0 => format!("Loading full library: {loaded} of {total} tracks"),
         _ => format!("Loading full library: {loaded} tracks"),
     }
 }
 
-#[derive(Clone, Debug)]
-struct AlbumSummary {
-    key: String,
-    name: String,
-    artist: String,
-    artist_image_url: Option<String>,
-    artwork_url: Option<String>,
-    song_count: usize,
-}
-
-#[derive(Clone, Debug)]
-struct ArtistSummary {
-    key: String,
-    name: String,
-    image_url: Option<String>,
-    album_count: usize,
-    song_count: usize,
-}
-
-struct AlbumAccumulator {
-    key: String,
-    name: String,
-    artwork_url: Option<String>,
-    song_count: usize,
-    explicit_artist_votes: Vec<ArtistVote>,
-    fallback_artist_votes: Vec<ArtistVote>,
-}
-
-struct ArtistVote {
-    key: String,
-    name: String,
-    image_url: Option<String>,
-    count: usize,
-    first_seen: usize,
-}
-
-struct ArtistNameVote {
-    key: String,
-    name: String,
-    count: usize,
-    first_seen: usize,
-}
-
-fn album_grid_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
+pub(crate) fn album_grid_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
     let scroll = gtk::ScrolledWindow::new();
     scroll.add_css_class("collection-scroll");
     scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
@@ -3567,7 +2952,7 @@ fn album_grid_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
     scroll
 }
 
-fn artist_grid_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
+pub(crate) fn artist_grid_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
     let scroll = gtk::ScrolledWindow::new();
     scroll.add_css_class("collection-scroll");
     scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
@@ -3591,7 +2976,7 @@ fn artist_grid_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
     scroll
 }
 
-fn playlist_grid_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
+pub(crate) fn playlist_grid_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
     let scroll = gtk::ScrolledWindow::new();
     scroll.add_css_class("collection-scroll");
     scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
@@ -3615,7 +3000,7 @@ fn playlist_grid_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
     scroll
 }
 
-fn radio_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
+pub(crate) fn radio_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
     let scroll = gtk::ScrolledWindow::new();
     scroll.add_css_class("collection-scroll");
     scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
@@ -3697,7 +3082,7 @@ fn radio_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
     scroll
 }
 
-fn next_up_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
+pub(crate) fn next_up_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
     let scroll = gtk::ScrolledWindow::new();
     scroll.add_css_class("collection-scroll");
     scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
@@ -3744,14 +3129,14 @@ fn next_up_page(state: Rc<RefCell<UiState>>) -> gtk::ScrolledWindow {
     scroll
 }
 
-fn refresh_collection_grids(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn refresh_collection_grids(state: &Rc<RefCell<UiState>>) {
     refresh_album_grid(state);
     refresh_artist_grid(state);
     refresh_playlist_grid(state);
     update_nav_counts(state);
 }
 
-fn refresh_visible_collection_grid(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn refresh_visible_collection_grid(state: &Rc<RefCell<UiState>>) {
     let active_view = {
         let ui = state.borrow();
         (
@@ -3772,7 +3157,7 @@ fn refresh_visible_collection_grid(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn refresh_album_grid(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn refresh_album_grid(state: &Rc<RefCell<UiState>>) {
     let (grid, albums) = {
         let ui = state.borrow();
         let albums = if ui.active_page == LibraryPage::Artists {
@@ -3805,7 +3190,7 @@ fn refresh_album_grid(state: &Rc<RefCell<UiState>>) {
     render_album_tiles_batched(state, grid, albums);
 }
 
-fn refresh_artist_grid(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn refresh_artist_grid(state: &Rc<RefCell<UiState>>) {
     let (grid, artists) = {
         let ui = state.borrow();
         (
@@ -3827,7 +3212,7 @@ fn refresh_artist_grid(state: &Rc<RefCell<UiState>>) {
     render_artist_tiles_batched(state, grid, artists);
 }
 
-fn refresh_playlist_grid(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn refresh_playlist_grid(state: &Rc<RefCell<UiState>>) {
     let (grid, playlists) = {
         let ui = state.borrow();
         (
@@ -3849,23 +3234,23 @@ fn refresh_playlist_grid(state: &Rc<RefCell<UiState>>) {
     render_playlist_tiles_batched(state, grid, playlists);
 }
 
-fn clear_flow_box(flow: &gtk::FlowBox) {
+pub(crate) fn clear_flow_box(flow: &gtk::FlowBox) {
     while let Some(child) = flow.first_child() {
         flow.remove(&child);
     }
 }
 
-fn next_collection_render_generation(state: &Rc<RefCell<UiState>>) -> u64 {
+pub(crate) fn next_collection_render_generation(state: &Rc<RefCell<UiState>>) -> u64 {
     let mut ui = state.borrow_mut();
     ui.collection_render_generation = ui.collection_render_generation.wrapping_add(1);
     ui.collection_render_generation
 }
 
-fn collection_render_generation(state: &Rc<RefCell<UiState>>) -> u64 {
+pub(crate) fn collection_render_generation(state: &Rc<RefCell<UiState>>) -> u64 {
     state.borrow().collection_render_generation
 }
 
-fn render_album_tiles_batched(
+pub(crate) fn render_album_tiles_batched(
     state: &Rc<RefCell<UiState>>,
     grid: gtk::FlowBox,
     mut albums: Vec<AlbumSummary>,
@@ -3901,7 +3286,7 @@ fn render_album_tiles_batched(
     });
 }
 
-fn render_artist_tiles_batched(
+pub(crate) fn render_artist_tiles_batched(
     state: &Rc<RefCell<UiState>>,
     grid: gtk::FlowBox,
     mut artists: Vec<ArtistSummary>,
@@ -3937,7 +3322,7 @@ fn render_artist_tiles_batched(
     });
 }
 
-fn render_playlist_tiles_batched(
+pub(crate) fn render_playlist_tiles_batched(
     state: &Rc<RefCell<UiState>>,
     grid: gtk::FlowBox,
     mut playlists: Vec<UiPlaylist>,
@@ -3973,7 +3358,7 @@ fn render_playlist_tiles_batched(
     });
 }
 
-fn collection_empty_state(text: &str) -> gtk::Box {
+pub(crate) fn collection_empty_state(text: &str) -> gtk::Box {
     let empty = gtk::Box::new(Orientation::Vertical, 8);
     empty.add_css_class("collection-empty");
     empty.append(&label(text, "rail-title"));
@@ -3984,7 +3369,11 @@ fn collection_empty_state(text: &str) -> gtk::Box {
     empty
 }
 
-fn album_tile(album: AlbumSummary, state: Rc<RefCell<UiState>>, tile_index: usize) -> gtk::Button {
+pub(crate) fn album_tile(
+    album: AlbumSummary,
+    state: Rc<RefCell<UiState>>,
+    tile_index: usize,
+) -> gtk::Button {
     let button = collection_tile_button(&album.name);
     button.add_css_class("album-tile");
     button.set_halign(Align::Fill);
@@ -4032,7 +3421,7 @@ fn album_tile(album: AlbumSummary, state: Rc<RefCell<UiState>>, tile_index: usiz
     button
 }
 
-fn artist_tile(
+pub(crate) fn artist_tile(
     artist: ArtistSummary,
     state: Rc<RefCell<UiState>>,
     tile_index: usize,
@@ -4069,7 +3458,7 @@ fn artist_tile(
     button
 }
 
-fn playlist_tile(
+pub(crate) fn playlist_tile(
     playlist: UiPlaylist,
     state: Rc<RefCell<UiState>>,
     tile_index: usize,
@@ -4117,7 +3506,7 @@ fn playlist_tile(
     button
 }
 
-fn collection_tile_button(title: &str) -> gtk::Button {
+pub(crate) fn collection_tile_button(title: &str) -> gtk::Button {
     let button = gtk::Button::new();
     button.add_css_class("collection-tile");
     button.set_halign(Align::Fill);
@@ -4128,7 +3517,7 @@ fn collection_tile_button(title: &str) -> gtk::Button {
     button
 }
 
-fn collection_tile_label(text: &str, class_name: &str) -> gtk::Label {
+pub(crate) fn collection_tile_label(text: &str, class_name: &str) -> gtk::Label {
     let title = label(text, class_name);
     title.set_xalign(0.5);
     title.set_justify(gtk::Justification::Center);
@@ -4141,465 +3530,25 @@ fn collection_tile_label(text: &str, class_name: &str) -> gtk::Label {
     title
 }
 
-fn album_summaries(tracks: &[UiTrack], query: &str) -> Vec<AlbumSummary> {
-    let mut albums = Vec::<AlbumAccumulator>::new();
-    let mut album_indexes = HashMap::<String, usize>::new();
-    for (track_index, track) in tracks.iter().enumerate() {
-        let key = album_key(track);
-        if let Some(album_index) = album_indexes.get(&key).copied() {
-            let album = &mut albums[album_index];
-            album.song_count += 1;
-            if album.artwork_url.is_none() {
-                album.artwork_url = track.thumbnail_artwork_url.clone();
-            }
-            add_artist_vote(
-                &mut album.explicit_artist_votes,
-                track.album_artist.as_deref(),
-                track
-                    .album_artist
-                    .as_deref()
-                    .and_then(|artist| track.artist_thumbnail_url_for(artist)),
-                track_index,
-            );
-            add_artist_vote(
-                &mut album.fallback_artist_votes,
-                Some(&track.artist),
-                track.artist_thumbnail_url_for(&track.artist),
-                track_index,
-            );
-            continue;
-        }
+pub(crate) const TITLE_WIDTH: i32 = 260;
 
-        album_indexes.insert(key.clone(), albums.len());
-        let mut album = AlbumAccumulator {
-            key,
-            name: track.album.clone(),
-            artwork_url: track.thumbnail_artwork_url.clone(),
-            song_count: 1,
-            explicit_artist_votes: Vec::new(),
-            fallback_artist_votes: Vec::new(),
-        };
-        add_artist_vote(
-            &mut album.explicit_artist_votes,
-            track.album_artist.as_deref(),
-            track
-                .album_artist
-                .as_deref()
-                .and_then(|artist| track.artist_thumbnail_url_for(artist)),
-            track_index,
-        );
-        add_artist_vote(
-            &mut album.fallback_artist_votes,
-            Some(&track.artist),
-            track.artist_thumbnail_url_for(&track.artist),
-            track_index,
-        );
-        albums.push(album);
-    }
+pub(crate) const ARTIST_WIDTH: i32 = 160;
 
-    let mut albums = albums
-        .into_iter()
-        .map(|album| {
-            let preferred_artist =
-                preferred_album_artist(&album.explicit_artist_votes, &album.fallback_artist_votes);
-            AlbumSummary {
-                key: album.key,
-                name: album.name,
-                artist: preferred_artist.name,
-                artist_image_url: preferred_artist.image_url,
-                artwork_url: album.artwork_url,
-                song_count: album.song_count,
-            }
-        })
-        .collect::<Vec<_>>();
+pub(crate) const ALBUM_WIDTH: i32 = 220;
 
-    let query = query.trim().to_lowercase();
-    if !query.is_empty() {
-        albums.retain(|album| {
-            album.name.to_lowercase().contains(&query)
-                || album.artist.to_lowercase().contains(&query)
-        });
-    }
-
-    albums.sort_by(|left, right| {
-        compare_text(&left.name, &right.name)
-            .then_with(|| compare_text(&left.artist, &right.artist))
-    });
-    albums
-}
-
-fn album_summaries_for_artist_from(
-    albums: &[AlbumSummary],
-    selected_artist_key: &str,
-    query: &str,
-) -> Vec<AlbumSummary> {
-    filter_album_summaries(albums, query)
-        .into_iter()
-        .filter(|album| artist_key(&album.artist) == selected_artist_key)
-        .collect()
-}
-
-fn filter_album_summaries(albums: &[AlbumSummary], query: &str) -> Vec<AlbumSummary> {
-    let query = query.trim().to_lowercase();
-    let mut albums = albums
-        .iter()
-        .filter(|album| {
-            query.is_empty()
-                || album.name.to_lowercase().contains(&query)
-                || album.artist.to_lowercase().contains(&query)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    albums.sort_by(|left, right| {
-        compare_text(&left.name, &right.name)
-            .then_with(|| compare_text(&left.artist, &right.artist))
-    });
-    albums
-}
-
-fn artist_album_song_counts_from(
-    albums: &[AlbumSummary],
-    selected_artist_key: &str,
-    query: &str,
-) -> (usize, usize) {
-    let albums = album_summaries_for_artist_from(albums, selected_artist_key, query);
-    album_song_counts(&albums)
-}
-
-fn album_song_counts(albums: &[AlbumSummary]) -> (usize, usize) {
-    let song_count = albums.iter().map(|album| album.song_count).sum();
-    (albums.len(), song_count)
-}
-
-fn artist_summaries(tracks: &[UiTrack], query: &str) -> Vec<ArtistSummary> {
-    struct ArtistAccumulator {
-        key: String,
-        image_url: Option<String>,
-        album_count: usize,
-        song_count: usize,
-        name_votes: Vec<ArtistNameVote>,
-    }
-
-    let mut artists = Vec::<ArtistAccumulator>::new();
-    let mut artist_indexes = HashMap::<String, usize>::new();
-    for (album_index, album) in album_summaries(tracks, "").into_iter().enumerate() {
-        let key = artist_key(&album.artist);
-        let image_url = artist_summary_image_url(&album);
-        if let Some(artist_index) = artist_indexes.get(&key).copied() {
-            let artist = &mut artists[artist_index];
-            artist.album_count += 1;
-            artist.song_count += album.song_count;
-            if artist.image_url.is_none() {
-                artist.image_url = image_url;
-            }
-            add_artist_name_vote(
-                &mut artist.name_votes,
-                &album.artist,
-                album.song_count,
-                album_index,
-            );
-            continue;
-        }
-
-        artist_indexes.insert(key.clone(), artists.len());
-        let mut name_votes = Vec::new();
-        add_artist_name_vote(
-            &mut name_votes,
-            &album.artist,
-            album.song_count,
-            album_index,
-        );
-        artists.push(ArtistAccumulator {
-            key,
-            image_url,
-            album_count: 1,
-            song_count: album.song_count,
-            name_votes,
-        });
-    }
-
-    let mut artists = artists
-        .into_iter()
-        .map(|artist| ArtistSummary {
-            key: artist.key,
-            name: preferred_artist_name(&artist.name_votes)
-                .unwrap_or("Unknown Artist")
-                .to_string(),
-            image_url: artist.image_url,
-            album_count: artist.album_count,
-            song_count: artist.song_count,
-        })
-        .collect::<Vec<_>>();
-
-    let query = query.trim().to_lowercase();
-    if !query.is_empty() {
-        artists.retain(|artist| artist.name.to_lowercase().contains(&query));
-    }
-
-    artists.sort_by(|left, right| compare_text(&left.name, &right.name));
-    artists
-}
-
-fn filter_artist_summaries(artists: &[ArtistSummary], query: &str) -> Vec<ArtistSummary> {
-    let query = query.trim().to_lowercase();
-    let mut artists = artists
-        .iter()
-        .filter(|artist| query.is_empty() || artist.name.to_lowercase().contains(&query))
-        .cloned()
-        .collect::<Vec<_>>();
-    artists.sort_by(|left, right| compare_text(&left.name, &right.name));
-    artists
-}
-
-fn rebuild_library_summaries(ui: &mut UiState) {
-    ui.library_albums = album_summaries(&ui.all_tracks, "");
-    ui.library_artists = artist_summaries(&ui.all_tracks, "");
-}
-
-fn assign_album_positions(tracks: &mut [UiTrack]) {
-    let mut album_counts = HashMap::<String, usize>::new();
-    for track in tracks {
-        let position = album_counts.entry(album_key(track)).or_default();
-        track.album_position = Some(*position);
-        *position += 1;
-    }
-}
-
-fn filter_playlists(playlists: &[UiPlaylist], query: &str) -> Vec<UiPlaylist> {
-    let query = query.trim().to_lowercase();
-    let mut playlists = playlists
-        .iter()
-        .filter(|playlist| query.is_empty() || playlist.name.to_lowercase().contains(&query))
-        .cloned()
-        .collect::<Vec<_>>();
-    playlists.sort_by(|left, right| compare_text(&left.name, &right.name));
-    playlists
-}
-
-fn artist_summary_image_url(album: &AlbumSummary) -> Option<String> {
-    album.artist_image_url.clone()
-}
-
-fn artist_count_text(album_count: usize, song_count: usize) -> String {
-    format!(
-        "{} | {}",
-        count_text(album_count, "album", "albums"),
-        count_text(song_count, "song", "songs")
-    )
-}
-
-fn count_text(count: usize, singular: &str, plural: &str) -> String {
-    let noun = if count == 1 { singular } else { plural };
-    format!("{count} {noun}")
-}
-
-fn album_key(track: &UiTrack) -> String {
-    track
-        .album_id
-        .clone()
-        .unwrap_or_else(|| normalized_key(&track.album))
-}
-
-fn artist_key(artist: &str) -> String {
-    normalized_artist_key(artist)
-}
-
-fn normalized_key(value: &str) -> String {
-    normalized_text_key(value)
-}
-
-fn normalized_text_key(value: &str) -> String {
-    let mut key = String::new();
-    for character in value.trim().chars() {
-        for character in character.to_lowercase() {
-            if character.is_whitespace() {
-                push_key_separator(&mut key);
-            } else {
-                key.push(character);
-            }
-        }
-    }
-    key.trim_end().to_string()
-}
-
-fn normalized_artist_key(value: &str) -> String {
-    let mut key = String::new();
-    for character in value.trim().chars() {
-        for character in character.to_lowercase() {
-            if character.is_alphanumeric() {
-                key.push(character);
-            } else if is_ignored_artist_key_character(character) {
-                continue;
-            } else {
-                push_key_separator(&mut key);
-            }
-        }
-    }
-    key.trim_end().to_string()
-}
-
-fn normalized_artist_display_key(value: &str) -> String {
-    let mut key = String::new();
-    for character in value.trim().chars() {
-        for character in character.to_lowercase() {
-            if character.is_whitespace() {
-                push_key_separator(&mut key);
-            } else if is_dash_character(character) {
-                key.push('-');
-            } else {
-                key.push(character);
-            }
-        }
-    }
-    key.trim_end().to_string()
-}
-
-fn push_key_separator(key: &mut String) {
-    if !key.is_empty() && !key.ends_with(' ') {
-        key.push(' ');
-    }
-}
-
-fn is_dash_character(character: char) -> bool {
-    matches!(
-        character,
-        '-' | '\u{2010}'
-            | '\u{2011}'
-            | '\u{2012}'
-            | '\u{2013}'
-            | '\u{2014}'
-            | '\u{2015}'
-            | '\u{2212}'
-            | '\u{FE58}'
-            | '\u{FE63}'
-            | '\u{FF0D}'
-    )
-}
-
-fn is_ignored_artist_key_character(character: char) -> bool {
-    matches!(
-        character,
-        '\'' | '"'
-            | '`'
-            | '\u{2018}'
-            | '\u{2019}'
-            | '\u{201C}'
-            | '\u{201D}'
-            | '\u{200B}'
-            | '\u{200C}'
-            | '\u{200D}'
-            | '\u{FEFF}'
-    )
-}
-
-fn add_artist_vote(
-    votes: &mut Vec<ArtistVote>,
-    artist: Option<&str>,
-    image_url: Option<String>,
-    first_seen: usize,
-) {
-    let Some(artist) = artist.map(str::trim).filter(|artist| !artist.is_empty()) else {
-        return;
-    };
-    let key = artist_key(artist);
-    if let Some(vote) = votes.iter_mut().find(|vote| vote.key == key) {
-        vote.count += 1;
-        if vote.image_url.is_none() {
-            vote.image_url = image_url;
-        }
-        return;
-    }
-
-    votes.push(ArtistVote {
-        key,
-        name: artist.to_string(),
-        image_url,
-        count: 1,
-        first_seen,
-    });
-}
-
-fn add_artist_name_vote(
-    votes: &mut Vec<ArtistNameVote>,
-    artist: &str,
-    count: usize,
-    first_seen: usize,
-) {
-    let artist = artist.trim();
-    if artist.is_empty() {
-        return;
-    }
-
-    let key = normalized_artist_display_key(artist);
-    if let Some(vote) = votes.iter_mut().find(|vote| vote.key == key) {
-        vote.count += count;
-        return;
-    }
-
-    votes.push(ArtistNameVote {
-        key,
-        name: artist.to_string(),
-        count,
-        first_seen,
-    });
-}
-
-fn preferred_artist_name(votes: &[ArtistNameVote]) -> Option<&str> {
-    votes
-        .iter()
-        .max_by(|left, right| {
-            left.count
-                .cmp(&right.count)
-                .then_with(|| right.first_seen.cmp(&left.first_seen))
-        })
-        .map(|vote| vote.name.as_str())
-}
-
-struct PreferredArtist {
-    name: String,
-    image_url: Option<String>,
-}
-
-fn preferred_album_artist(
-    explicit_votes: &[ArtistVote],
-    fallback_votes: &[ArtistVote],
-) -> PreferredArtist {
-    preferred_artist_vote(explicit_votes)
-        .or_else(|| preferred_artist_vote(fallback_votes))
-        .map(|vote| PreferredArtist {
-            name: vote.name.clone(),
-            image_url: vote.image_url.clone(),
-        })
-        .unwrap_or_else(|| PreferredArtist {
-            name: "Unknown Artist".to_string(),
-            image_url: None,
-        })
-}
-
-fn preferred_artist_vote(votes: &[ArtistVote]) -> Option<&ArtistVote> {
-    votes.iter().max_by(|left, right| {
-        left.count
-            .cmp(&right.count)
-            .then_with(|| right.first_seen.cmp(&left.first_seen))
-    })
-}
-
-const TITLE_WIDTH: i32 = 260;
-const ARTIST_WIDTH: i32 = 160;
-const ALBUM_WIDTH: i32 = 220;
-const DURATION_WIDTH: i32 = 66;
+pub(crate) const DURATION_WIDTH: i32 = 66;
 
 #[derive(Clone, Copy)]
-struct TrackColumn {
-    header: &'static str,
-    width: i32,
-    expand: bool,
-    xalign: f32,
-    sort_column: SortColumn,
-    class_name: Option<&'static str>,
+pub(crate) struct TrackColumn {
+    pub(crate) header: &'static str,
+    pub(crate) width: i32,
+    pub(crate) expand: bool,
+    pub(crate) xalign: f32,
+    pub(crate) sort_column: SortColumn,
+    pub(crate) class_name: Option<&'static str>,
 }
 
-const TRACK_COLUMNS: [TrackColumn; 4] = [
+pub(crate) const TRACK_COLUMNS: [TrackColumn; 4] = [
     TrackColumn {
         header: "Title",
         width: TITLE_WIDTH,
@@ -4634,7 +3583,7 @@ const TRACK_COLUMNS: [TrackColumn; 4] = [
     },
 ];
 
-fn track_table(state: Rc<RefCell<UiState>>) -> gtk::Box {
+pub(crate) fn track_table(state: Rc<RefCell<UiState>>) -> gtk::Box {
     let wrapper = gtk::Box::new(Orientation::Vertical, 0);
     wrapper.set_hexpand(true);
     wrapper.set_vexpand(true);
@@ -4738,7 +3687,10 @@ fn track_table(state: Rc<RefCell<UiState>>) -> gtk::Box {
     wrapper
 }
 
-fn track_column_view(column: TrackColumn, state: Rc<RefCell<UiState>>) -> gtk::ColumnViewColumn {
+pub(crate) fn track_column_view(
+    column: TrackColumn,
+    state: Rc<RefCell<UiState>>,
+) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
 
     let state_setup = state.clone();
@@ -4824,7 +3776,7 @@ fn track_column_view(column: TrackColumn, state: Rc<RefCell<UiState>>) -> gtk::C
     view_column
 }
 
-fn track_cell_label(column: TrackColumn) -> gtk::Label {
+pub(crate) fn track_cell_label(column: TrackColumn) -> gtk::Label {
     let cell = label("", column.class_name.unwrap_or_default());
     cell.add_css_class("track-cell");
     if column.sort_column == SortColumn::Duration {
@@ -4838,7 +3790,7 @@ fn track_cell_label(column: TrackColumn) -> gtk::Label {
     cell
 }
 
-fn track_title_cell(is_now_playing: bool) -> (gtk::Box, gtk::Image) {
+pub(crate) fn track_title_cell(is_now_playing: bool) -> (gtk::Box, gtk::Image) {
     let cell = gtk::Box::new(Orientation::Horizontal, 7);
     cell.add_css_class("track-cell");
     cell.add_css_class("track-title-cell");
@@ -4863,7 +3815,7 @@ fn track_title_cell(is_now_playing: bool) -> (gtk::Box, gtk::Image) {
     (cell, indicator)
 }
 
-fn bind_title_cell(list_item: &gtk::ListItem, title: &str, is_now_playing: bool) {
+pub(crate) fn bind_title_cell(list_item: &gtk::ListItem, title: &str, is_now_playing: bool) {
     let Some(cell) = list_item
         .child()
         .and_then(|child| child.downcast::<gtk::Box>().ok())
@@ -4887,7 +3839,7 @@ fn bind_title_cell(list_item: &gtk::ListItem, title: &str, is_now_playing: bool)
     }
 }
 
-fn track_value(track: &UiTrack, column: SortColumn) -> &str {
+pub(crate) fn track_value(track: &UiTrack, column: SortColumn) -> &str {
     match column {
         SortColumn::Title => &track.title,
         SortColumn::Artist => &track.artist,
@@ -4896,14 +3848,14 @@ fn track_value(track: &UiTrack, column: SortColumn) -> &str {
     }
 }
 
-fn sort_column_for_header(header: &str) -> Option<SortColumn> {
+pub(crate) fn sort_column_for_header(header: &str) -> Option<SortColumn> {
     TRACK_COLUMNS
         .iter()
         .find(|column| column.header == header)
         .map(|column| column.sort_column)
 }
 
-fn refresh_track_model(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn refresh_track_model(state: &Rc<RefCell<UiState>>) {
     {
         let mut ui = state.borrow_mut();
         ui.track_indicators.clear();
@@ -4980,7 +3932,7 @@ fn refresh_track_model(state: &Rc<RefCell<UiState>>) {
     rebuild_queue_list(state);
 }
 
-fn update_list_indicators(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn update_list_indicators(state: &Rc<RefCell<UiState>>) {
     let ui = state.borrow();
     let now_playing_key = ui.playback_session.now_playing_key.as_deref();
 
@@ -4990,7 +3942,7 @@ fn update_list_indicators(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn get_indicator_image(list_item: &gtk::ListItem) -> Option<gtk::Image> {
+pub(crate) fn get_indicator_image(list_item: &gtk::ListItem) -> Option<gtk::Image> {
     list_item
         .child()
         .and_then(|child| child.downcast::<gtk::Box>().ok())
@@ -4998,7 +3950,7 @@ fn get_indicator_image(list_item: &gtk::ListItem) -> Option<gtk::Image> {
         .and_then(|child| child.downcast::<gtk::Image>().ok())
 }
 
-fn set_sort_order(state: &Rc<RefCell<UiState>>, column: SortColumn, ascending: bool) {
+pub(crate) fn set_sort_order(state: &Rc<RefCell<UiState>>, column: SortColumn, ascending: bool) {
     let view_settings = {
         let mut ui = state.borrow_mut();
         if ui.sort_column == column && ui.sort_ascending == ascending {
@@ -5022,7 +3974,7 @@ fn set_sort_order(state: &Rc<RefCell<UiState>>, column: SortColumn, ascending: b
     load_selected_waveform(state);
 }
 
-fn load_library_view_settings() -> LibraryViewSettings {
+pub(crate) fn load_library_view_settings() -> LibraryViewSettings {
     let result = CacheDatabase::open_default()
         .and_then(|cache| cache.get_setting(LIBRARY_VIEW_SETTINGS_KEY))
         .and_then(|json| {
@@ -5040,7 +3992,7 @@ fn load_library_view_settings() -> LibraryViewSettings {
     }
 }
 
-fn save_library_view_settings(settings: LibraryViewSettings) {
+pub(crate) fn save_library_view_settings(settings: LibraryViewSettings) {
     let result = serde_json::to_string(&settings)
         .map_err(crate::cache::CacheError::from)
         .and_then(|json| {
@@ -5053,14 +4005,19 @@ fn save_library_view_settings(settings: LibraryViewSettings) {
     }
 }
 
-const LIBRARY_VIEW_SETTINGS_KEY: &str = "library.view.settings";
-const KEEP_PLAYING_WHILE_CLOSED_KEY: &str = "player.keep_playing_while_closed";
-const ANIMATIONS_ENABLED_KEY: &str = "ui.animations.enabled";
-const FONT_MONO_KEY: &str = "ui.font.mono";
-const PLAYBACK_STATE_KEY: &str = "player.playback.state";
-const PLAYBACK_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(5);
+pub(crate) const LIBRARY_VIEW_SETTINGS_KEY: &str = "library.view.settings";
 
-fn load_keep_playing_while_closed() -> bool {
+pub(crate) const KEEP_PLAYING_WHILE_CLOSED_KEY: &str = "player.keep_playing_while_closed";
+
+pub(crate) const ANIMATIONS_ENABLED_KEY: &str = "ui.animations.enabled";
+
+pub(crate) const FONT_MONO_KEY: &str = "ui.font.mono";
+
+pub(crate) const PLAYBACK_STATE_KEY: &str = "player.playback.state";
+
+pub(crate) const PLAYBACK_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(5);
+
+pub(crate) fn load_keep_playing_while_closed() -> bool {
     match CacheDatabase::open_default()
         .and_then(|cache| cache.get_setting(KEEP_PLAYING_WHILE_CLOSED_KEY))
     {
@@ -5073,7 +4030,7 @@ fn load_keep_playing_while_closed() -> bool {
     }
 }
 
-fn set_keep_playing_while_closed(state: &Rc<RefCell<UiState>>, enabled: bool) {
+pub(crate) fn set_keep_playing_while_closed(state: &Rc<RefCell<UiState>>, enabled: bool) {
     state.borrow_mut().keep_playing_while_closed = enabled;
     if let Err(error) = CacheDatabase::open_default().and_then(|cache| {
         cache.set_setting(
@@ -5085,7 +4042,7 @@ fn set_keep_playing_while_closed(state: &Rc<RefCell<UiState>>, enabled: bool) {
     }
 }
 
-fn load_animations_enabled() -> bool {
+pub(crate) fn load_animations_enabled() -> bool {
     match CacheDatabase::open_default().and_then(|cache| cache.get_setting(ANIMATIONS_ENABLED_KEY))
     {
         Ok(Some(value)) => value != "false",
@@ -5097,7 +4054,7 @@ fn load_animations_enabled() -> bool {
     }
 }
 
-fn set_animations_enabled(state: &Rc<RefCell<UiState>>, enabled: bool) {
+pub(crate) fn set_animations_enabled(state: &Rc<RefCell<UiState>>, enabled: bool) {
     state.borrow_mut().animations_enabled = enabled;
     if let Some(gtk_settings) = gtk::Settings::default() {
         gtk_settings.set_gtk_enable_animations(enabled);
@@ -5112,7 +4069,7 @@ fn set_animations_enabled(state: &Rc<RefCell<UiState>>, enabled: bool) {
     }
 }
 
-fn load_font_mono() -> bool {
+pub(crate) fn load_font_mono() -> bool {
     match CacheDatabase::open_default().and_then(|cache| cache.get_setting(FONT_MONO_KEY)) {
         Ok(Some(value)) => value == "true",
         Ok(None) => false,
@@ -5123,7 +4080,7 @@ fn load_font_mono() -> bool {
     }
 }
 
-fn set_font_mono(state: &Rc<RefCell<UiState>>, mono: bool) {
+pub(crate) fn set_font_mono(state: &Rc<RefCell<UiState>>, mono: bool) {
     state.borrow_mut().font_mono = mono;
     if let Err(error) = CacheDatabase::open_default()
         .and_then(|cache| cache.set_setting(FONT_MONO_KEY, if mono { "true" } else { "false" }))
@@ -5132,7 +4089,7 @@ fn set_font_mono(state: &Rc<RefCell<UiState>>, mono: bool) {
     }
 }
 
-fn playback_snapshot(ui: &UiState) -> Option<session::PersistedPlaybackState> {
+pub(crate) fn playback_snapshot(ui: &UiState) -> Option<session::PersistedPlaybackState> {
     if ui.playback_session.mode.is_radio() {
         return None;
     }
@@ -5166,7 +4123,7 @@ fn playback_snapshot(ui: &UiState) -> Option<session::PersistedPlaybackState> {
     )
 }
 
-fn save_playback_snapshot_now(ui: &mut UiState) {
+pub(crate) fn save_playback_snapshot_now(ui: &mut UiState) {
     ui.last_playback_snapshot_at = Some(Instant::now());
     let Some(snapshot) = playback_snapshot(ui) else {
         return;
@@ -5184,7 +4141,7 @@ fn save_playback_snapshot_now(ui: &mut UiState) {
     }
 }
 
-fn save_playback_snapshot_if_due(ui: &mut UiState) {
+pub(crate) fn save_playback_snapshot_if_due(ui: &mut UiState) {
     if ui
         .last_playback_snapshot_at
         .is_some_and(|last_saved| last_saved.elapsed() < PLAYBACK_SNAPSHOT_INTERVAL)
@@ -5194,7 +4151,7 @@ fn save_playback_snapshot_if_due(ui: &mut UiState) {
     save_playback_snapshot_now(ui);
 }
 
-fn clear_playback_snapshot() {
+pub(crate) fn clear_playback_snapshot() {
     if let Err(error) = CacheDatabase::open_default().and_then(|cache| {
         cache
             .connection()
@@ -5209,7 +4166,7 @@ fn clear_playback_snapshot() {
     }
 }
 
-fn load_playback_snapshot() -> Option<session::PersistedPlaybackState> {
+pub(crate) fn load_playback_snapshot() -> Option<session::PersistedPlaybackState> {
     let result = CacheDatabase::open_default()
         .and_then(|cache| cache.get_setting(PLAYBACK_STATE_KEY))
         .and_then(|json| {
@@ -5230,7 +4187,7 @@ fn load_playback_snapshot() -> Option<session::PersistedPlaybackState> {
     }
 }
 
-fn restore_playback_snapshot_tracks(
+pub(crate) fn restore_playback_snapshot_tracks(
     library_tracks: &[UiTrack],
     snapshot: &session::PersistedPlaybackState,
 ) -> Option<(Vec<UiTrack>, usize, Vec<usize>)> {
@@ -5264,60 +4221,7 @@ fn restore_playback_snapshot_tracks(
     ))
 }
 
-fn sort_track_slice(
-    tracks: &mut [UiTrack],
-    column: SortColumn,
-    ascending: bool,
-    search_query: &str,
-    album_order_first: bool,
-    selected_key: Option<&str>,
-    selected_index: &mut usize,
-) {
-    let normalized_query = search_query.trim().to_lowercase();
-    tracks.sort_by(|left, right| {
-        let exact_match_ordering = if normalized_query.is_empty() {
-            Ordering::Equal
-        } else {
-            exact_title_match_rank(left, &normalized_query)
-                .cmp(&exact_title_match_rank(right, &normalized_query))
-        };
-
-        let column_ordering = match column {
-            SortColumn::Title => compare_text(&left.title, &right.title),
-            SortColumn::Artist => compare_artist_album_track(left, right),
-            SortColumn::Album => compare_text(&left.album, &right.album),
-            SortColumn::Duration => {
-                duration_seconds(&left.duration).cmp(&duration_seconds(&right.duration))
-            }
-        };
-
-        let ordering = if album_order_first {
-            compare_album_track_order(left, right).then(exact_match_ordering)
-        } else {
-            exact_match_ordering.then(column_ordering)
-        }
-        .then_with(|| compare_text(&left.title, &right.title))
-        .then_with(|| compare_text(&left.artist, &right.artist))
-        .then_with(|| compare_text(&left.album, &right.album));
-
-        if ascending || album_order_first {
-            ordering
-        } else {
-            ordering.reverse()
-        }
-    });
-
-    if let Some(selected_key) = selected_key {
-        *selected_index = tracks
-            .iter()
-            .position(|track| track_has_key(track, selected_key))
-            .unwrap_or(0);
-    } else {
-        *selected_index = 0;
-    }
-}
-
-fn set_search_query(state: &Rc<RefCell<UiState>>, query: &str) {
+pub(crate) fn set_search_query(state: &Rc<RefCell<UiState>>, query: &str) {
     let show_tracks = state.borrow().is_track_list_visible();
     {
         let mut ui = state.borrow_mut();
@@ -5344,18 +4248,7 @@ fn set_search_query(state: &Rc<RefCell<UiState>>, query: &str) {
     }
 }
 
-fn library_page_order(page: LibraryPage) -> usize {
-    match page {
-        LibraryPage::Tracks => 0,
-        LibraryPage::Albums => 1,
-        LibraryPage::Artists => 2,
-        LibraryPage::Playlists => 3,
-        LibraryPage::Radio => 4,
-        LibraryPage::NextUp => 5,
-    }
-}
-
-fn set_library_page(state: &Rc<RefCell<UiState>>, page: LibraryPage) {
+pub(crate) fn set_library_page(state: &Rc<RefCell<UiState>>, page: LibraryPage) {
     let show_tracks = page == LibraryPage::Tracks;
     let mut refresh_tracks = false;
     let old_page;
@@ -5412,7 +4305,7 @@ fn set_library_page(state: &Rc<RefCell<UiState>>, page: LibraryPage) {
     }
 }
 
-fn show_album_tracks(state: &Rc<RefCell<UiState>>, album: &AlbumSummary) {
+pub(crate) fn show_album_tracks(state: &Rc<RefCell<UiState>>, album: &AlbumSummary) {
     let selected_key = {
         let ui = state.borrow();
         current_display_track(&ui).and_then(|track| track_key_if_same_album(track, &album.key))
@@ -5459,7 +4352,7 @@ fn show_album_tracks(state: &Rc<RefCell<UiState>>, album: &AlbumSummary) {
     load_selected_waveform(state);
 }
 
-fn restore_persisted_playback(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn restore_persisted_playback(state: &Rc<RefCell<UiState>>) {
     if state.borrow().playback_session.now_playing_key.is_some() {
         return;
     }
@@ -5536,7 +4429,7 @@ fn restore_persisted_playback(state: &Rc<RefCell<UiState>>) {
     scroll_to_now_playing(state);
 }
 
-fn show_playlist_tracks(state: &Rc<RefCell<UiState>>, playlist: &UiPlaylist) {
+pub(crate) fn show_playlist_tracks(state: &Rc<RefCell<UiState>>, playlist: &UiPlaylist) {
     let return_target = collection_return_target_for_key(state, playlist.id.clone());
     save_active_collection_scroll_position(state);
 
@@ -5563,7 +4456,7 @@ fn show_playlist_tracks(state: &Rc<RefCell<UiState>>, playlist: &UiPlaylist) {
     load_selected_waveform(state);
 }
 
-fn show_artist_albums(state: &Rc<RefCell<UiState>>, artist: &ArtistSummary) {
+pub(crate) fn show_artist_albums(state: &Rc<RefCell<UiState>>, artist: &ArtistSummary) {
     let return_target = collection_return_target_for_key(state, artist.key.clone());
     save_active_collection_scroll_position(state);
 
@@ -5591,7 +4484,7 @@ fn show_artist_albums(state: &Rc<RefCell<UiState>>, artist: &ArtistSummary) {
     focus_active_collection_grid(state);
 }
 
-fn focus_active_collection_grid(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn focus_active_collection_grid(state: &Rc<RefCell<UiState>>) {
     let (
         active_page,
         album_filter,
@@ -5637,7 +4530,7 @@ fn focus_active_collection_grid(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn return_to_collection_grid(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn return_to_collection_grid(state: &Rc<RefCell<UiState>>) {
     let refresh_grid = {
         let ui = state.borrow();
         ui.collection_detail_parent_search_query
@@ -5689,7 +4582,7 @@ fn return_to_collection_grid(state: &Rc<RefCell<UiState>>) {
     pulse_collection_return_target(state, return_target);
 }
 
-fn navigate_to_now_playing_artist(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn navigate_to_now_playing_artist(state: &Rc<RefCell<UiState>>) {
     let artist = {
         let ui = state.borrow();
         if ui.playback_session.mode.is_radio() {
@@ -5711,7 +4604,7 @@ fn navigate_to_now_playing_artist(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn navigate_to_now_playing_album(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn navigate_to_now_playing_album(state: &Rc<RefCell<UiState>>) {
     let album = {
         let ui = state.borrow();
         if ui.playback_session.mode.is_radio() {
@@ -5733,7 +4626,7 @@ fn navigate_to_now_playing_album(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn update_content_view(state: &Rc<RefCell<UiState>>, direction: NavDirection) {
+pub(crate) fn update_content_view(state: &Rc<RefCell<UiState>>, direction: NavDirection) {
     let (
         stack,
         detail_header,
@@ -5803,7 +4696,7 @@ fn update_content_view(state: &Rc<RefCell<UiState>>, direction: NavDirection) {
     }
 }
 
-fn update_nav_counts(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn update_nav_counts(state: &Rc<RefCell<UiState>>) {
     let (
         track_label,
         album_label,
@@ -5848,7 +4741,7 @@ fn update_nav_counts(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn update_nav_selection(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn update_nav_selection(state: &Rc<RefCell<UiState>>) {
     let (list, active_page) = {
         let ui = state.borrow();
         (ui.nav_list.clone(), ui.active_page)
@@ -5880,7 +4773,7 @@ fn update_nav_selection(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn built_in_radio_stations() -> Vec<RadioStation> {
+pub(crate) fn built_in_radio_stations() -> Vec<RadioStation> {
     vec![
         RadioStation::built_in(
             "Lofi",
@@ -5900,12 +4793,14 @@ fn built_in_radio_stations() -> Vec<RadioStation> {
     ]
 }
 
-fn radio_stations_for_display(state: &Rc<RefCell<UiState>>) -> Vec<RadioStation> {
+pub(crate) fn radio_stations_for_display(state: &Rc<RefCell<UiState>>) -> Vec<RadioStation> {
     let ui = state.borrow();
     radio_stations_for_display_from(&ui.radio_stations)
 }
 
-fn radio_stations_for_display_from(custom_stations: &[RadioStation]) -> Vec<RadioStation> {
+pub(crate) fn radio_stations_for_display_from(
+    custom_stations: &[RadioStation],
+) -> Vec<RadioStation> {
     let mut stations = built_in_radio_stations();
     stations.extend(
         custom_stations
@@ -5916,7 +4811,7 @@ fn radio_stations_for_display_from(custom_stations: &[RadioStation]) -> Vec<Radi
     stations
 }
 
-fn load_radio_stations() -> Vec<RadioStation> {
+pub(crate) fn load_radio_stations() -> Vec<RadioStation> {
     match CacheDatabase::open_default().and_then(|cache| cache.get_setting(RADIO_STATIONS_KEY)) {
         Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_else(|error| {
             tracing::warn!(%error, "failed to parse radio stations");
@@ -5930,7 +4825,7 @@ fn load_radio_stations() -> Vec<RadioStation> {
     }
 }
 
-fn save_radio_stations(stations: &[RadioStation]) {
+pub(crate) fn save_radio_stations(stations: &[RadioStation]) {
     let custom = stations
         .iter()
         .filter(|station| !station.built_in)
@@ -5947,14 +4842,14 @@ fn save_radio_stations(stations: &[RadioStation]) {
     }
 }
 
-fn current_radio_station(ui: &UiState) -> Option<RadioStation> {
+pub(crate) fn current_radio_station(ui: &UiState) -> Option<RadioStation> {
     let station_id = ui.playback_session.mode.radio_station_id()?;
     radio_stations_for_display_from(&ui.radio_stations)
         .into_iter()
         .find(|station| station.id == station_id)
 }
 
-fn persist_custom_radio_station(
+pub(crate) fn persist_custom_radio_station(
     state: &Rc<RefCell<UiState>>,
     name: &str,
     url: &str,
@@ -5992,7 +4887,7 @@ fn persist_custom_radio_station(
     true
 }
 
-fn update_custom_radio_station(
+pub(crate) fn update_custom_radio_station(
     state: &Rc<RefCell<UiState>>,
     station_id: &str,
     name: &str,
@@ -6051,7 +4946,7 @@ fn update_custom_radio_station(
     true
 }
 
-fn radio_station_conflicts(
+pub(crate) fn radio_station_conflicts(
     stations: &[RadioStation],
     ignored_station_id: Option<&str>,
     name: &str,
@@ -6063,7 +4958,7 @@ fn radio_station_conflicts(
     })
 }
 
-fn refresh_radio_page(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn refresh_radio_page(state: &Rc<RefCell<UiState>>) {
     let Some(grid) = state.borrow().radio_grid.clone() else {
         return;
     };
@@ -6082,7 +4977,10 @@ fn refresh_radio_page(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn radio_station_card(state: Rc<RefCell<UiState>>, station: RadioStation) -> gtk::Overlay {
+pub(crate) fn radio_station_card(
+    state: Rc<RefCell<UiState>>,
+    station: RadioStation,
+) -> gtk::Overlay {
     let card = gtk::Overlay::new();
     card.add_css_class("radio-station-card");
     card.set_width_request(RADIO_CARD_CONTENT_WIDTH);
@@ -6204,7 +5102,7 @@ fn radio_station_card(state: Rc<RefCell<UiState>>, station: RadioStation) -> gtk
     card
 }
 
-fn radio_station_subtitle(station: &RadioStation) -> String {
+pub(crate) fn radio_station_subtitle(station: &RadioStation) -> String {
     if station.built_in {
         return "Stream Preset".to_string();
     }
@@ -6216,7 +5114,7 @@ fn radio_station_subtitle(station: &RadioStation) -> String {
     }
 }
 
-fn radio_station_form_popover<F>(
+pub(crate) fn radio_station_form_popover<F>(
     title: &str,
     submit_label: &str,
     name: &str,
@@ -6282,7 +5180,10 @@ where
     (popover, name_entry, url_entry, icon_entry)
 }
 
-fn radio_station_edit_popover(state: Rc<RefCell<UiState>>, station: RadioStation) -> gtk::Popover {
+pub(crate) fn radio_station_edit_popover(
+    state: Rc<RefCell<UiState>>,
+    station: RadioStation,
+) -> gtk::Popover {
     let station_id = station.id.clone();
     let (popover, _, _, _) = radio_station_form_popover(
         "Edit Station",
@@ -6295,14 +5196,14 @@ fn radio_station_edit_popover(state: Rc<RefCell<UiState>>, station: RadioStation
     popover
 }
 
-fn radio_status_badge(text: &str) -> gtk::Label {
+pub(crate) fn radio_status_badge(text: &str) -> gtk::Label {
     let badge = label(text, "radio-playing-badge");
     badge.set_halign(Align::End);
     badge.set_valign(Align::Start);
     badge
 }
 
-fn radio_icon(size: i32) -> gtk::DrawingArea {
+pub(crate) fn radio_icon(size: i32) -> gtk::DrawingArea {
     let icon = gtk::DrawingArea::new();
     icon.add_css_class("radio-receiver-icon");
     icon.set_content_width(size);
@@ -6344,7 +5245,7 @@ fn radio_icon(size: i32) -> gtk::DrawingArea {
     icon
 }
 
-fn radio_station_icon(icon: &str) -> gtk::Label {
+pub(crate) fn radio_station_icon(icon: &str) -> gtk::Label {
     let icon = gtk::Label::new(Some(icon));
     icon.add_css_class("radio-card-icon");
     icon.set_size_request(48, 48);
@@ -6360,15 +5261,7 @@ fn radio_station_icon(icon: &str) -> gtk::Label {
     icon
 }
 
-fn default_radio_icon_for_kind(kind: RadioSourceKind) -> &'static str {
-    match kind {
-        RadioSourceKind::Stream => RADIO_DEFAULT_ICON,
-        RadioSourceKind::YouTube => RADIO_DEFAULT_ICON,
-        RadioSourceKind::Twitch => RADIO_DEFAULT_ICON,
-    }
-}
-
-fn play_radio_station(state: &Rc<RefCell<UiState>>, station: &RadioStation) {
+pub(crate) fn play_radio_station(state: &Rc<RefCell<UiState>>, station: &RadioStation) {
     let Ok(input_url) = station.url.parse::<url::Url>() else {
         state
             .borrow()
@@ -6384,7 +5277,7 @@ fn play_radio_station(state: &Rc<RefCell<UiState>>, station: &RadioStation) {
     }
 }
 
-fn resolve_and_play_radio_station(
+pub(crate) fn resolve_and_play_radio_station(
     state: &Rc<RefCell<UiState>>,
     station: RadioStation,
     page_url: url::Url,
@@ -6458,7 +5351,7 @@ fn resolve_and_play_radio_station(
     });
 }
 
-fn play_resolved_radio_station(
+pub(crate) fn play_resolved_radio_station(
     state: &Rc<RefCell<UiState>>,
     station: &RadioStation,
     stream_url: url::Url,
@@ -6522,7 +5415,7 @@ fn play_resolved_radio_station(
     }
 }
 
-fn set_active_radio_station_ui(
+pub(crate) fn set_active_radio_station_ui(
     ui: &mut UiState,
     station: &RadioStation,
     status_override: Option<&str>,
@@ -6539,7 +5432,7 @@ fn set_active_radio_station_ui(
     sync_external_playback(ui);
 }
 
-fn resume_radio_station(state: &Rc<RefCell<UiState>>) -> bool {
+pub(crate) fn resume_radio_station(state: &Rc<RefCell<UiState>>) -> bool {
     let station = {
         let ui = state.borrow();
         current_radio_station(&ui)
@@ -6553,7 +5446,7 @@ fn resume_radio_station(state: &Rc<RefCell<UiState>>) -> bool {
     }
 }
 
-fn clear_track_visuals_for_radio(ui: &mut UiState) {
+pub(crate) fn clear_track_visuals_for_radio(ui: &mut UiState) {
     {
         let mut waveform = ui.waveform.borrow_mut();
         waveform.peaks.clear();
@@ -6571,64 +5464,7 @@ fn clear_track_visuals_for_radio(ui: &mut UiState) {
     }
 }
 
-fn apply_track_filter(ui: &mut UiState, selected_key: Option<&str>) {
-    let query = ui.search_query.to_lowercase();
-    let artist_album_keys = ui.artist_filter.as_deref().map(|selected_artist_key| {
-        ui.library_albums
-            .iter()
-            .filter(|album| artist_key(&album.artist) == selected_artist_key)
-            .map(|album| album.key.clone())
-            .collect::<HashSet<_>>()
-    });
-    let source_tracks = ui
-        .playlist_filter
-        .as_deref()
-        .and_then(|playlist_id| {
-            ui.playlists
-                .iter()
-                .find(|playlist| playlist.id == playlist_id)
-                .map(|playlist| playlist.tracks.as_slice())
-        })
-        .unwrap_or(ui.all_tracks.as_slice());
-    ui.tracks = source_tracks
-        .iter()
-        .filter(|track| {
-            let album_matches = ui
-                .album_filter
-                .as_deref()
-                .map(|key| album_key(track) == key)
-                .unwrap_or(true);
-            let artist_matches = ui
-                .artist_filter
-                .as_deref()
-                .map(|_| {
-                    artist_album_keys
-                        .as_ref()
-                        .is_some_and(|album_keys| album_keys.contains(&album_key(track)))
-                })
-                .unwrap_or(true);
-            let search_matches = query.is_empty() || track_matches_query(track, &query);
-            album_matches && artist_matches && search_matches
-        })
-        .cloned()
-        .collect();
-    sort_track_slice(
-        &mut ui.tracks,
-        ui.sort_column,
-        ui.sort_ascending,
-        &ui.search_query,
-        ui.album_filter.is_some(),
-        selected_key,
-        &mut ui.selected_index,
-    );
-    ui.track_filter_signature = ui.current_track_filter_signature();
-    if ui.playback_session.queue_tracks.is_empty() {
-        let selected_index = ui.selected_index;
-        rebuild_playback_order(ui, selected_index);
-    }
-}
-
-fn update_page_summary(ui: &UiState) {
+pub(crate) fn update_page_summary(ui: &UiState) {
     if let Some(title) = ui.collection_detail_title.as_deref() {
         if ui.active_page == LibraryPage::Artists && ui.album_filter.is_none() {
             let (album_count, song_count) = ui
@@ -6681,30 +5517,30 @@ fn update_page_summary(ui: &UiState) {
     }
 }
 
-fn rebuild_playback_order(ui: &mut UiState, start_index: usize) {
+pub(crate) fn rebuild_playback_order(ui: &mut UiState, start_index: usize) {
     ui.playback_session
         .rebuild_order_for_library(ui.tracks.len(), start_index);
 }
 
-fn next_playback_index(ui: &UiState) -> Option<usize> {
+pub(crate) fn next_playback_index(ui: &UiState) -> Option<usize> {
     let current_index = ui.playback_session.current_index_or(ui.selected_index);
     ui.playback_session.next_index(current_index)
 }
 
-fn previous_playback_index(ui: &UiState) -> Option<usize> {
+pub(crate) fn previous_playback_index(ui: &UiState) -> Option<usize> {
     let current_index = ui.playback_session.current_index_or(ui.selected_index);
     ui.playback_session.previous_index(current_index)
 }
 
-fn queued_tracks(ui: &UiState) -> Vec<(usize, UiTrack)> {
+pub(crate) fn queued_tracks(ui: &UiState) -> Vec<(usize, UiTrack)> {
     queued_tracks_with_limit(ui, QUEUE_PREVIEW_LIMIT)
 }
 
-fn next_up_tracks(ui: &UiState) -> Vec<(usize, UiTrack)> {
+pub(crate) fn next_up_tracks(ui: &UiState) -> Vec<(usize, UiTrack)> {
     queued_tracks_with_limit(ui, NEXT_UP_PAGE_LIMIT)
 }
 
-fn queued_tracks_with_limit(ui: &UiState, limit: usize) -> Vec<(usize, UiTrack)> {
+pub(crate) fn queued_tracks_with_limit(ui: &UiState, limit: usize) -> Vec<(usize, UiTrack)> {
     let tracks = if ui.playback_session.queue_tracks.is_empty() {
         ui.tracks.as_slice()
     } else {
@@ -6720,7 +5556,7 @@ fn queued_tracks_with_limit(ui: &UiState, limit: usize) -> Vec<(usize, UiTrack)>
 }
 
 #[cfg(test)]
-fn queued_tracks_from_order(
+pub(crate) fn queued_tracks_from_order(
     tracks: &[UiTrack],
     playback_order: &[usize],
     current_index: usize,
@@ -6728,7 +5564,7 @@ fn queued_tracks_from_order(
     queued_tracks_from_order_with_limit(tracks, playback_order, current_index, QUEUE_PREVIEW_LIMIT)
 }
 
-fn queued_tracks_from_order_with_limit(
+pub(crate) fn queued_tracks_from_order_with_limit(
     tracks: &[UiTrack],
     playback_order: &[usize],
     current_index: usize,
@@ -6740,12 +5576,16 @@ fn queued_tracks_from_order_with_limit(
         .collect()
 }
 
-fn upcoming_track_count(ui: &UiState) -> usize {
+pub(crate) fn upcoming_track_count(ui: &UiState) -> usize {
     let current_index = ui.playback_session.current_index_or(ui.selected_index);
     ui.playback_session.upcoming_count(current_index)
 }
 
-fn move_next_up_track(state: &Rc<RefCell<UiState>>, from: usize, to_slot: usize) -> bool {
+pub(crate) fn move_next_up_track(
+    state: &Rc<RefCell<UiState>>,
+    from: usize,
+    to_slot: usize,
+) -> bool {
     let changed = {
         let mut ui = state.borrow_mut();
         let current_index = ui.playback_session.current_index_or(ui.selected_index);
@@ -6767,7 +5607,7 @@ fn move_next_up_track(state: &Rc<RefCell<UiState>>, from: usize, to_slot: usize)
     changed
 }
 
-fn queue_track_next(ui: &mut UiState, target_track: UiTrack) -> bool {
+pub(crate) fn queue_track_next(ui: &mut UiState, target_track: UiTrack) -> bool {
     ui.playback_session.queue_library_track_next(
         &ui.tracks,
         ui.selected_index,
@@ -6776,7 +5616,7 @@ fn queue_track_next(ui: &mut UiState, target_track: UiTrack) -> bool {
     )
 }
 
-fn finalize_queue_change(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn finalize_queue_change(state: &Rc<RefCell<UiState>>) {
     {
         let mut ui = state.borrow_mut();
         arm_gapless_next(&mut ui);
@@ -6786,7 +5626,7 @@ fn finalize_queue_change(state: &Rc<RefCell<UiState>>) {
     rebuild_queue_list(state);
 }
 
-fn queue_visible_track_next(state: &Rc<RefCell<UiState>>, visible_index: usize) -> bool {
+pub(crate) fn queue_visible_track_next(state: &Rc<RefCell<UiState>>, visible_index: usize) -> bool {
     let changed = {
         let mut ui = state.borrow_mut();
         let Some(track) = ui.tracks.get(visible_index).cloned() else {
@@ -6800,7 +5640,10 @@ fn queue_visible_track_next(state: &Rc<RefCell<UiState>>, visible_index: usize) 
     changed
 }
 
-fn queue_existing_track_next(state: &Rc<RefCell<UiState>>, playback_index: usize) -> bool {
+pub(crate) fn queue_existing_track_next(
+    state: &Rc<RefCell<UiState>>,
+    playback_index: usize,
+) -> bool {
     let changed = {
         let mut ui = state.borrow_mut();
         let track = if ui.playback_session.queue_tracks.is_empty() {
@@ -6822,7 +5665,7 @@ fn queue_existing_track_next(state: &Rc<RefCell<UiState>>, playback_index: usize
     changed
 }
 
-fn connect_play_next_gesture<F>(widget: &impl IsA<gtk::Widget>, handler: F)
+pub(crate) fn connect_play_next_gesture<F>(widget: &impl IsA<gtk::Widget>, handler: F)
 where
     F: Fn() -> bool + 'static,
 {
@@ -6840,136 +5683,7 @@ where
     widget.add_controller(gesture);
 }
 
-fn track_matches_query(track: &UiTrack, query: &str) -> bool {
-    track.title.to_lowercase().contains(query)
-        || track.artist.to_lowercase().contains(query)
-        || track.album.to_lowercase().contains(query)
-}
-
-fn exact_title_match_rank(track: &UiTrack, query: &str) -> u8 {
-    if track.title.trim().eq_ignore_ascii_case(query) {
-        0
-    } else {
-        1
-    }
-}
-
-fn track_key(track: &UiTrack) -> String {
-    track
-        .item_id
-        .clone()
-        .unwrap_or_else(|| format!("{}\u{1f}{}\u{1f}{}", track.title, track.artist, track.album))
-}
-
-fn track_has_key(track: &UiTrack, key: &str) -> bool {
-    match track.item_id.as_deref() {
-        Some(item_id) => item_id == key,
-        None => track_key(track) == key,
-    }
-}
-
-fn same_track(left: &UiTrack, right: &UiTrack) -> bool {
-    match (left.item_id.as_deref(), right.item_id.as_deref()) {
-        (Some(left_id), Some(right_id)) => left_id == right_id,
-        (None, None) => {
-            left.title == right.title && left.artist == right.artist && left.album == right.album
-        }
-        _ => false,
-    }
-}
-
-fn track_key_if_same_album(track: &UiTrack, album_key_value: &str) -> Option<String> {
-    (album_key(track) == album_key_value).then(|| track_key(track))
-}
-
-fn preferred_refresh_track_key(
-    tracks: &[UiTrack],
-    now_playing_key: Option<&str>,
-    selected_key: Option<&str>,
-) -> Option<String> {
-    now_playing_key
-        .filter(|key| tracks.iter().any(|track| track_has_key(track, key)))
-        .map(|key| key.to_string())
-        .or_else(|| {
-            selected_key
-                .filter(|key| tracks.iter().any(|track| track_has_key(track, key)))
-                .map(|key| key.to_string())
-        })
-}
-
-fn current_display_track(state: &UiState) -> Option<&UiTrack> {
-    if state.playback_session.mode.is_radio() {
-        return None;
-    }
-
-    state
-        .playback_session
-        .now_playing_key
-        .as_deref()
-        .and_then(|key| find_track_by_key(state, key))
-        .or_else(|| state.tracks.get(state.selected_index))
-}
-
-fn find_track_by_key<'a>(state: &'a UiState, key: &str) -> Option<&'a UiTrack> {
-    state
-        .all_tracks
-        .iter()
-        .find(|track| track_has_key(track, key))
-        .or_else(|| state.tracks.iter().find(|track| track_has_key(track, key)))
-}
-
-fn compare_text(left: &str, right: &str) -> Ordering {
-    left.chars()
-        .flat_map(char::to_lowercase)
-        .cmp(right.chars().flat_map(char::to_lowercase))
-}
-
-fn compare_artist_album_track(left: &UiTrack, right: &UiTrack) -> Ordering {
-    compare_text(&left.artist, &right.artist)
-        .then_with(|| compare_text(&left.album, &right.album))
-        .then_with(|| compare_optional_i32(left.disc_number, right.disc_number))
-        .then_with(|| compare_optional_i32(left.track_number, right.track_number))
-        .then_with(|| compare_text(&left.title, &right.title))
-}
-
-fn compare_album_track_order(left: &UiTrack, right: &UiTrack) -> Ordering {
-    compare_optional_usize(left.album_position, right.album_position)
-        .then_with(|| compare_optional_i32(left.disc_number, right.disc_number))
-        .then_with(|| compare_optional_i32(left.track_number, right.track_number))
-        .then_with(|| compare_text(&left.title, &right.title))
-        .then_with(|| compare_text(&left.artist, &right.artist))
-}
-
-fn compare_optional_usize(left: Option<usize>, right: Option<usize>) -> Ordering {
-    match (left, right) {
-        (Some(left), Some(right)) => left.cmp(&right),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => Ordering::Equal,
-    }
-}
-
-fn compare_optional_i32(left: Option<i32>, right: Option<i32>) -> Ordering {
-    match (left, right) {
-        (Some(left), Some(right)) => left.cmp(&right),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => Ordering::Equal,
-    }
-}
-
-fn duration_seconds(duration: &str) -> i32 {
-    let mut total = 0;
-    for part in duration.split(':') {
-        let Ok(value) = part.parse::<i32>() else {
-            return 0;
-        };
-        total = total * 60 + value;
-    }
-    total
-}
-
-fn apply_connection_payload(state: &Rc<RefCell<UiState>>, payload: ConnectionPayload) {
+pub(crate) fn apply_connection_payload(state: &Rc<RefCell<UiState>>, payload: ConnectionPayload) {
     let (now_playing_key, selected_key) = {
         let ui = state.borrow();
         (
@@ -7032,7 +5746,7 @@ fn apply_connection_payload(state: &Rc<RefCell<UiState>>, payload: ConnectionPay
     restore_persisted_playback(state);
 }
 
-fn update_now_playing_labels(state: &UiState) {
+pub(crate) fn update_now_playing_labels(state: &UiState) {
     if let Some(station) = current_radio_station(state) {
         state.now_title.set_text(&station.name);
         state
@@ -7068,7 +5782,7 @@ fn update_now_playing_labels(state: &UiState) {
     }
 }
 
-fn radio_playback_status_text(state: &UiState, station: &RadioStation) -> String {
+pub(crate) fn radio_playback_status_text(state: &UiState, station: &RadioStation) -> String {
     if let Some(device) = state.active_cast_device.as_ref() {
         return if state.cast_is_playing {
             format!("▶ Casting radio to {}", device.name)
@@ -7084,7 +5798,7 @@ fn radio_playback_status_text(state: &UiState, station: &RadioStation) -> String
     }
 }
 
-fn playback_status_text(state: &UiState, track: &UiTrack) -> String {
+pub(crate) fn playback_status_text(state: &UiState, track: &UiTrack) -> String {
     if let Some(device) = state.active_cast_device.as_ref() {
         return if state.cast_is_playing {
             format!("▶ Casting to {} | {}", device.name, track.quality)
@@ -7113,7 +5827,7 @@ fn playback_status_text(state: &UiState, track: &UiTrack) -> String {
     }
 }
 
-fn update_play_button(state: &UiState) {
+pub(crate) fn update_play_button(state: &UiState) {
     let Some(button) = state.play_button.as_ref() else {
         return;
     };
@@ -7154,7 +5868,7 @@ fn update_play_button(state: &UiState) {
     }
 }
 
-fn update_shuffle_button(state: &UiState) {
+pub(crate) fn update_shuffle_button(state: &UiState) {
     let Some(button) = state.shuffle_button.as_ref() else {
         return;
     };
@@ -7172,7 +5886,7 @@ fn update_shuffle_button(state: &UiState) {
     }
 }
 
-fn random_index(len: usize) -> Option<usize> {
+pub(crate) fn random_index(len: usize) -> Option<usize> {
     if len == 0 {
         return None;
     }
@@ -7183,7 +5897,7 @@ fn random_index(len: usize) -> Option<usize> {
     Some((hasher.finish() as usize) % len)
 }
 
-fn play_random_for_page(state: &Rc<RefCell<UiState>>, page: LibraryPage) {
+pub(crate) fn play_random_for_page(state: &Rc<RefCell<UiState>>, page: LibraryPage) {
     match page {
         LibraryPage::Tracks => {
             let count = state.borrow().tracks.len();
@@ -7240,7 +5954,7 @@ fn play_random_for_page(state: &Rc<RefCell<UiState>>, page: LibraryPage) {
     }
 }
 
-fn toggle_shuffle(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn toggle_shuffle(state: &Rc<RefCell<UiState>>) {
     {
         let mut ui = state.borrow_mut();
         let track_count = ui.tracks.len();
@@ -7254,7 +5968,7 @@ fn toggle_shuffle(state: &Rc<RefCell<UiState>>) {
     rebuild_queue_list(state);
 }
 
-fn pause_playback(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn pause_playback(state: &Rc<RefCell<UiState>>) {
     let mut ui = state.borrow_mut();
     let radio_is_active = ui.playback_session.mode.is_radio();
 
@@ -7278,7 +5992,7 @@ fn pause_playback(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn resume_playback(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn resume_playback(state: &Rc<RefCell<UiState>>) {
     let mut ui = state.borrow_mut();
 
     match ui.playback.as_ref().map(PlaybackEngine::state).cloned() {
@@ -7315,7 +6029,7 @@ fn resume_playback(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn toggle_play_pause(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn toggle_play_pause(state: &Rc<RefCell<UiState>>) {
     // In Cast mode, route play/pause to the Cast device
     {
         let mut ui = state.borrow_mut();
@@ -7349,12 +6063,12 @@ fn toggle_play_pause(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn play_track_at_selected_index(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn play_track_at_selected_index(state: &Rc<RefCell<UiState>>) {
     let index = state.borrow().selected_index;
     play_track_at(state, index);
 }
 
-fn play_previous_track(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn play_previous_track(state: &Rc<RefCell<UiState>>) {
     let previous_index = {
         let ui = state.borrow();
         if ui.playback_session.mode.is_radio() {
@@ -7366,7 +6080,7 @@ fn play_previous_track(state: &Rc<RefCell<UiState>>) {
     play_track_at_existing_order(state, previous_index);
 }
 
-fn play_next_track(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn play_next_track(state: &Rc<RefCell<UiState>>) {
     let next_index = {
         let ui = state.borrow();
         if ui.playback_session.mode.is_radio() {
@@ -7378,15 +6092,19 @@ fn play_next_track(state: &Rc<RefCell<UiState>>) {
     play_track_at_existing_order(state, next_index);
 }
 
-fn play_track_at(state: &Rc<RefCell<UiState>>, index: usize) {
+pub(crate) fn play_track_at(state: &Rc<RefCell<UiState>>, index: usize) {
     play_track_at_with_order(state, index, true);
 }
 
-fn play_track_at_existing_order(state: &Rc<RefCell<UiState>>, index: usize) {
+pub(crate) fn play_track_at_existing_order(state: &Rc<RefCell<UiState>>, index: usize) {
     play_track_at_with_order(state, index, false);
 }
 
-fn play_track_at_with_order(state: &Rc<RefCell<UiState>>, index: usize, rebuild_order: bool) {
+pub(crate) fn play_track_at_with_order(
+    state: &Rc<RefCell<UiState>>,
+    index: usize,
+    rebuild_order: bool,
+) {
     let (selected_index, visible_index) = {
         let mut ui = state.borrow_mut();
         let ui = &mut *ui;
@@ -7408,7 +6126,7 @@ fn play_track_at_with_order(state: &Rc<RefCell<UiState>>, index: usize, rebuild_
     play_selected_track(state);
 }
 
-fn select_track_model_row(state: &Rc<RefCell<UiState>>, index: usize) {
+pub(crate) fn select_track_model_row(state: &Rc<RefCell<UiState>>, index: usize) {
     let (selection, track_count) = {
         let ui = state.borrow();
         (ui.track_selection.clone(), ui.tracks.len())
@@ -7421,7 +6139,7 @@ fn select_track_model_row(state: &Rc<RefCell<UiState>>, index: usize) {
     }
 }
 
-fn play_selected_track(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn play_selected_track(state: &Rc<RefCell<UiState>>) {
     // If a Chromecast session is active, load the new track on the device instead
     let cast_url_and_type: Option<(String, String, f64)> = {
         let ui = state.borrow();
@@ -7549,11 +6267,11 @@ fn play_selected_track(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn playback_request_for_track(track: &UiTrack) -> Option<PlaybackRequest> {
+pub(crate) fn playback_request_for_track(track: &UiTrack) -> Option<PlaybackRequest> {
     playback_request_for_track_kind(track, PlaybackStreamKind::Direct)
 }
 
-fn playback_request_for_track_kind(
+pub(crate) fn playback_request_for_track_kind(
     track: &UiTrack,
     stream_kind: PlaybackStreamKind,
 ) -> Option<PlaybackRequest> {
@@ -7571,19 +6289,19 @@ fn playback_request_for_track_kind(
     })
 }
 
-fn next_gapless_request(ui: &UiState) -> Option<PlaybackRequest> {
+pub(crate) fn next_gapless_request(ui: &UiState) -> Option<PlaybackRequest> {
     let next_index = next_playback_index(ui)?;
     playback_request_for_track(ui.playback_session.queue_tracks.get(next_index)?)
 }
 
-fn arm_gapless_next(ui: &mut UiState) {
+pub(crate) fn arm_gapless_next(ui: &mut UiState) {
     let request = next_gapless_request(ui);
     if let Some(playback) = ui.playback.as_mut() {
         playback.set_next(request);
     }
 }
 
-fn stop_playback(ui: &mut UiState) {
+pub(crate) fn stop_playback(ui: &mut UiState) {
     ui.playback_session.reset_to_library();
     if let Some(playback) = ui.playback.as_mut()
         && let Err(error) = playback.stop()
@@ -7594,7 +6312,7 @@ fn stop_playback(ui: &mut UiState) {
     sync_external_playback_status(ui);
 }
 
-fn load_selected_cover_art(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn load_selected_cover_art(state: &Rc<RefCell<UiState>>) {
     let (url, cover) = {
         let ui = state.borrow();
         let url = current_display_track(&ui).and_then(|track| track.thumbnail_artwork_url.clone());
@@ -7651,7 +6369,7 @@ fn load_selected_cover_art(state: &Rc<RefCell<UiState>>) {
     });
 }
 
-fn show_full_size_artwork(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn show_full_size_artwork(state: &Rc<RefCell<UiState>>) {
     let (title, full_url, paintable) = {
         let ui = state.borrow();
         let track = current_display_track(&ui);
@@ -7687,7 +6405,7 @@ fn show_full_size_artwork(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn load_full_size_artwork(url: String, picture: gtk::Picture) {
+pub(crate) fn load_full_size_artwork(url: String, picture: gtk::Picture) {
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
         let result = fetch_cached_image_file(&url);
@@ -7714,7 +6432,7 @@ fn load_full_size_artwork(url: String, picture: gtk::Picture) {
     });
 }
 
-fn image_http_client() -> Result<&'static reqwest::blocking::Client, ImageFetchError> {
+pub(crate) fn image_http_client() -> Result<&'static reqwest::blocking::Client, ImageFetchError> {
     // Artwork loads happen in bursts (one per visible tile); share one client
     // so connections are pooled instead of paying TLS setup per image.
     static CLIENT: std::sync::OnceLock<Option<reqwest::blocking::Client>> =
@@ -7730,7 +6448,7 @@ fn image_http_client() -> Result<&'static reqwest::blocking::Client, ImageFetchE
         .ok_or(ImageFetchError::Request("request client failed"))
 }
 
-fn fetch_image_file(url: &str) -> Result<PathBuf, ImageFetchError> {
+pub(crate) fn fetch_image_file(url: &str) -> Result<PathBuf, ImageFetchError> {
     let response = image_http_client()?
         .get(url)
         .send()
@@ -7752,7 +6470,7 @@ fn fetch_image_file(url: &str) -> Result<PathBuf, ImageFetchError> {
     Ok(path)
 }
 
-fn fetch_cached_image_file(url: &str) -> Result<PathBuf, ImageFetchError> {
+pub(crate) fn fetch_cached_image_file(url: &str) -> Result<PathBuf, ImageFetchError> {
     let path = artwork_cache_path(url);
     if path.exists() {
         Ok(path)
@@ -7761,7 +6479,7 @@ fn fetch_cached_image_file(url: &str) -> Result<PathBuf, ImageFetchError> {
     }
 }
 
-fn connect_and_fetch(
+pub(crate) fn connect_and_fetch(
     server_url: &str,
     username: &str,
     password: &str,
@@ -7778,7 +6496,7 @@ fn connect_and_fetch(
     let _ = sender.send(ConnectionMessage::Finished(result));
 }
 
-fn reconnect_and_fetch(
+pub(crate) fn reconnect_and_fetch(
     server_url: &str,
     username: &str,
     password: &str,
@@ -7795,7 +6513,7 @@ fn reconnect_and_fetch(
     let _ = sender.send(ConnectionMessage::Finished(result));
 }
 
-fn reconnect_and_fetch_payload(
+pub(crate) fn reconnect_and_fetch_payload(
     server_url: &str,
     username: &str,
     password: &str,
@@ -7842,7 +6560,7 @@ fn reconnect_and_fetch_payload(
     Ok(payload)
 }
 
-fn connect_and_fetch_payload(
+pub(crate) fn connect_and_fetch_payload(
     server_url: &str,
     username: &str,
     password: &str,
@@ -7877,7 +6595,7 @@ fn connect_and_fetch_payload(
     Ok(payload)
 }
 
-fn fetch_saved_session(
+pub(crate) fn fetch_saved_session(
     session: JellyfinSession,
     sender: mpsc::Sender<ConnectionMessage>,
     generation: u64,
@@ -7886,12 +6604,12 @@ fn fetch_saved_session(
     let _ = sender.send(ConnectionMessage::Finished(result));
 }
 
-fn refresh_saved_session(sender: mpsc::Sender<ConnectionMessage>, generation: u64) {
+pub(crate) fn refresh_saved_session(sender: mpsc::Sender<ConnectionMessage>, generation: u64) {
     let result = refresh_saved_session_payload(Some(sender.clone()), generation);
     let _ = sender.send(ConnectionMessage::Finished(result));
 }
 
-fn refresh_saved_session_payload(
+pub(crate) fn refresh_saved_session_payload(
     sender: Option<mpsc::Sender<ConnectionMessage>>,
     generation: u64,
 ) -> Result<ConnectionPayload, String> {
@@ -7936,7 +6654,7 @@ fn refresh_saved_session_payload(
     Ok(payload)
 }
 
-fn fetch_saved_session_payload(
+pub(crate) fn fetch_saved_session_payload(
     session: JellyfinSession,
     sender: Option<mpsc::Sender<ConnectionMessage>>,
     generation: u64,
@@ -7974,7 +6692,7 @@ fn fetch_saved_session_payload(
     Ok(payload)
 }
 
-fn ensure_connection_generation_current(generation: u64) -> Result<(), String> {
+pub(crate) fn ensure_connection_generation_current(generation: u64) -> Result<(), String> {
     if CONNECTION_GENERATION.load(AtomicOrdering::SeqCst) == generation {
         Ok(())
     } else {
@@ -7982,7 +6700,7 @@ fn ensure_connection_generation_current(generation: u64) -> Result<(), String> {
     }
 }
 
-fn fetch_library_for_session(
+pub(crate) fn fetch_library_for_session(
     client: JellyfinClient,
     session: JellyfinSession,
     sender: Option<mpsc::Sender<ConnectionMessage>>,
@@ -8025,7 +6743,7 @@ fn fetch_library_for_session(
     })
 }
 
-fn fetch_incremental_library_for_session(
+pub(crate) fn fetch_incremental_library_for_session(
     client: JellyfinClient,
     session: JellyfinSession,
     cached_library: CachedLibrary,
@@ -8120,7 +6838,7 @@ fn fetch_incremental_library_for_session(
     })
 }
 
-fn merge_incremental_playlists(
+pub(crate) fn merge_incremental_playlists(
     client: &JellyfinClient,
     session: &JellyfinSession,
     tracks: &[UiTrack],
@@ -8196,13 +6914,13 @@ fn merge_incremental_playlists(
     Ok(playlists)
 }
 
-fn summaries_missing_change_stamps(summaries: &[JellyfinItemSummary]) -> bool {
+pub(crate) fn summaries_missing_change_stamps(summaries: &[JellyfinItemSummary]) -> bool {
     summaries
         .iter()
         .any(|summary| summary.date_last_saved.is_none())
 }
 
-fn changed_summary_ids<T>(
+pub(crate) fn changed_summary_ids<T>(
     summaries: &[JellyfinItemSummary],
     cached_by_id: &HashMap<String, T>,
     cached_stamp: impl Fn(&T) -> Option<&str>,
@@ -8217,13 +6935,16 @@ fn changed_summary_ids<T>(
         .collect()
 }
 
-fn send_connection_status(sender: Option<&mpsc::Sender<ConnectionMessage>>, message: &str) {
+pub(crate) fn send_connection_status(
+    sender: Option<&mpsc::Sender<ConnectionMessage>>,
+    message: &str,
+) {
     if let Some(sender) = sender {
         let _ = sender.send(ConnectionMessage::Status(message.to_string()));
     }
 }
 
-fn describe_jellyfin_error(error: JellyfinClientError) -> String {
+pub(crate) fn describe_jellyfin_error(error: JellyfinClientError) -> String {
     match &error {
         JellyfinClientError::Http(http_error) => {
             if matches!(
@@ -8251,7 +6972,7 @@ fn describe_jellyfin_error(error: JellyfinClientError) -> String {
     error.to_string()
 }
 
-fn save_library_cache(
+pub(crate) fn save_library_cache(
     cache: &CacheDatabase,
     session: &JellyfinSession,
     payload: &ConnectionPayload,
@@ -8263,7 +6984,7 @@ fn save_library_cache(
     cache.set_setting(&library_cache_key(session), &json)
 }
 
-fn load_library_cache(
+pub(crate) fn load_library_cache(
     cache: &CacheDatabase,
     session: &JellyfinSession,
 ) -> Result<Option<CachedLibrary>, crate::cache::CacheError> {
@@ -8292,7 +7013,7 @@ fn load_library_cache(
     Ok(None)
 }
 
-fn load_cached_library(
+pub(crate) fn load_cached_library(
     cache: &CacheDatabase,
     key: &str,
 ) -> Result<Option<CachedLibrary>, crate::cache::CacheError> {
@@ -8302,7 +7023,7 @@ fn load_cached_library(
         .transpose()
 }
 
-fn load_cached_tracks(
+pub(crate) fn load_cached_tracks(
     cache: &CacheDatabase,
     key: &str,
 ) -> Result<Option<Vec<UiTrack>>, crate::cache::CacheError> {
@@ -8312,14 +7033,14 @@ fn load_cached_tracks(
         .transpose()
 }
 
-fn hydrate_stream_http_headers(tracks: &mut [UiTrack], session: &JellyfinSession) {
+pub(crate) fn hydrate_stream_http_headers(tracks: &mut [UiTrack], session: &JellyfinSession) {
     let headers = stream_http_headers_for_token(Some(&session.access_token));
     for track in tracks {
         track.stream_http_headers = headers.clone();
     }
 }
 
-fn hydrate_cached_library(library: &mut CachedLibrary, session: &JellyfinSession) {
+pub(crate) fn hydrate_cached_library(library: &mut CachedLibrary, session: &JellyfinSession) {
     hydrate_stream_http_headers(&mut library.tracks, session);
     hydrate_sidebar_cover_thumbnail_urls(&mut library.tracks);
     for playlist in &mut library.playlists {
@@ -8329,13 +7050,13 @@ fn hydrate_cached_library(library: &mut CachedLibrary, session: &JellyfinSession
     }
 }
 
-fn hydrate_sidebar_cover_thumbnail_urls(tracks: &mut [UiTrack]) {
+pub(crate) fn hydrate_sidebar_cover_thumbnail_urls(tracks: &mut [UiTrack]) {
     for track in tracks {
         normalize_sidebar_cover_thumbnail_url(&mut track.thumbnail_artwork_url);
     }
 }
 
-fn normalize_sidebar_cover_thumbnail_url(url: &mut Option<String>) {
+pub(crate) fn normalize_sidebar_cover_thumbnail_url(url: &mut Option<String>) {
     let Some(existing_url) = url.as_mut() else {
         return;
     };
@@ -8346,7 +7067,7 @@ fn normalize_sidebar_cover_thumbnail_url(url: &mut Option<String>) {
     }
 }
 
-fn resized_jellyfin_image_url(url: &str, max_size: u32) -> Option<String> {
+pub(crate) fn resized_jellyfin_image_url(url: &str, max_size: u32) -> Option<String> {
     let Ok(mut parsed) = url::Url::parse(url) else {
         return None;
     };
@@ -8384,7 +7105,7 @@ fn resized_jellyfin_image_url(url: &str, max_size: u32) -> Option<String> {
     Some(parsed.to_string())
 }
 
-fn library_needs_album_order_refresh(library: &CachedLibrary) -> bool {
+pub(crate) fn library_needs_album_order_refresh(library: &CachedLibrary) -> bool {
     let mut album_order_metadata = HashMap::<String, (usize, bool)>::new();
     for track in &library.tracks {
         let (count, has_order_metadata) = album_order_metadata
@@ -8401,7 +7122,7 @@ fn library_needs_album_order_refresh(library: &CachedLibrary) -> bool {
         .any(|(count, has_order_metadata)| *count > 1 && !*has_order_metadata)
 }
 
-fn library_cache_key(session: &JellyfinSession) -> String {
+pub(crate) fn library_cache_key(session: &JellyfinSession) -> String {
     format!(
         "jellyfin.library.v4.{}.{}",
         library_cache_server_key(session),
@@ -8409,7 +7130,7 @@ fn library_cache_key(session: &JellyfinSession) -> String {
     )
 }
 
-fn legacy_library_cache_key_v3(session: &JellyfinSession) -> String {
+pub(crate) fn legacy_library_cache_key_v3(session: &JellyfinSession) -> String {
     format!(
         "jellyfin.library.v3.{}.{}",
         library_cache_server_key(session),
@@ -8417,7 +7138,7 @@ fn legacy_library_cache_key_v3(session: &JellyfinSession) -> String {
     )
 }
 
-fn legacy_library_cache_key_v2(session: &JellyfinSession) -> String {
+pub(crate) fn legacy_library_cache_key_v2(session: &JellyfinSession) -> String {
     format!(
         "jellyfin.library.{}.{}",
         library_cache_server_key(session),
@@ -8425,16 +7146,16 @@ fn legacy_library_cache_key_v2(session: &JellyfinSession) -> String {
     )
 }
 
-fn library_cache_server_key(session: &JellyfinSession) -> &str {
+pub(crate) fn library_cache_server_key(session: &JellyfinSession) -> &str {
     session
         .server_id
         .as_deref()
         .unwrap_or(session.server_url.as_str())
 }
 
-const QUEUE_PREVIEW_LIMIT: usize = 15;
+pub(crate) const QUEUE_PREVIEW_LIMIT: usize = 15;
 
-fn queue_card(state: Rc<RefCell<UiState>>) -> gtk::Box {
+pub(crate) fn queue_card(state: Rc<RefCell<UiState>>) -> gtk::Box {
     let card = gtk::Box::new(Orientation::Vertical, 4);
     card.add_css_class("queue-card");
     card.set_halign(Align::Fill);
@@ -8539,7 +7260,7 @@ fn queue_card(state: Rc<RefCell<UiState>>) -> gtk::Box {
     card
 }
 
-fn rebuild_queue_list(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn rebuild_queue_list(state: &Rc<RefCell<UiState>>) {
     let (queue_view, upcoming) = {
         let ui = state.borrow();
         (ui.queue_view.clone(), queued_tracks(&ui))
@@ -8583,7 +7304,7 @@ fn rebuild_queue_list(state: &Rc<RefCell<UiState>>) {
     rebuild_next_up_page(state);
 }
 
-fn rebuild_next_up_page(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn rebuild_next_up_page(state: &Rc<RefCell<UiState>>) {
     let (next_up_view, upcoming) = {
         let ui = state.borrow();
         (ui.next_up_view.clone(), next_up_tracks(&ui))
@@ -8611,7 +7332,7 @@ fn rebuild_next_up_page(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn next_up_row(
+pub(crate) fn next_up_row(
     state: Rc<RefCell<UiState>>,
     position: usize,
     track_index: usize,
@@ -8787,7 +7508,7 @@ fn next_up_row(
     button
 }
 
-fn load_queue_art(
+pub(crate) fn load_queue_art(
     url: Option<String>,
     image: gtk::Image,
     current_url: Rc<RefCell<Option<String>>>,
@@ -8833,7 +7554,7 @@ fn load_queue_art(
     });
 }
 
-fn load_collection_queue_art(
+pub(crate) fn load_collection_queue_art(
     url: Option<String>,
     image: gtk::Image,
     current_url: Rc<RefCell<Option<String>>>,
@@ -8844,20 +7565,20 @@ fn load_collection_queue_art(
     });
 }
 
-fn load_collection_picture_art(url: String, image: gtk::Image, tile_index: usize) {
+pub(crate) fn load_collection_picture_art(url: String, image: gtk::Image, tile_index: usize) {
     gtk::glib::timeout_add_local_once(collection_artwork_delay(tile_index), move || {
         load_picture_art(url, image);
     });
 }
 
-fn collection_artwork_delay(tile_index: usize) -> Duration {
+pub(crate) fn collection_artwork_delay(tile_index: usize) -> Duration {
     let stagger_index = tile_index.min(COLLECTION_ARTWORK_MAX_STAGGERED_ITEMS) as u64;
     Duration::from_millis(
         COLLECTION_ARTWORK_INITIAL_DELAY_MS + (stagger_index * COLLECTION_ARTWORK_STAGGER_MS),
     )
 }
 
-fn load_picture_art(url: String, image: gtk::Image) {
+pub(crate) fn load_picture_art(url: String, image: gtk::Image) {
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
         let result = fetch_cached_image_file(&url);
@@ -8898,7 +7619,7 @@ fn load_picture_art(url: String, image: gtk::Image) {
     });
 }
 
-fn scroll_to_now_playing(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn scroll_to_now_playing(state: &Rc<RefCell<UiState>>) {
     let needs_tracks_page = {
         let ui = state.borrow();
         ui.active_page != LibraryPage::Tracks
@@ -8942,7 +7663,7 @@ fn scroll_to_now_playing(state: &Rc<RefCell<UiState>>) {
     scroll_track_list_to_index(state, idx);
 }
 
-fn build_bottom_bar(state: Rc<RefCell<UiState>>) -> gtk::Box {
+pub(crate) fn build_bottom_bar(state: Rc<RefCell<UiState>>) -> gtk::Box {
     let bar = gtk::Box::new(Orientation::Horizontal, 12);
     bar.add_css_class("bottom-bar");
 
@@ -8981,7 +7702,7 @@ fn build_bottom_bar(state: Rc<RefCell<UiState>>) -> gtk::Box {
 }
 
 #[allow(deprecated)]
-fn show_reconnect_dialog(parent: &gtk::Window, state: Rc<RefCell<UiState>>) {
+pub(crate) fn show_reconnect_dialog(parent: &gtk::Window, state: Rc<RefCell<UiState>>) {
     let session = match CacheDatabase::open_default().and_then(|db| db.load_jellyfin_session()) {
         Ok(Some(session)) => session,
         Ok(None) => {
@@ -9086,7 +7807,7 @@ fn show_reconnect_dialog(parent: &gtk::Window, state: Rc<RefCell<UiState>>) {
     dialog.present();
 }
 
-fn reconnect_summary_row(name: &str, value: &str) -> gtk::Box {
+pub(crate) fn reconnect_summary_row(name: &str, value: &str) -> gtk::Box {
     let row = gtk::Box::new(Orientation::Horizontal, 10);
     row.add_css_class("reconnect-summary-row");
 
@@ -9105,7 +7826,7 @@ fn reconnect_summary_row(name: &str, value: &str) -> gtk::Box {
 }
 
 #[allow(deprecated)]
-fn poll_reconnect_result(
+pub(crate) fn poll_reconnect_result(
     receiver: mpsc::Receiver<ConnectionMessage>,
     state: Rc<RefCell<UiState>>,
     status: gtk::Label,
@@ -9200,7 +7921,7 @@ fn poll_reconnect_result(
     });
 }
 
-fn nav_list(state: Rc<RefCell<UiState>>) -> gtk::ListBox {
+pub(crate) fn nav_list(state: Rc<RefCell<UiState>>) -> gtk::ListBox {
     let list = gtk::ListBox::new();
     list.add_css_class("nav-list");
     list.set_selection_mode(gtk::SelectionMode::Single);
@@ -9299,27 +8020,7 @@ fn nav_list(state: Rc<RefCell<UiState>>) -> gtk::ListBox {
     list
 }
 
-fn label(text: &str, class_name: &str) -> gtk::Label {
-    let label = gtk::Label::new(Some(text));
-    label.set_xalign(0.0);
-    label.set_valign(Align::Center);
-    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    if !class_name.is_empty() {
-        label.add_css_class(class_name);
-    }
-    label
-}
-
-fn icon_button(icon_name: &str, tooltip: &str) -> gtk::Button {
-    let button = gtk::Button::builder()
-        .icon_name(icon_name)
-        .tooltip_text(tooltip)
-        .build();
-    button.add_css_class("icon-button");
-    button
-}
-
-fn next_up_link_button(state: Rc<RefCell<UiState>>) -> gtk::Button {
+pub(crate) fn next_up_link_button(state: Rc<RefCell<UiState>>) -> gtk::Button {
     let button = gtk::Button::new();
     button.add_css_class("flat");
     button.add_css_class("queue-link");
@@ -9343,15 +8044,7 @@ fn next_up_link_button(state: Rc<RefCell<UiState>>) -> gtk::Button {
     button
 }
 
-fn cover_art(size: i32) -> gtk::Image {
-    let art = gtk::Image::new();
-    art.add_css_class("cover");
-    art.set_size_request(size, size);
-    art.set_pixel_size(size);
-    art
-}
-
-fn update_cast_playback_position(state: &Rc<RefCell<UiState>>) -> bool {
+pub(crate) fn update_cast_playback_position(state: &Rc<RefCell<UiState>>) -> bool {
     let has_cast = state.borrow().cast_session.is_some();
     if !has_cast {
         return false;
@@ -9456,7 +8149,7 @@ fn update_cast_playback_position(state: &Rc<RefCell<UiState>>) -> bool {
     true
 }
 
-fn update_cast_progress_labels(ui: &UiState, position_secs: f64, duration_secs: f64) {
+pub(crate) fn update_cast_progress_labels(ui: &UiState, position_secs: f64, duration_secs: f64) {
     let pos = Duration::from_secs_f64(position_secs.max(0.0));
     ui.elapsed_label.set_text(&format_duration(pos));
     if duration_secs > 0.0 {
@@ -9473,7 +8166,7 @@ fn update_cast_progress_labels(ui: &UiState, position_secs: f64, duration_secs: 
     }
 }
 
-fn start_playback_timer(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn start_playback_timer(state: &Rc<RefCell<UiState>>) {
     let state = state.clone();
     gtk::glib::timeout_add_local(Duration::from_millis(250), move || {
         update_playback_position(&state);
@@ -9481,7 +8174,7 @@ fn start_playback_timer(state: &Rc<RefCell<UiState>>) {
     });
 }
 
-fn update_playback_position(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn update_playback_position(state: &Rc<RefCell<UiState>>) {
     // In Cast mode, drain Cast events and update progress from device position
     if update_cast_playback_position(state) {
         return;
@@ -9555,7 +8248,7 @@ fn update_playback_position(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn take_playback_event(state: &Rc<RefCell<UiState>>) -> Option<PlaybackEvent> {
+pub(crate) fn take_playback_event(state: &Rc<RefCell<UiState>>) -> Option<PlaybackEvent> {
     state
         .borrow_mut()
         .playback
@@ -9563,7 +8256,7 @@ fn take_playback_event(state: &Rc<RefCell<UiState>>) -> Option<PlaybackEvent> {
         .and_then(PlaybackEngine::take_playback_event)
 }
 
-fn handle_playback_event(state: &Rc<RefCell<UiState>>, event: PlaybackEvent) {
+pub(crate) fn handle_playback_event(state: &Rc<RefCell<UiState>>, event: PlaybackEvent) {
     match event {
         PlaybackEvent::EndOfStream => advance_after_track_end(state),
         PlaybackEvent::Error {
@@ -9574,7 +8267,7 @@ fn handle_playback_event(state: &Rc<RefCell<UiState>>, event: PlaybackEvent) {
     }
 }
 
-fn handle_playback_error(
+pub(crate) fn handle_playback_error(
     state: &Rc<RefCell<UiState>>,
     item_id: Option<String>,
     stream_kind: Option<PlaybackStreamKind>,
@@ -9675,7 +8368,7 @@ fn handle_playback_error(
     update_list_indicators(state);
 }
 
-fn apply_gapless_transition(state: &Rc<RefCell<UiState>>) -> bool {
+pub(crate) fn apply_gapless_transition(state: &Rc<RefCell<UiState>>) -> bool {
     let transition = {
         let mut ui = state.borrow_mut();
         ui.playback
@@ -9739,7 +8432,7 @@ fn apply_gapless_transition(state: &Rc<RefCell<UiState>>) -> bool {
     true
 }
 
-fn advance_after_track_end(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn advance_after_track_end(state: &Rc<RefCell<UiState>>) {
     let next_index = {
         let ui = state.borrow();
         next_playback_index(&ui)
@@ -9765,7 +8458,7 @@ fn advance_after_track_end(state: &Rc<RefCell<UiState>>) {
     }
 }
 
-fn load_selected_waveform(state: &Rc<RefCell<UiState>>) {
+pub(crate) fn load_selected_waveform(state: &Rc<RefCell<UiState>>) {
     let (key, stream_url, stream_http_headers, area, status, waveform) = {
         let ui = state.borrow();
         let track = current_display_track(&ui);
@@ -9858,7 +8551,7 @@ fn load_selected_waveform(state: &Rc<RefCell<UiState>>) {
     });
 }
 
-fn apply_waveform_summary(state: &Rc<RefCell<UiState>>, summary: WaveformSummary) {
+pub(crate) fn apply_waveform_summary(state: &Rc<RefCell<UiState>>, summary: WaveformSummary) {
     let ui = state.borrow();
     {
         let mut visual = ui.waveform.borrow_mut();
@@ -9875,7 +8568,7 @@ fn apply_waveform_summary(state: &Rc<RefCell<UiState>>, summary: WaveformSummary
     }
 }
 
-fn seek_waveform(state: &Rc<RefCell<UiState>>, area: &gtk::DrawingArea, x: f64) {
+pub(crate) fn seek_waveform(state: &Rc<RefCell<UiState>>, area: &gtk::DrawingArea, x: f64) {
     let width = area.allocated_width().max(1) as f64;
     let progress = (x / width).clamp(0.0, 1.0);
     let mut ui = state.borrow_mut();
@@ -9933,14 +8626,7 @@ fn seek_waveform(state: &Rc<RefCell<UiState>>, area: &gtk::DrawingArea, x: f64) 
     }
 }
 
-fn format_duration(duration: Duration) -> String {
-    let total_seconds = duration.as_secs();
-    let minutes = total_seconds / 60;
-    let seconds = total_seconds % 60;
-    format!("{minutes}:{seconds:02}")
-}
-
-fn waveform_widget(state: Rc<RefCell<UiState>>) -> gtk::DrawingArea {
+pub(crate) fn waveform_widget(state: Rc<RefCell<UiState>>) -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
     area.set_content_height(48);
     area.set_hexpand(true);
@@ -10715,46 +9401,4 @@ mod tests {
         assert_eq!(fallback.stream_kind, PlaybackStreamKind::Transcode);
         assert_eq!(fallback.stream_url.path(), "/Audio/track-id/universal");
     }
-}
-
-fn rounded_rect(cr: &gtk::cairo::Context, x: f64, y: f64, width: f64, height: f64, radius: f64) {
-    let radius = radius.min(width / 2.0).min(height / 2.0);
-    cr.new_sub_path();
-    cr.arc(
-        x + width - radius,
-        y + radius,
-        radius,
-        -std::f64::consts::FRAC_PI_2,
-        0.0,
-    );
-    cr.arc(
-        x + width - radius,
-        y + height - radius,
-        radius,
-        0.0,
-        std::f64::consts::FRAC_PI_2,
-    );
-    cr.arc(
-        x + radius,
-        y + height - radius,
-        radius,
-        std::f64::consts::FRAC_PI_2,
-        std::f64::consts::PI,
-    );
-    cr.arc(
-        x + radius,
-        y + radius,
-        radius,
-        std::f64::consts::PI,
-        std::f64::consts::PI * 1.5,
-    );
-    cr.close_path();
-}
-
-#[allow(dead_code)]
-fn set_margin_all(widget: &impl IsA<gtk::Widget>, margin: i32) {
-    widget.set_margin_top(margin);
-    widget.set_margin_bottom(margin);
-    widget.set_margin_start(margin);
-    widget.set_margin_end(margin);
 }
