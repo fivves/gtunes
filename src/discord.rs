@@ -439,9 +439,13 @@ fn discord_assets<'a>(
     presence: &'a PresenceActivity,
     config: &'a PresenceConfig,
 ) -> activity::Assets<'a> {
+    // Only publish artwork once it has been mirrored to the public PictShare
+    // host; the original Jellyfin URL embeds the private server address and
+    // access token, which must never be sent to Discord.
     let large_image = presence
         .artwork_source_url
         .as_deref()
+        .filter(|url| validate_pictshare_url(url).is_ok())
         .or(config.large_image_key.as_deref());
     let large_text = presence.album.as_deref().unwrap_or("gTunes");
 
@@ -580,6 +584,37 @@ mod tests {
             payload.get("state").and_then(serde_json::Value::as_str),
             Some("Artist")
         );
+    }
+
+    #[test]
+    fn activity_never_sends_private_artwork_urls_to_discord() {
+        let presence = PresenceActivity {
+            title: "Song".to_string(),
+            artist: "Artist".to_string(),
+            album: Some("Album".to_string()),
+            artwork_source_url: Some(
+                "https://jellyfin.example/Items/1/Images/Primary?api_key=secret".to_string(),
+            ),
+            playback_state: PresencePlaybackState::Playing,
+            position: None,
+            duration: None,
+        };
+        let config = PresenceConfig {
+            client_id: "123".to_string(),
+            large_image_key: None,
+            small_image_key: None,
+        };
+
+        let payload =
+            serde_json::to_value(discord_activity(&presence, &config)).expect("serialize");
+        assert!(!payload.to_string().contains("secret"));
+
+        let public = PresenceActivity {
+            artwork_source_url: Some("https://img.fvvs.me/abc.jpg".to_string()),
+            ..presence
+        };
+        let payload = serde_json::to_value(discord_activity(&public, &config)).expect("serialize");
+        assert!(payload.to_string().contains("img.fvvs.me"));
     }
 
     #[test]
