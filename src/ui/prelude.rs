@@ -34,6 +34,7 @@ pub(crate) use crate::playback::{
 pub(crate) use crate::waveform::{WaveformKey, WaveformSummary};
 
 pub(crate) use super::artwork::*;
+pub(crate) use super::connection::*;
 pub(crate) use super::integrations::*;
 pub(crate) use super::library::*;
 pub(crate) use super::models::*;

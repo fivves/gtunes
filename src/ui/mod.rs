@@ -1,4 +1,5 @@
 pub(crate) mod artwork;
+pub(crate) mod connection;
 pub(crate) mod integrations;
 pub(crate) mod library;
 pub(crate) mod models;
