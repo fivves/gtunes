@@ -5475,7 +5475,7 @@ fn restore_persisted_playback(state: &Rc<RefCell<UiState>>) {
         else {
             return;
         };
-        let tracks = ui.tracks.clone();
+        let ui = &mut *ui;
         let fallback_selected_index = ui.selected_index;
         let Some(selection) = ui.playback_session.restore_library_playback(
             session::RestoredPlayback {
@@ -5484,7 +5484,7 @@ fn restore_persisted_playback(state: &Rc<RefCell<UiState>>) {
                 playback_order,
                 shuffle_enabled: snapshot.shuffle_enabled,
             },
-            &tracks,
+            &ui.tracks,
             fallback_selected_index,
             |queued, visible| track_key(queued) == track_key(visible),
             track_key,
@@ -5492,9 +5492,9 @@ fn restore_persisted_playback(state: &Rc<RefCell<UiState>>) {
             return;
         };
         ui.selected_index = selection.selected_index;
-        update_shuffle_button(&ui);
-        update_now_playing_labels(&ui);
-        update_play_button(&ui);
+        update_shuffle_button(ui);
+        update_now_playing_labels(ui);
+        update_play_button(ui);
         true
     };
 
@@ -6760,9 +6760,8 @@ fn move_next_up_track(state: &Rc<RefCell<UiState>>, from: usize, to_slot: usize)
 }
 
 fn queue_track_next(ui: &mut UiState, target_track: UiTrack) -> bool {
-    let tracks = ui.tracks.clone();
     ui.playback_session.queue_library_track_next(
-        &tracks,
+        &ui.tracks,
         ui.selected_index,
         target_track,
         |queued, target| track_key(queued) == track_key(target),
@@ -6972,13 +6971,13 @@ fn apply_connection_payload(state: &Rc<RefCell<UiState>>, payload: ConnectionPay
             now_playing_key.as_deref(),
             selected_key.as_deref(),
         );
-        let all_tracks = ui.all_tracks.clone();
+        let ui = &mut *ui;
         ui.playback_session
-            .reconcile_library_refresh(&all_tracks, track_key);
-        apply_track_filter(&mut ui, selected_key.as_deref());
-        update_now_playing_labels(&ui);
-        update_play_button(&ui);
-        update_page_summary(&ui);
+            .reconcile_library_refresh(&ui.all_tracks, track_key);
+        apply_track_filter(ui, selected_key.as_deref());
+        update_now_playing_labels(ui);
+        update_play_button(ui);
+        update_page_summary(ui);
         ui.page_summary.set_text(&format!(
             "Jellyfin music library | {} tracks synced from {}",
             ui.all_tracks.len(),
@@ -7363,17 +7362,17 @@ fn play_track_at_existing_order(state: &Rc<RefCell<UiState>>, index: usize) {
 fn play_track_at_with_order(state: &Rc<RefCell<UiState>>, index: usize, rebuild_order: bool) {
     let (selected_index, visible_index) = {
         let mut ui = state.borrow_mut();
-        let tracks = ui.tracks.clone();
+        let ui = &mut *ui;
         let selection = ui.playback_session.select_library_track(
-            &tracks,
+            &ui.tracks,
             index,
             rebuild_order,
             |queued, visible| track_key(queued) == track_key(visible),
         );
         ui.selected_index = selection.selected_index;
 
-        update_now_playing_labels(&ui);
-        update_play_button(&ui);
+        update_now_playing_labels(ui);
+        update_play_button(ui);
         (ui.selected_index, selection.visible_index)
     };
     if visible_index.is_some() {
