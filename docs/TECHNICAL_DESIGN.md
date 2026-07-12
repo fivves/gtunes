@@ -25,6 +25,8 @@ gTunes 1.0 does not support lyrics.
 - Reqwest for Jellyfin HTTP calls and image fetches.
 - Serde and Serde JSON for Jellyfin responses and cached payloads.
 - Souvlaki for MPRIS desktop media controls.
+- `discord-rich-presence` for Discord activity updates over local IPC.
+- `mdns-sd` for Chromecast discovery and `native-tls` for the Cast TLS channel.
 - `directories` for platform data and cache locations.
 - `tracing` for structured diagnostics.
 
@@ -57,6 +59,16 @@ gTunes 1.0 does not support lyrics.
 : Wraps GStreamer `playbin`, applies Jellyfin stream headers, tracks playback
   state, handles seeking, polls bus events, and arms the next stream for
   gapless-style handoff.
+
+`cast`
+: Owns Chromecast and UPnP/DLNA device discovery (mDNS and SSDP), the Cast v2
+  wire protocol session on a worker thread, and UPnP SOAP transport commands.
+  The cast UI in `ui/cast_ui.rs` drives this module through channels.
+
+`discord`
+: Owns the Discord Rich Presence worker thread, activity payload construction,
+  and mirroring album art to a public host so private Jellyfin URLs never reach
+  Discord. Controlled by the Discord Rich Presence setting.
 
 `cache`
 : Owns SQLite opening, schema migration, app settings, saved Jellyfin sessions,

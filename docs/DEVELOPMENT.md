@@ -24,6 +24,10 @@ Main module boundaries:
   `prelude.rs`) — do not grow `window.rs` back into a catch-all.
 - `src/jellyfin/`: Jellyfin client methods, stream/image URL construction, HTTP
   headers, pagination, playlists, and typed API models.
+- `src/cast/`: Chromecast and UPnP/DLNA device discovery, the Cast wire
+  protocol session, and UPnP SOAP transport commands.
+- `src/discord.rs`: the Discord Rich Presence worker thread and public artwork
+  mirroring for presence album art.
 - `src/playback/`: GStreamer playback state, source header setup, seeking,
   stream handoff, bus polling, and stop behavior.
 - `src/cache/`: SQLite migrations, app settings, saved sessions, waveform cache
@@ -36,14 +40,14 @@ Architecture details live in [TECHNICAL_DESIGN.md](TECHNICAL_DESIGN.md).
 ## Prerequisites
 
 Install Rust and the native libraries needed by GTK, Libadwaita, GStreamer,
-SQLite, and DBus.
+SQLite, DBus, and OpenSSL (used by the Chromecast TLS connection).
 
 Install `yt-dlp` and `streamlink` when testing YouTube or Twitch radio stations.
 
 Arch Linux:
 
 ```sh
-sudo pacman -S rust gtk4 libadwaita gstreamer gst-plugins-base sqlite dbus pkgconf
+sudo pacman -S rust gtk4 libadwaita gstreamer gst-plugins-base sqlite dbus openssl pkgconf
 ```
 
 Ubuntu or Debian:
@@ -51,14 +55,15 @@ Ubuntu or Debian:
 ```sh
 sudo apt install build-essential pkg-config libgtk-4-dev libadwaita-1-dev \
   libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libsqlite3-dev \
-  libdbus-1-dev
+  libdbus-1-dev libssl-dev
 ```
 
 Fedora:
 
 ```sh
 sudo dnf install rust cargo gtk4-devel libadwaita-devel gstreamer1-devel \
-  gstreamer1-plugins-base-devel sqlite-devel dbus-devel pkgconf-pkg-config
+  gstreamer1-plugins-base-devel sqlite-devel dbus-devel openssl-devel \
+  pkgconf-pkg-config
 ```
 
 ## First Run

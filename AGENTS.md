@@ -7,8 +7,10 @@ libraries. Source lives in `src/`: `main.rs` initializes tracing and
 GStreamer, `app.rs` starts the GTK application, and `config.rs` stores package
 metadata. Feature areas are split into `src/ui/` for the interface (see the
 layout below); `src/jellyfin/` for the typed API client and models;
-`src/playback/` for GStreamer playback; `src/cache/` for SQLite schema and
-local state; and `src/waveform/` for waveform generation and cache files.
+`src/playback/` for GStreamer playback; `src/cast/` for Chromecast and
+UPnP/DLNA discovery and wire protocols; `src/discord.rs` for the Discord Rich
+Presence worker; `src/cache/` for SQLite schema and local state; and
+`src/waveform/` for waveform generation and cache files.
 Contributor docs are under `docs/`, and AppImage packaging is in
 `scripts/build-appimage.sh`.
 

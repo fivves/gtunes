@@ -5,10 +5,10 @@
 </br>
 
 gTunes is a native Linux desktop music client for Jellyfin-hosted music
-libraries. Version 1.1.4, The Stability Update, is not a major feature release.
-It focuses on a more robust playback core, queue/session reliability, radio
-state handling, Discord Rich Presence integration, and desktop media-key
-integration.
+libraries. Version 1.1.5 adds Chromecast and UPnP/DLNA casting, a reorderable
+Next Up queue page, animation and font settings, a Discord Rich Presence
+toggle, and a round of performance and reliability work on top of the 1.1.4
+stability release.
 
 The app is built with Rust, GTK4, Libadwaita, GStreamer, SQLite, Reqwest, and
 Souvlaki.
@@ -33,6 +33,12 @@ Souvlaki.
   playback time.
 - Use previous, play/pause, next, shuffle, and queue controls.
 - Preview the next 15 tracks in the queue and jump directly to upcoming tracks.
+- Open the Next Up page to see up to 50 upcoming tracks and reorder them with
+  drag and drop.
+- Cast playback to Chromecast and UPnP/DLNA devices discovered on the local
+  network, with synced transport controls and seamless position handoff.
+- Show the current track in Discord Rich Presence, with a settings switch to
+  turn the integration off.
 - Generate, cache, display, and scrub waveforms for Jellyfin audio streams.
 - Show elapsed and remaining playback time.
 - Keep playback running after the window is closed, when enabled in settings.
@@ -44,8 +50,9 @@ Souvlaki.
 - Reset saved login, cached library data, artwork, and waveform files from the
   settings menu.
 
-gTunes 1.1.4 does not include live, synced, unsynced, embedded, or Jellyfin
+gTunes 1.1.5 does not include live, synced, unsynced, embedded, or Jellyfin
 lyrics support.
+
 ## Requirements
 
 - Linux desktop environment with GTK4 support.
@@ -56,6 +63,7 @@ lyrics support.
 - GStreamer base plugins.
 - SQLite development libraries.
 - DBus development libraries for MPRIS media controls.
+- OpenSSL development libraries for Chromecast TLS connections.
 - `pkg-config`.
 - A Jellyfin server with a music library.
 - Optional for YouTube and Twitch radio stations: `yt-dlp` and `streamlink`.
@@ -63,7 +71,7 @@ lyrics support.
 Arch Linux:
 
 ```sh
-sudo pacman -S rust gtk4 libadwaita gstreamer gst-plugins-base sqlite dbus pkgconf
+sudo pacman -S rust gtk4 libadwaita gstreamer gst-plugins-base sqlite dbus openssl pkgconf
 ```
 
 Ubuntu or Debian:
@@ -71,14 +79,15 @@ Ubuntu or Debian:
 ```sh
 sudo apt install build-essential pkg-config libgtk-4-dev libadwaita-1-dev \
   libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libsqlite3-dev \
-  libdbus-1-dev
+  libdbus-1-dev libssl-dev
 ```
 
 Fedora:
 
 ```sh
 sudo dnf install rust cargo gtk4-devel libadwaita-devel gstreamer1-devel \
-  gstreamer1-plugins-base-devel sqlite-devel dbus-devel pkgconf-pkg-config
+  gstreamer1-plugins-base-devel sqlite-devel dbus-devel openssl-devel \
+  pkgconf-pkg-config
 ```
 
 ## Getting Started
@@ -115,15 +124,18 @@ caches the library for faster startup.
 
 ## Using gTunes
 
-The left sidebar switches between Tracks, Albums, Artists, and Playlists. The
-main view changes between a sortable track table and artwork grids for
-collections. Selecting an album, artist, or playlist opens a detail view with
-matching tracks.
+The left sidebar switches between Tracks, Albums, Artists, Playlists, and
+Radio. The main view changes between a sortable track table and artwork grids
+for collections. Selecting an album, artist, or playlist opens a detail view
+with matching tracks. Double-click the sidebar navigation to play something
+random from the current page.
 
 The player bar contains transport controls, now-playing metadata, the waveform,
-elapsed and remaining time, search, shuffle, and settings. Click the artist or
-album in the now-playing area to jump to that collection. Click the cover art in
-the sidebar to open a larger artwork view.
+elapsed and remaining time, search, shuffle, cast, and settings. Click the
+artist or album in the now-playing area to jump to that collection. Click the
+cover art in the sidebar to open a larger artwork view. The cast button scans
+the local network for Chromecast and UPnP/DLNA devices; right-click it to
+disconnect or to reconnect to the last device.
 
 The waveform is generated from the Jellyfin stream and cached locally. Click or
 drag on the waveform to seek within the current track after the waveform is
@@ -132,6 +144,9 @@ available.
 Settings include:
 
 - Keep playing while closed.
+- Animations.
+- Font style (default or monospace).
+- Discord Rich Presence.
 - Refresh library.
 - Keyboard shortcuts.
 - About gTunes.
@@ -145,6 +160,8 @@ Keyboard shortcuts:
 - `Ctrl+2`: Albums.
 - `Ctrl+3`: Artists.
 - `Ctrl+4`: Playlists.
+- `Ctrl+5`: Radio.
+- `Ctrl+S`: toggle shuffle.
 - Type while the library has focus: jump to matching tracks, albums, artists, or
   playlists.
 - `Return`: play the selected type-to-jump result.
@@ -202,7 +219,9 @@ cargo clippy --all-targets --all-features -- -D warnings
 src/
   app.rs              GTK application startup and activation.
   cache/              SQLite schema, settings, sessions, and cache helpers.
+  cast/               Chromecast and UPnP/DLNA discovery and wire protocol.
   config.rs           Application identifiers and package metadata.
+  discord.rs          Discord Rich Presence worker and artwork mirroring.
   jellyfin/           Jellyfin HTTP client and typed API models.
   main.rs             Tracing and GStreamer initialization.
   playback/           GStreamer playback engine, queue handoff, and seeking.
