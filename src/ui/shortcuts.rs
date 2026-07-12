@@ -175,6 +175,17 @@ pub(crate) fn clear_search_entry(state: &Rc<RefCell<UiState>>) {
 
 pub(crate) fn text_input_has_focus(state: &Rc<RefCell<UiState>>) -> bool {
     let ui = state.borrow();
+
+    // Ask the window which widget actually has focus and check for an editable
+    // in its ancestry. Enumerating known entries here misses fields created on
+    // demand (e.g. the radio station edit popover), which made type-to-jump
+    // steal keystrokes from them.
+    if let Some(root) = ui.now_title.root()
+        && let Some(focused) = root.focus()
+    {
+        return widget_is_text_input(&focused);
+    }
+
     ui.search_entry
         .as_ref()
         .is_some_and(widget_has_focus_within)
@@ -198,6 +209,17 @@ pub(crate) fn text_input_has_focus(state: &Rc<RefCell<UiState>>) -> bool {
             .radio_url_entry
             .as_ref()
             .is_some_and(widget_has_focus_within)
+}
+
+pub(crate) fn widget_is_text_input(widget: &gtk::Widget) -> bool {
+    let mut current = Some(widget.clone());
+    while let Some(widget) = current {
+        if widget.dynamic_cast_ref::<gtk::Editable>().is_some() {
+            return true;
+        }
+        current = widget.parent();
+    }
+    false
 }
 
 pub(crate) fn widget_has_focus_within(widget: &impl IsA<gtk::Widget>) -> bool {
