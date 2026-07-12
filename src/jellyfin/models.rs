@@ -61,26 +61,6 @@ pub struct JellyfinTrack {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase")]
-pub struct JellyfinAlbum {
-    pub id: JellyfinItemId,
-    pub name: String,
-    #[serde(default)]
-    pub album_artist: Option<String>,
-    #[serde(default)]
-    pub production_year: Option<i32>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "PascalCase")]
-pub struct JellyfinArtist {
-    pub id: JellyfinItemId,
-    pub name: String,
-    #[serde(default)]
-    pub image_tags: JellyfinImageTags,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "PascalCase")]
 pub struct JellyfinPlaylist {
     pub id: JellyfinItemId,
     pub name: String,
@@ -96,17 +76,6 @@ pub struct JellyfinItemSummary {
     pub id: JellyfinItemId,
     #[serde(default)]
     pub date_last_saved: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "PascalCase")]
-pub struct JellyfinImageTags {
-    #[serde(default)]
-    pub primary: Option<String>,
-    #[serde(default)]
-    pub backdrop: Option<String>,
-    #[serde(default)]
-    pub logo: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -126,23 +95,6 @@ pub struct JellyfinMediaSource {
     pub container: Option<String>,
     #[serde(default)]
     pub bitrate: Option<i32>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ArtistImageKind {
-    Primary,
-    Backdrop,
-    Logo,
-}
-
-impl ArtistImageKind {
-    pub fn as_jellyfin_name(self) -> &'static str {
-        match self {
-            Self::Primary => "Primary",
-            Self::Backdrop => "Backdrop",
-            Self::Logo => "Logo",
-        }
-    }
 }
 
 #[cfg(test)]

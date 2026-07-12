@@ -96,11 +96,3 @@ pub(crate) fn rounded_rect(
     );
     cr.close_path();
 }
-
-#[allow(dead_code)]
-pub(crate) fn set_margin_all(widget: &impl IsA<gtk::Widget>, margin: i32) {
-    widget.set_margin_top(margin);
-    widget.set_margin_bottom(margin);
-    widget.set_margin_start(margin);
-    widget.set_margin_end(margin);
-}

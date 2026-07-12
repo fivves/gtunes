@@ -90,10 +90,6 @@ impl JellyfinClient {
         &self.server_url
     }
 
-    pub fn is_authenticated(&self) -> bool {
-        self.access_token.is_some()
-    }
-
     pub fn item_direct_stream_url(&self, item_id: &str) -> Result<Url, JellyfinClientError> {
         let mut url = self.server_url.join(&format!("Audio/{item_id}/stream"))?;
         url.query_pairs_mut().append_pair("static", "true");

@@ -62,6 +62,7 @@ impl CacheDatabase {
         Ok(database)
     }
 
+    #[cfg(test)]
     pub fn open_memory() -> Result<Self, CacheError> {
         let connection = Connection::open_in_memory()?;
         let database = Self { connection };
@@ -101,14 +102,6 @@ impl CacheDatabase {
         self.get_setting("jellyfin.session")?
             .map(|json| serde_json::from_str(&json).map_err(CacheError::from))
             .transpose()
-    }
-
-    pub fn clear_jellyfin_session(&self) -> Result<(), CacheError> {
-        self.connection.execute(
-            "DELETE FROM app_settings WHERE key = ?1",
-            ["jellyfin.session"],
-        )?;
-        Ok(())
     }
 
     pub fn set_setting(&self, key: &str, value: &str) -> Result<(), CacheError> {
@@ -207,8 +200,30 @@ fn discord_artwork_setting_key(artwork_hash: &str) -> String {
     format!("discord.artwork.{artwork_hash}")
 }
 
+fn remove_dir_if_exists(path: &Path) -> Result<(), CacheError> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(CacheError::Io(error)),
+    }
+}
+
+fn remove_temp_artwork_cache() -> Result<(), CacheError> {
+    for entry in std::fs::read_dir(std::env::temp_dir())? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with("gtunes-artwork-") {
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(CacheError::Io(error)),
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
-#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
@@ -276,27 +291,4 @@ mod tests {
             )]
         );
     }
-}
-
-fn remove_dir_if_exists(path: &Path) -> Result<(), CacheError> {
-    match std::fs::remove_dir_all(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(CacheError::Io(error)),
-    }
-}
-
-fn remove_temp_artwork_cache() -> Result<(), CacheError> {
-    for entry in std::fs::read_dir(std::env::temp_dir())? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if name.to_string_lossy().starts_with("gtunes-artwork-") {
-            match std::fs::remove_file(entry.path()) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(CacheError::Io(error)),
-            }
-        }
-    }
-    Ok(())
 }

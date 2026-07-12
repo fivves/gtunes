@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
@@ -20,29 +18,10 @@ pub struct WaveformKey {
 }
 
 #[derive(Clone, Debug)]
-pub enum WaveformState {
-    Missing,
-    Queued,
-    Generating,
-    Ready(PathBuf),
-    Failed(String),
-}
-
-#[derive(Clone, Debug)]
 pub struct WaveformSummary {
     pub key: WaveformKey,
     pub sample_count: usize,
     pub peaks: Vec<f32>,
-}
-
-impl WaveformSummary {
-    pub fn empty(key: WaveformKey) -> Self {
-        Self {
-            key,
-            sample_count: 0,
-            peaks: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Error)]
