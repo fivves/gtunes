@@ -103,6 +103,7 @@ pub(crate) struct UiState {
     pub(crate) loading_spinner: Option<gtk::Spinner>,
     pub(crate) mpris: Option<MediaControls>,
     pub(crate) discord_presence: Option<DiscordPresence>,
+    pub(crate) discord_presence_enabled: bool,
     pub(crate) cast_button: Option<gtk::MenuButton>,
     pub(crate) cast_device_box: Option<gtk::Box>,
     pub(crate) cast_status_label: Option<gtk::Label>,

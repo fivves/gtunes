@@ -312,6 +312,29 @@ pub(crate) fn settings_menu_button(state: Rc<RefCell<UiState>>) -> gtk::MenuButt
     font_row.append(&font_toggle_box);
     menu.append(&font_row);
 
+    let discord_row = gtk::Box::new(Orientation::Horizontal, 12);
+    discord_row.add_css_class("settings-switch-row");
+    discord_row.set_margin_top(2);
+    discord_row.set_margin_bottom(6);
+    discord_row.set_margin_start(6);
+    discord_row.set_margin_end(6);
+    let discord_label = label("Discord Rich Presence", "settings-menu-label");
+    discord_label.set_hexpand(true);
+    discord_label.set_halign(Align::Start);
+    let discord_switch = gtk::Switch::builder()
+        .active(state.borrow().discord_presence_enabled)
+        .valign(Align::Center)
+        .build();
+    {
+        let state = state.clone();
+        discord_switch.connect_active_notify(move |switch| {
+            set_discord_presence_enabled(&state, switch.is_active());
+        });
+    }
+    discord_row.append(&discord_label);
+    discord_row.append(&discord_switch);
+    menu.append(&discord_row);
+
     menu.append(&gtk::Separator::new(Orientation::Horizontal));
 
     let refresh = menu_item_button("view-refresh-symbolic", "Refresh library");

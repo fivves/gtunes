@@ -27,6 +27,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
     if font_mono {
         window.add_css_class("font-mono");
     }
+    let discord_presence_enabled = load_discord_presence_enabled();
     let state = Rc::new(RefCell::new(UiState {
         all_tracks: Vec::new(),
         tracks: Vec::new(),
@@ -123,7 +124,12 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         playback: PlaybackEngine::new().ok(),
         loading_spinner: None,
         mpris: None,
-        discord_presence: DiscordPresence::from_env(),
+        discord_presence: if discord_presence_enabled {
+            DiscordPresence::from_env()
+        } else {
+            None
+        },
+        discord_presence_enabled,
         cast_button: None,
         cast_device_box: None,
         cast_status_label: None,

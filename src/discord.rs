@@ -148,15 +148,18 @@ fn run_presence_worker(
                         let _ = client.close();
                         next_connect_attempt = Instant::now() + DISCORD_RETRY_INTERVAL;
                     }
-                }
 
-                queue_artwork_upload(
-                    &activity,
-                    current_generation,
-                    &artwork_cache,
-                    &mut uploading_artwork,
-                    &sender,
-                );
+                    // Only mirror artwork to the public host when Discord is
+                    // actually reachable; without a Discord connection the
+                    // upload would serve no one.
+                    queue_artwork_upload(
+                        &activity,
+                        current_generation,
+                        &artwork_cache,
+                        &mut uploading_artwork,
+                        &sender,
+                    );
+                }
             }
             PresenceCommand::ArtworkUploaded {
                 generation,

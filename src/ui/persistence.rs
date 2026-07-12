@@ -54,6 +54,8 @@ pub(crate) const ANIMATIONS_ENABLED_KEY: &str = "ui.animations.enabled";
 
 pub(crate) const FONT_MONO_KEY: &str = "ui.font.mono";
 
+pub(crate) const DISCORD_PRESENCE_ENABLED_KEY: &str = "integrations.discord.enabled";
+
 pub(crate) const PLAYBACK_STATE_KEY: &str = "player.playback.state";
 
 pub(crate) const PLAYBACK_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(5);
@@ -127,6 +129,44 @@ pub(crate) fn set_font_mono(state: &Rc<RefCell<UiState>>, mono: bool) {
         .and_then(|cache| cache.set_setting(FONT_MONO_KEY, if mono { "true" } else { "false" }))
     {
         tracing::warn!(%error, "failed to save font style setting");
+    }
+}
+
+pub(crate) fn load_discord_presence_enabled() -> bool {
+    match CacheDatabase::open_default()
+        .and_then(|cache| cache.get_setting(DISCORD_PRESENCE_ENABLED_KEY))
+    {
+        Ok(Some(value)) => value != "false",
+        Ok(None) => true,
+        Err(error) => {
+            tracing::warn!(%error, "failed to load Discord presence setting");
+            true
+        }
+    }
+}
+
+pub(crate) fn set_discord_presence_enabled(state: &Rc<RefCell<UiState>>, enabled: bool) {
+    {
+        let mut ui = state.borrow_mut();
+        ui.discord_presence_enabled = enabled;
+        if enabled {
+            if ui.discord_presence.is_none() {
+                ui.discord_presence = DiscordPresence::from_env();
+            }
+            sync_discord_presence(&ui);
+        } else {
+            // Dropping the handle clears the current activity and shuts the
+            // presence worker down.
+            ui.discord_presence = None;
+        }
+    }
+    if let Err(error) = CacheDatabase::open_default().and_then(|cache| {
+        cache.set_setting(
+            DISCORD_PRESENCE_ENABLED_KEY,
+            if enabled { "true" } else { "false" },
+        )
+    }) {
+        tracing::warn!(%error, "failed to save Discord presence setting");
     }
 }
 

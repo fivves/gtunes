@@ -4,6 +4,11 @@ gTunes can publish the current song to Discord Rich Presence through the bundled
 Discord application ID. Set `GTUNES_DISCORD_CLIENT_ID` only when you want to use
 a different Discord application for testing.
 
+Rich Presence can be turned off entirely with the "Discord Rich Presence"
+switch in the settings menu. Turning it off clears the current activity, stops
+the presence worker, and disables album art uploads until it is turned back on.
+The setting persists across restarts.
+
 ## Setup
 
 1. Open <https://discord.com/developers/applications>.
@@ -52,6 +57,10 @@ Successful uploads are cached in the local gTunes database by artwork hash, so
 the same cover can be reused across app restarts without uploading it again. If
 an upload fails, gTunes falls back to `GTUNES_DISCORD_LARGE_IMAGE_KEY` when that
 is configured.
+
+Uploads only happen while gTunes has an active Discord IPC connection. If
+Discord is not installed or not running, and when Rich Presence is switched off
+in settings, no artwork leaves the machine.
 
 If Discord is not running, gTunes keeps playback working normally and retries
 the Discord IPC connection in the background.
