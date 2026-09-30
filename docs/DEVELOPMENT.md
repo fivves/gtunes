@@ -43,7 +43,7 @@ Install `yt-dlp` and `streamlink` when testing YouTube or Twitch radio stations.
 Arch Linux:
 
 ```sh
-sudo pacman -S rust gtk4 libadwaita gstreamer gst-plugins-base sqlite dbus pkgconf
+sudo pacman -S rust gtk4 libadwaita gstreamer gst-plugins-base gst-plugins-good gst-libav sqlite dbus pkgconf
 ```
 
 Ubuntu or Debian:
@@ -51,14 +51,15 @@ Ubuntu or Debian:
 ```sh
 sudo apt install build-essential pkg-config libgtk-4-dev libadwaita-1-dev \
   libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libsqlite3-dev \
-  libdbus-1-dev
+  libdbus-1-dev gstreamer1.0-plugins-good gstreamer1.0-libav
 ```
 
 Fedora:
 
 ```sh
 sudo dnf install rust cargo gtk4-devel libadwaita-devel gstreamer1-devel \
-  gstreamer1-plugins-base-devel sqlite-devel dbus-devel pkgconf-pkg-config
+  gstreamer1-plugins-base-devel gstreamer1-plugins-good gstreamer1-libav \
+  sqlite-devel dbus-devel pkgconf-pkg-config
 ```
 
 ## First Run
