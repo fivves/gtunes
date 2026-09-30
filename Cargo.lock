@@ -796,7 +796,7 @@ dependencies = [
 
 [[package]]
 name = "gtunes"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "directories",
  "discord-rich-presence",
