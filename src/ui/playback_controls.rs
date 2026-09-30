@@ -708,6 +708,20 @@ pub(crate) fn handle_playback_error(
 }
 
 pub(crate) fn apply_gapless_transition(state: &Rc<RefCell<UiState>>) -> bool {
+    // A handoff that lands while playback is paused or stopped stays queued:
+    // applying it would move the current track and the published presence to the
+    // next song while no audio is playing.
+    let playing = {
+        let ui = state.borrow();
+        matches!(
+            ui.playback.as_ref().map(PlaybackEngine::state),
+            Some(PlaybackState::Playing)
+        )
+    };
+    if !playing {
+        return false;
+    }
+
     let transition = {
         let mut ui = state.borrow_mut();
         ui.playback

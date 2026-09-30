@@ -330,17 +330,26 @@ impl PlaybackEngine {
                     self.is_buffering = buffering.percent() < 100;
                 }
                 gst::MessageView::Error(error) => {
-                    let message = error.error().to_string();
-                    tracing::warn!(error = %message, "GStreamer playback error");
-                    let item_id = self.current_item_id.clone();
-                    let stream_kind = self.current_stream_kind;
-                    self.state = PlaybackState::Error(message.clone());
-                    self.is_buffering = false;
-                    event = Some(PlaybackEvent::Error {
-                        item_id,
-                        stream_kind,
-                        message,
-                    });
+                    if self.state == PlaybackState::Paused {
+                        // A stream error while paused means the HTTP keep-alive dropped, not
+                        // a playback failure. Recovering here would restart the track and
+                        // republish it as playing without user input.
+                        tracing::debug!(
+                            "ignoring stream error while paused (HTTP connection dropped)"
+                        );
+                    } else {
+                        let message = error.error().to_string();
+                        tracing::warn!(error = %message, "GStreamer playback error");
+                        let item_id = self.current_item_id.clone();
+                        let stream_kind = self.current_stream_kind;
+                        self.state = PlaybackState::Error(message.clone());
+                        self.is_buffering = false;
+                        event = Some(PlaybackEvent::Error {
+                            item_id,
+                            stream_kind,
+                            message,
+                        });
+                    }
                 }
                 _ => {}
             }

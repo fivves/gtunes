@@ -16,6 +16,11 @@ const LARGE_IMAGE_KEY_ENV: &str = "GTUNES_DISCORD_LARGE_IMAGE_KEY";
 const SMALL_IMAGE_KEY_ENV: &str = "GTUNES_DISCORD_SMALL_IMAGE_KEY";
 const PICTSHARE_UPLOAD_URL: &str = "https://img.fvvs.me/api/upload.php";
 const DISCORD_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+// A cleared presence is re-sent on this cadence. Discord keeps a stale track on
+// the profile when a single clear goes missing, and the app only pushes presence
+// updates when playback changes, so re-asserting the cleared state is what makes
+// a dropped clear self-heal.
+const PRESENCE_RECONCILE_INTERVAL: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PresencePlaybackState {
@@ -41,7 +46,6 @@ pub struct DiscordPresence {
 enum PresenceCommand {
     Set(PresenceActivity),
     ArtworkUploaded {
-        generation: u64,
         source_url: String,
         public_url: String,
     },
@@ -123,100 +127,195 @@ fn run_presence_worker(
     receiver: mpsc::Receiver<PresenceCommand>,
     sender: mpsc::Sender<PresenceCommand>,
 ) {
-    let mut client = DiscordIpcClient::new(&config.client_id);
-    let mut connected = false;
-    let mut next_connect_attempt = Instant::now();
-    let mut artwork_cache = load_persisted_artwork_cache();
-    let mut uploading_artwork = HashSet::<String>::new();
-    let mut current_generation = 0_u64;
-    let mut current_activity = None::<PresenceActivity>;
+    let mut worker = PresenceWorker::new(config, sender);
 
-    while let Ok(command) = receiver.recv() {
+    loop {
+        match receiver.recv_timeout(PRESENCE_RECONCILE_INTERVAL) {
+            Ok(PresenceCommand::Shutdown) => break,
+            Ok(command) => worker.handle(command),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    worker.shutdown();
+}
+
+/// Owns the Discord IPC connection and keeps the published presence in sync with
+/// the playback state the UI last reported.
+struct PresenceWorker {
+    config: PresenceConfig,
+    client: DiscordIpcClient,
+    connected: bool,
+    next_connect_attempt: Instant,
+    next_clear_assert: Instant,
+    artwork_cache: HashMap<String, String>,
+    uploading_artwork: HashSet<String>,
+    sender: mpsc::Sender<PresenceCommand>,
+    desired: Option<PresenceActivity>,
+    applied: Option<PresenceActivity>,
+}
+
+impl PresenceWorker {
+    fn new(config: PresenceConfig, sender: mpsc::Sender<PresenceCommand>) -> Self {
+        Self {
+            client: DiscordIpcClient::new(&config.client_id),
+            config,
+            connected: false,
+            next_connect_attempt: Instant::now(),
+            next_clear_assert: Instant::now(),
+            artwork_cache: load_persisted_artwork_cache(),
+            uploading_artwork: HashSet::new(),
+            sender,
+            desired: None,
+            applied: None,
+        }
+    }
+
+    fn handle(&mut self, command: PresenceCommand) {
         match command {
             PresenceCommand::Set(activity) => {
-                current_generation = current_generation.saturating_add(1);
-                current_activity = Some(activity.clone());
-
-                if ensure_discord_connected(&mut client, &mut connected, &mut next_connect_attempt)
-                {
-                    let activity_with_cached_art = activity.with_cached_artwork(&artwork_cache);
-                    if let Err(error) =
-                        client.set_activity(discord_activity(&activity_with_cached_art, &config))
-                    {
-                        tracing::debug!(%error, "failed to update Discord Rich Presence");
-                        connected = false;
-                        let _ = client.close();
-                        next_connect_attempt = Instant::now() + DISCORD_RETRY_INTERVAL;
-                    }
-                }
-
+                self.desired = Some(activity.clone());
                 queue_artwork_upload(
                     &activity,
-                    current_generation,
-                    &artwork_cache,
-                    &mut uploading_artwork,
-                    &sender,
+                    &self.artwork_cache,
+                    &mut self.uploading_artwork,
+                    &self.sender,
                 );
             }
             PresenceCommand::ArtworkUploaded {
-                generation,
                 source_url,
                 public_url,
             } => {
                 let cache_id = artwork_cache_id(&source_url);
-                uploading_artwork.remove(&cache_id);
-                artwork_cache.insert(cache_id, public_url.clone());
+                self.uploading_artwork.remove(&cache_id);
+                self.artwork_cache.insert(cache_id, public_url.clone());
                 persist_artwork_url(&source_url, &public_url);
-
-                if generation == current_generation
-                    && current_activity
-                        .as_ref()
-                        .and_then(|activity| activity.artwork_source_url.as_deref())
-                        == Some(source_url.as_str())
-                    && ensure_discord_connected(
-                        &mut client,
-                        &mut connected,
-                        &mut next_connect_attempt,
-                    )
-                    && let Some(activity) = current_activity.as_ref()
-                {
-                    let activity_with_art = activity.with_public_artwork(public_url);
-                    if let Err(error) =
-                        client.set_activity(discord_activity(&activity_with_art, &config))
-                    {
-                        tracing::debug!(%error, "failed to update Discord artwork");
-                        connected = false;
-                        let _ = client.close();
-                        next_connect_attempt = Instant::now() + DISCORD_RETRY_INTERVAL;
-                    }
-                }
             }
             PresenceCommand::ArtworkUploadFailed { source_url } => {
-                uploading_artwork.remove(&artwork_cache_id(&source_url));
+                self.uploading_artwork
+                    .remove(&artwork_cache_id(&source_url));
             }
             PresenceCommand::Clear => {
-                current_generation = current_generation.saturating_add(1);
-                current_activity = None;
-                if ensure_discord_connected(&mut client, &mut connected, &mut next_connect_attempt)
-                    && let Err(error) = client.clear_activity()
-                {
-                    tracing::debug!(%error, "failed to clear Discord Rich Presence");
-                    connected = false;
-                    let _ = client.close();
-                    next_connect_attempt = Instant::now() + DISCORD_RETRY_INTERVAL;
-                }
+                self.desired = None;
             }
-            PresenceCommand::Shutdown => {
-                let _ = client.clear_activity();
-                let _ = client.close();
-                return;
+            // Shutdown is handled by the worker loop, which breaks out of it.
+            PresenceCommand::Shutdown => return,
+        }
+
+        self.reconcile();
+    }
+
+    /// Publishes the presence when it changed, and re-asserts a cleared one on a
+    /// cadence.
+    ///
+    /// The cleared state is re-sent because Discord keeps a stale track on the
+    /// profile when a single clear is dropped, and the app only pushes presence
+    /// updates when playback changes. A playing activity is not repeated on a
+    /// cadence: its timestamps come from the position captured on the last sync,
+    /// so repeating it would restart the elapsed time Discord shows.
+    fn reconcile(&mut self) {
+        let published = self.published();
+        let now = Instant::now();
+        let due_for_clear_assert =
+            published.is_none() && self.connected && now >= self.next_clear_assert;
+
+        if published == self.applied && !due_for_clear_assert {
+            return;
+        }
+
+        if !self.ensure_connected() {
+            return;
+        }
+
+        match self.send(published.as_ref()) {
+            Ok(()) => {
+                if published.is_none() {
+                    self.next_clear_assert = now + PRESENCE_RECONCILE_INTERVAL;
+                }
+                self.applied = published;
+            }
+            Err(error) => {
+                tracing::debug!(%error, "failed to update Discord Rich Presence");
+                self.disconnect();
             }
         }
     }
 
-    if connected {
-        let _ = client.clear_activity();
-        let _ = client.close();
+    /// The activity as it should be published, with mirrored artwork folded in.
+    fn published(&self) -> Option<PresenceActivity> {
+        self.desired
+            .as_ref()
+            .map(|activity| activity.with_cached_artwork(&self.artwork_cache))
+    }
+
+    fn send(
+        &mut self,
+        published: Option<&PresenceActivity>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match published {
+            Some(activity) => self
+                .client
+                .set_activity(discord_activity(activity, &self.config))?,
+            None => self.client.clear_activity()?,
+        }
+
+        self.read_reply()
+    }
+
+    /// Reads the reply Discord sends for the command that was just written.
+    ///
+    /// Reading replies is required rather than optional. The IPC server answers
+    /// every command, and those answers used to go unread, piling up in the
+    /// socket until writes started to fail, which silently dropped presence
+    /// updates such as the clear sent when playback pauses.
+    fn read_reply(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let (opcode, payload) = self.client.recv()?;
+        if payload.get("evt").and_then(|value| value.as_str()) == Some("ERROR") {
+            return Err(
+                format!("Discord rejected presence update (opcode {opcode}): {payload}").into(),
+            );
+        }
+
+        Ok(())
+    }
+
+    fn ensure_connected(&mut self) -> bool {
+        if self.connected {
+            return true;
+        }
+
+        let now = Instant::now();
+        if now < self.next_connect_attempt {
+            return false;
+        }
+
+        match self.client.connect() {
+            Ok(()) => {
+                self.connected = true;
+                // Discord starts from a clean slate on a new connection, so the
+                // current state has to be published again.
+                self.applied = None;
+                self.next_clear_assert = now;
+                true
+            }
+            Err(error) => {
+                tracing::debug!(%error, "failed to connect to Discord Rich Presence");
+                self.next_connect_attempt = now + DISCORD_RETRY_INTERVAL;
+                false
+            }
+        }
+    }
+
+    fn disconnect(&mut self) {
+        self.connected = false;
+        let _ = self.client.close();
+        self.next_connect_attempt = Instant::now() + DISCORD_RETRY_INTERVAL;
+    }
+
+    fn shutdown(&mut self) {
+        let _ = self.client.clear_activity();
+        let _ = self.client.close();
     }
 }
 
@@ -240,36 +339,8 @@ impl PresenceActivity {
     }
 }
 
-fn ensure_discord_connected(
-    client: &mut DiscordIpcClient,
-    connected: &mut bool,
-    next_connect_attempt: &mut Instant,
-) -> bool {
-    if *connected {
-        return true;
-    }
-
-    let now = Instant::now();
-    if now < *next_connect_attempt {
-        return false;
-    }
-
-    match client.connect() {
-        Ok(()) => {
-            *connected = true;
-            true
-        }
-        Err(error) => {
-            tracing::debug!(%error, "failed to connect to Discord Rich Presence");
-            *next_connect_attempt = now + DISCORD_RETRY_INTERVAL;
-            false
-        }
-    }
-}
-
 fn queue_artwork_upload(
     activity: &PresenceActivity,
-    generation: u64,
     cache: &HashMap<String, String>,
     uploading: &mut HashSet<String>,
     sender: &mpsc::Sender<PresenceCommand>,
@@ -291,7 +362,6 @@ fn queue_artwork_upload(
         .spawn(move || match upload_artwork_file(&source_url) {
             Ok(public_url) => {
                 let _ = sender.send(PresenceCommand::ArtworkUploaded {
-                    generation,
                     source_url,
                     public_url,
                 });
@@ -637,6 +707,32 @@ mod tests {
         assert_eq!(
             discord_artwork_file_metadata(b"RIFFxxxxWEBPrest"),
             ("cover.webp", "image/webp")
+        );
+    }
+
+    #[test]
+    fn cached_artwork_replaces_the_source_url() {
+        let source_url = "https://jellyfin.example/Items/1/Images/Primary?api_key=secret";
+        let activity = PresenceActivity {
+            title: "Song".to_string(),
+            artist: "Artist".to_string(),
+            album: Some("Album".to_string()),
+            artwork_source_url: Some(source_url.to_string()),
+            playback_state: PresencePlaybackState::Playing,
+            position: None,
+            duration: None,
+        };
+        let mut cache = HashMap::new();
+        cache.insert(
+            artwork_cache_id(source_url),
+            "https://img.fvvs.me/abc.jpg".to_string(),
+        );
+
+        let published = activity.with_cached_artwork(&cache);
+
+        assert_eq!(
+            published.artwork_source_url.as_deref(),
+            Some("https://img.fvvs.me/abc.jpg")
         );
     }
 
