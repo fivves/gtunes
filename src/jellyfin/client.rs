@@ -73,7 +73,7 @@ impl JellyfinClient {
         let auth = unauthenticated
             .blocking_http
             .post(endpoint)
-            .header("X-Emby-Authorization", authorization_header_value(None))
+            .header(AUTHORIZATION, authorization_header_value(None))
             .json(&AuthenticateByName {
                 username,
                 pw: password,
@@ -413,9 +413,20 @@ where
     Ok(items)
 }
 
+/// HTTP headers carrying the session token for direct media streams.
+///
+/// Jellyfin 12 removed the legacy `X-Emby-Token` and `X-Emby-Authorization`
+/// headers, so the token has to travel in the same `Authorization` header the
+/// API client uses. Requests that still present only the legacy headers are
+/// rejected with "Invalid token".
 pub fn stream_http_headers_for_token(token: Option<&str>) -> Vec<(String, String)> {
     token
-        .map(|token| vec![("X-Emby-Token".to_string(), token.to_string())])
+        .map(|token| {
+            vec![(
+                "Authorization".to_string(),
+                authorization_header_value(Some(token)),
+            )]
+        })
         .unwrap_or_default()
 }
 
@@ -455,7 +466,10 @@ mod tests {
     fn stream_headers_include_jellyfin_token_when_available() {
         assert_eq!(
             stream_http_headers_for_token(Some("secret")),
-            vec![("X-Emby-Token".to_string(), "secret".to_string())]
+            vec![(
+                "Authorization".to_string(),
+                authorization_header_value(Some("secret"))
+            )]
         );
         assert!(stream_http_headers_for_token(None).is_empty());
     }

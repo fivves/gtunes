@@ -438,10 +438,10 @@ fn legacy_library_cache_migrates_and_hydrates_stream_headers() {
         loaded.tracks[0].fallback_stream_url,
         tracks[0].fallback_stream_url
     );
-    assert_eq!(
-        loaded.tracks[0].stream_http_headers,
-        vec![("X-Emby-Token".to_string(), "token".to_string())]
-    );
+    let stream_headers = &loaded.tracks[0].stream_http_headers;
+    assert_eq!(stream_headers.len(), 1);
+    assert_eq!(stream_headers[0].0, "Authorization");
+    assert!(stream_headers[0].1.contains("Token=\"token\""));
 }
 
 #[test]
@@ -590,10 +590,10 @@ fn library_cache_round_trips_playlists_and_hydrates_headers() {
     assert_eq!(loaded.playlists.len(), 1);
     assert_eq!(loaded.playlists[0].name, "Favorites");
     assert_eq!(loaded.playlists[0].tracks.len(), 1);
-    assert_eq!(
-        loaded.playlists[0].tracks[0].stream_http_headers,
-        vec![("X-Emby-Token".to_string(), "token".to_string())]
-    );
+    let stream_headers = &loaded.playlists[0].tracks[0].stream_http_headers;
+    assert_eq!(stream_headers.len(), 1);
+    assert_eq!(stream_headers[0].0, "Authorization");
+    assert!(stream_headers[0].1.contains("Token=\"token\""));
 }
 
 #[test]
