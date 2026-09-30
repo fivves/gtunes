@@ -158,13 +158,21 @@ struct PresenceWorker {
 
 impl PresenceWorker {
     fn new(config: PresenceConfig, sender: mpsc::Sender<PresenceCommand>) -> Self {
+        Self::with_artwork_cache(config, sender, load_persisted_artwork_cache())
+    }
+
+    fn with_artwork_cache(
+        config: PresenceConfig,
+        sender: mpsc::Sender<PresenceCommand>,
+        artwork_cache: HashMap<String, String>,
+    ) -> Self {
         Self {
             client: DiscordIpcClient::new(&config.client_id),
             config,
             connected: false,
             next_connect_attempt: Instant::now(),
             next_clear_assert: Instant::now(),
-            artwork_cache: load_persisted_artwork_cache(),
+            artwork_cache,
             uploading_artwork: HashSet::new(),
             sender,
             desired: None,
@@ -228,13 +236,16 @@ impl PresenceWorker {
             return;
         }
 
-        match self.send(published.as_ref()) {
-            Ok(()) => {
+        match self.publish(published.as_ref()) {
+            Ok(true) => {
                 if published.is_none() {
                     self.next_clear_assert = now + PRESENCE_RECONCILE_INTERVAL;
                 }
                 self.applied = published;
             }
+            // Discord refused the update, so leave it unconfirmed and publish it
+            // again on the next reconcile.
+            Ok(false) => {}
             Err(error) => {
                 tracing::debug!(%error, "failed to update Discord Rich Presence");
                 self.disconnect();
@@ -249,10 +260,17 @@ impl PresenceWorker {
             .map(|activity| activity.with_cached_artwork(&self.artwork_cache))
     }
 
-    fn send(
+    /// Writes one presence command and reads the reply Discord sends back,
+    /// returning whether Discord accepted the update.
+    ///
+    /// Reading replies is required rather than optional. The IPC server answers
+    /// every command, and those answers used to go unread, piling up in the
+    /// socket until writes started to fail, which silently dropped presence
+    /// updates such as the clear sent when playback pauses.
+    fn publish(
         &mut self,
         published: Option<&PresenceActivity>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         match published {
             Some(activity) => self
                 .client
@@ -260,24 +278,13 @@ impl PresenceWorker {
             None => self.client.clear_activity()?,
         }
 
-        self.read_reply()
-    }
-
-    /// Reads the reply Discord sends for the command that was just written.
-    ///
-    /// Reading replies is required rather than optional. The IPC server answers
-    /// every command, and those answers used to go unread, piling up in the
-    /// socket until writes started to fail, which silently dropped presence
-    /// updates such as the clear sent when playback pauses.
-    fn read_reply(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let (opcode, payload) = self.client.recv()?;
         if payload.get("evt").and_then(|value| value.as_str()) == Some("ERROR") {
-            return Err(
-                format!("Discord rejected presence update (opcode {opcode}): {payload}").into(),
-            );
+            tracing::debug!(opcode, %payload, "Discord rejected the presence update");
+            return Ok(false);
         }
 
-        Ok(())
+        Ok(true)
     }
 
     fn ensure_connected(&mut self) -> bool {
@@ -743,5 +750,159 @@ mod tests {
 
         assert!(path.starts_with(std::env::temp_dir()));
         assert!(!path.to_string_lossy().contains("secret"));
+    }
+
+    /// Binds a fake Discord IPC socket and answers commands the way the real
+    /// server does: a READY frame for the handshake, and one reply per command.
+    /// Queued replies are used in order, so a test can reject a specific update.
+    fn fake_ipc_server(
+        dir: &std::path::Path,
+    ) -> (
+        mpsc::Receiver<serde_json::Value>,
+        mpsc::Sender<serde_json::Value>,
+    ) {
+        let path = dir.join("discord-ipc-0");
+        let listener =
+            std::os::unix::net::UnixListener::bind(&path).expect("bind fake Discord IPC socket");
+        let (frame_sender, frame_receiver) = mpsc::channel();
+        let (reply_sender, reply_receiver) = mpsc::channel::<serde_json::Value>();
+
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            loop {
+                let Some((opcode, payload)) = read_frame(&mut stream) else {
+                    return;
+                };
+                if frame_sender.send(payload).is_err() {
+                    return;
+                }
+
+                let reply = if opcode == 0 {
+                    serde_json::json!({"cmd": "DISPATCH", "evt": "READY", "data": {}})
+                } else {
+                    reply_receiver.try_recv().unwrap_or_else(
+                        |_| serde_json::json!({"cmd": "SET_ACTIVITY", "data": null, "evt": null}),
+                    )
+                };
+                if write_frame(&mut stream, 1, &reply).is_err() {
+                    return;
+                }
+            }
+        });
+
+        (frame_receiver, reply_sender)
+    }
+
+    fn read_frame(stream: &mut std::os::unix::net::UnixStream) -> Option<(u32, serde_json::Value)> {
+        use std::io::Read;
+
+        let mut header = [0_u8; 8];
+        stream.read_exact(&mut header).ok()?;
+        let opcode = u32::from_le_bytes(header[0..4].try_into().ok()?);
+        let length = u32::from_le_bytes(header[4..8].try_into().ok()?) as usize;
+        let mut body = vec![0_u8; length];
+        stream.read_exact(&mut body).ok()?;
+
+        serde_json::from_slice(&body)
+            .ok()
+            .map(|json| (opcode, json))
+    }
+
+    fn write_frame(
+        stream: &mut std::os::unix::net::UnixStream,
+        opcode: u32,
+        payload: &serde_json::Value,
+    ) -> std::io::Result<()> {
+        use std::io::Write;
+
+        let body = payload.to_string();
+        stream.write_all(&opcode.to_le_bytes())?;
+        stream.write_all(&(body.len() as u32).to_le_bytes())?;
+        stream.write_all(body.as_bytes())
+    }
+
+    #[test]
+    fn presence_worker_publishes_retries_and_clears() {
+        let dir = std::env::temp_dir().join(format!("gtunes-discord-ipc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create fake IPC directory");
+        // SAFETY: the worker started below resolves the Discord socket path from
+        // this variable, and no other test in this binary reads it.
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", &dir) };
+
+        let (frames, replies) = fake_ipc_server(&dir);
+        let (sender, _commands) = mpsc::channel();
+        let mut worker = PresenceWorker::with_artwork_cache(
+            PresenceConfig {
+                client_id: "test".to_string(),
+                large_image_key: None,
+                small_image_key: None,
+            },
+            sender,
+            HashMap::new(),
+        );
+
+        let activity = PresenceActivity {
+            title: "Song".to_string(),
+            artist: "Artist".to_string(),
+            album: Some("Album".to_string()),
+            artwork_source_url: None,
+            playback_state: PresencePlaybackState::Playing,
+            position: Some(Duration::from_secs(10)),
+            duration: Some(Duration::from_secs(200)),
+        };
+
+        replies
+            .send(
+                serde_json::json!({"cmd": "SET_ACTIVITY", "evt": "ERROR", "data": {"code": 1000}}),
+            )
+            .expect("queue a rejected update");
+
+        worker.handle(PresenceCommand::Set(activity.clone()));
+
+        let handshake = frames
+            .recv_timeout(Duration::from_secs(5))
+            .expect("handshake frame");
+        assert_eq!(handshake["v"], 1);
+        let published = frames
+            .recv_timeout(Duration::from_secs(5))
+            .expect("presence frame");
+        assert_eq!(published["args"]["activity"]["details"], "Song");
+        assert_eq!(published["args"]["activity"]["type"], 2);
+
+        // Discord refused that update, so the next reconcile publishes it again
+        // rather than remembering it as applied.
+        worker.reconcile();
+        let retried = frames
+            .recv_timeout(Duration::from_secs(5))
+            .expect("retried presence frame");
+        assert_eq!(retried["args"]["activity"]["details"], "Song");
+
+        // An accepted update is published once and then left alone, so the
+        // elapsed time Discord shows is not restarted.
+        worker.reconcile();
+        assert!(
+            frames.recv_timeout(Duration::from_millis(400)).is_err(),
+            "an unchanged presence should not be republished"
+        );
+
+        // Pausing clears the presence, and the immediate reconcile stays quiet
+        // until the clear needs re-asserting.
+        worker.handle(PresenceCommand::Clear);
+        let cleared = frames
+            .recv_timeout(Duration::from_secs(5))
+            .expect("clear frame");
+        assert!(cleared["args"]["activity"].is_null());
+        worker.reconcile();
+        assert!(
+            frames.recv_timeout(Duration::from_millis(400)).is_err(),
+            "a fresh clear should not be repeated immediately"
+        );
+
+        worker.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
