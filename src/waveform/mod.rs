@@ -218,8 +218,10 @@ fn generate_from_uri(
         let mut sample_count = 0_usize;
         for sample in map
             .as_slice()
-            .chunks_exact(4)
-            .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]).abs())
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| f32::from_le_bytes(*bytes).abs())
         {
             peak = peak.max(sample);
             sum_squares += sample * sample;
