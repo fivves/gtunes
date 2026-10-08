@@ -3,6 +3,7 @@ pub(crate) mod cast_ui;
 pub(crate) mod collections;
 pub(crate) mod connection;
 pub(crate) mod integrations;
+pub(crate) mod layout;
 pub(crate) mod library;
 pub(crate) mod models;
 pub(crate) mod persistence;

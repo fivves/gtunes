@@ -1,11 +1,14 @@
 use super::prelude::*;
 
 pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
+    // Normally 1240x760, but `GTUNES_LAYOUT_FORCE_WINDOW` can pin an exact size
+    // so the layout tiers can be exercised and read back from a script.
+    let (default_width, default_height) = forced_window_size().unwrap_or((1240, 760));
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title(config::APP_NAME)
-        .default_width(1240)
-        .default_height(760)
+        .default_width(default_width)
+        .default_height(default_height)
         .width_request(360)
         .height_request(420)
         .build();
@@ -81,6 +84,20 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         nav_artist_count: None,
         nav_playlist_count: None,
         nav_radio_count: None,
+        layout: LayoutClass::default(),
+        sidebar: None,
+        sidebar_header: None,
+        sidebar_cover_frame: None,
+        nav_row_text: Vec::new(),
+        player_actions: None,
+        track_columns: Vec::new(),
+        nav_queue_count: None,
+        nav_queue_row: None,
+        compact_menu: None,
+        compact_menu_content: None,
+        player_search_box: None,
+        player_utility_row: None,
+        compact_actions_moved: false,
         track_model: gtk::StringList::new(&[]),
         track_selection: None,
         track_stack: None,
@@ -144,6 +161,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
     connect_app_shortcuts(&root, state.clone());
     connect_window_close_request(&window, state.clone());
     load_selected_waveform(&state);
+    install_layout_watcher(&root, state.clone());
     start_playback_timer(&state);
 
     window
@@ -214,6 +232,11 @@ pub(crate) fn build_sidebar(state: Rc<RefCell<UiState>>) -> (gtk::Box, gtk::Box,
     }
     sidebar.append(&library_header);
     sidebar.append(&nav_list(state.clone()));
+    {
+        let mut ui = state.borrow_mut();
+        ui.sidebar = Some(sidebar.clone());
+        ui.sidebar_header = Some(library_header.clone());
+    }
 
     let spacer = gtk::Box::new(Orientation::Vertical, 0);
     spacer.set_vexpand(true);
@@ -241,6 +264,7 @@ pub(crate) fn sidebar_cover_art(state: Rc<RefCell<UiState>>) -> gtk::Box {
     cover.set_halign(Align::Fill);
     cover.set_valign(Align::Fill);
     state.borrow_mut().cover_art = Some(cover.clone());
+    state.borrow_mut().sidebar_cover_frame = Some(frame.clone());
     frame.append(&cover);
 
     let click = gtk::GestureClick::new();
@@ -395,6 +419,12 @@ pub(crate) fn nav_list(state: Rc<RefCell<UiState>>) -> gtk::ListBox {
             LibraryPage::Radio,
             true,
         ),
+        (
+            "view-list-ordered-symbolic",
+            "Next Up",
+            LibraryPage::NextUp,
+            true,
+        ),
     ];
 
     for (index, (icon, title, _page, enabled)) in rows.iter().enumerate() {
@@ -402,7 +432,9 @@ pub(crate) fn nav_list(state: Rc<RefCell<UiState>>) -> gtk::ListBox {
         let line = gtk::Box::new(Orientation::Horizontal, 9);
         line.set_valign(Align::Center);
         line.append(&gtk::Image::from_icon_name(icon));
-        line.append(&label(title, ""));
+        let title_label = label(title, "");
+        state.borrow_mut().nav_row_text.push(title_label.clone());
+        line.append(&title_label);
         let spacer = gtk::Box::new(Orientation::Horizontal, 0);
         spacer.set_hexpand(true);
         line.append(&spacer);
@@ -413,14 +445,23 @@ pub(crate) fn nav_list(state: Rc<RefCell<UiState>>) -> gtk::ListBox {
             "Artists" => state.borrow_mut().nav_artist_count = Some(count.clone()),
             "Playlists" => state.borrow_mut().nav_playlist_count = Some(count.clone()),
             "Radio" => state.borrow_mut().nav_radio_count = Some(count.clone()),
+            "Next Up" => state.borrow_mut().nav_queue_count = Some(count.clone()),
             _ => count.set_text("-"),
         }
         line.append(&count);
+        state.borrow_mut().nav_row_text.push(count.clone());
         row.set_child(Some(&line));
         row.set_selectable(*enabled);
         row.set_activatable(*enabled);
         if !enabled {
             row.set_sensitive(false);
+        }
+        // The tier hides this row whenever the sidebar's own "Next Up" pill is on
+        // screen, so there is only ever one way to the queue: the pill in a tall
+        // window, this row once the pill is gone. It stays the LAST row on
+        // purpose, so hiding it cannot shift the indices the page mapping uses.
+        if *title == "Next Up" {
+            state.borrow_mut().nav_queue_row = Some(row.clone());
         }
         list.append(&row);
         if index == 0 {
@@ -439,6 +480,7 @@ pub(crate) fn nav_list(state: Rc<RefCell<UiState>>) -> gtk::ListBox {
             2 => set_library_page(&nav_state, LibraryPage::Artists),
             3 => set_library_page(&nav_state, LibraryPage::Playlists),
             4 => set_library_page(&nav_state, LibraryPage::Radio),
+            5 => set_library_page(&nav_state, LibraryPage::NextUp),
             _ => {}
         }
     });

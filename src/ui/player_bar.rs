@@ -182,7 +182,37 @@ pub(crate) fn build_player_bar(state: Rc<RefCell<UiState>>) -> gtk::Box {
     actions.add_overlay(&utility_row);
 
     player.append(&actions);
-    connect_player_bar_responsive_layout(&player, &actions, &state.borrow().playback_status);
+
+    // Narrow tiers fold the search entry and the utility row into this one
+    // menu. The widgets are moved in and out by the layout tier rather than
+    // duplicated, so there is only ever one search box and one live shuffle
+    // toggle, both still wired to the same state.
+    let compact_content = gtk::Box::new(Orientation::Vertical, 6);
+    compact_content.add_css_class("compact-menu-content");
+    compact_content.set_size_request(240, -1);
+    let compact_popover = gtk::Popover::new();
+    compact_popover.add_css_class("compact-menu-popover");
+    compact_popover.set_child(Some(&compact_content));
+    let compact_menu = gtk::MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .tooltip_text("Search and settings")
+        .build();
+    compact_menu.add_css_class("icon-button");
+    compact_menu.add_css_class("toolbar-button");
+    compact_menu.add_css_class("compact-menu-button");
+    compact_menu.set_popover(Some(&compact_popover));
+    compact_menu.set_visible(false);
+
+    player.append(&compact_menu);
+
+    {
+        let mut ui = state.borrow_mut();
+        ui.player_actions = Some(actions.clone());
+        ui.player_search_box = Some(search_centerer.clone());
+        ui.player_utility_row = Some(utility_row.clone());
+        ui.compact_menu = Some(compact_menu.clone());
+        ui.compact_menu_content = Some(compact_content.clone());
+    }
 
     player
 }
@@ -498,32 +528,6 @@ pub(crate) fn show_about_window(parent: &gtk::Window) {
         .website_label("GitHub")
         .build();
     about.present();
-}
-
-pub(crate) fn connect_player_bar_responsive_layout(
-    player: &gtk::Box,
-    actions: &gtk::Overlay,
-    playback_status: &gtk::Label,
-) {
-    // A tick callback would keep the frame clock running at the monitor
-    // refresh rate even while idle; a coarse timer is enough to follow
-    // window resizes.
-    let player = player.downgrade();
-    let actions = actions.clone();
-    let playback_status = playback_status.clone();
-    let last_width = Cell::new(0);
-    gtk::glib::timeout_add_local(Duration::from_millis(200), move || {
-        let Some(player) = player.upgrade() else {
-            return gtk::glib::ControlFlow::Break;
-        };
-        let width = player.width();
-        if width > 0 && width != last_width.get() {
-            last_width.set(width);
-            actions.set_visible(width >= 560);
-            playback_status.set_visible(width >= 720);
-        }
-        gtk::glib::ControlFlow::Continue
-    });
 }
 
 pub(crate) fn update_now_playing_labels(state: &UiState) {

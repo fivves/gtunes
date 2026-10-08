@@ -1147,7 +1147,12 @@ pub(crate) fn update_content_view(state: &Rc<RefCell<UiState>>, direction: NavDi
             let ui = state.borrow();
             (
                 ui.sidebar_queue_card.clone(),
-                !matches!(ui.active_page, LibraryPage::NextUp | LibraryPage::Radio),
+                // The page rule and the layout rule both have to agree. The card
+                // is also dropped when the window is too short for the sidebar's
+                // stack, and then the queue button in the player bar opens the
+                // Next Up page instead.
+                !matches!(ui.active_page, LibraryPage::NextUp | LibraryPage::Radio)
+                    && ui.layout.shows_sidebar_card(),
             )
         };
         if let Some(queue_card) = sidebar_queue_card.as_ref() {
@@ -1169,11 +1174,13 @@ pub(crate) fn update_nav_counts(state: &Rc<RefCell<UiState>>) {
         artist_label,
         playlist_label,
         radio_label,
+        queue_label,
         tracks,
         albums,
         artists,
         playlists,
         radio_stations,
+        queued,
     ) = {
         let ui = state.borrow();
         (
@@ -1182,11 +1189,17 @@ pub(crate) fn update_nav_counts(state: &Rc<RefCell<UiState>>) {
             ui.nav_artist_count.clone(),
             ui.nav_playlist_count.clone(),
             ui.nav_radio_count.clone(),
+            ui.nav_queue_count.clone(),
             ui.all_tracks.len(),
             ui.library_albums.len(),
             ui.library_artists.len(),
             ui.playlists.len(),
             radio_stations_for_display_from(&ui.radio_stations).len(),
+            // What is still to come, not the whole queue: the queue is the list
+            // playback started from, so its length can be the entire library and
+            // would just repeat the Tracks count. Deliberately the same number
+            // the Next Up page summary shows, so the two agree.
+            upcoming_track_count(&ui),
         )
     };
 
@@ -1205,6 +1218,9 @@ pub(crate) fn update_nav_counts(state: &Rc<RefCell<UiState>>) {
     if let Some(label) = radio_label.as_ref() {
         label.set_text(&radio_stations.to_string());
     }
+    if let Some(label) = queue_label.as_ref() {
+        label.set_text(&queued.to_string());
+    }
 }
 
 pub(crate) fn update_nav_selection(state: &Rc<RefCell<UiState>>) {
@@ -1222,7 +1238,7 @@ pub(crate) fn update_nav_selection(state: &Rc<RefCell<UiState>>) {
         LibraryPage::Artists => Some(2),
         LibraryPage::Playlists => Some(3),
         LibraryPage::Radio => Some(4),
-        LibraryPage::NextUp => None,
+        LibraryPage::NextUp => Some(5),
     };
     if row_index.is_none() {
         list.unselect_all();

@@ -1060,6 +1060,108 @@ window {
   transition: none !important;
   animation: none !important;
 }
+
+/* ── Layout tiers ─────────────────────────────────────────────────────────── */
+/* Set by src/ui/layout.rs. Width classes handle density (which columns exist,
+   nav labels or icons, player bar furniture) and height classes decide how much
+   vertical room the fixed rows are allowed to take. Anything that can only be
+   done by hiding a widget is done in Rust; this is the sizing half. */
+
+.track-artist-inline {
+  color: alpha(@window_fg_color, .58);
+  font-size: 11px;
+}
+
+/* Search + utility row when they live inside the compact menu instead of the
+   player bar. */
+.compact-menu-content {
+  padding: 8px;
+}
+
+.compact-menu-content .search {
+  min-width: 0;
+}
+
+/* Icon rail: the nav labels are hidden in Rust, so this reclaims the width and
+   padding the full sidebar reserves. */
+.layout-narrow .sidebar,
+.layout-tiny .sidebar {
+  min-width: 0;
+  padding: 10px 4px;
+}
+
+.layout-narrow .nav-list row,
+.layout-tiny .nav-list row {
+  min-height: 34px;
+  padding: 0 10px;
+}
+
+.layout-narrow .section-title,
+.layout-tiny .section-title {
+  margin: 2px 4px 4px;
+}
+
+/* Compact width keeps the labelled sidebar, just with less padding. */
+.layout-compact .sidebar {
+  padding: 12px 8px;
+}
+
+/* GTK CSS has no max-width (it warns and drops the rule), so the inline artist
+   is capped by character count in tracklist.rs; this only spaces it off. */
+.layout-narrow .track-artist-inline,
+.layout-tiny .track-artist-inline {
+  margin-left: 10px;
+}
+
+.layout-tiny .track-title-cell {
+  padding-left: 10px;
+}
+
+/* Short windows: the player bar and the track rows are the two fixed heights
+   with the most give. */
+.height-short .player-bar {
+  padding: 8px 12px;
+}
+
+.height-tiny .player-bar,
+.layout-tiny .player-bar {
+  padding: 6px 10px;
+}
+
+.height-short .wave-card {
+  min-height: 86px;
+  padding: 8px 12px 6px;
+}
+
+.height-tiny .wave-card {
+  min-height: 68px;
+  padding: 6px 10px 5px;
+}
+
+.height-short .track-list row {
+  min-height: 34px;
+}
+
+.height-tiny .track-list row {
+  min-height: 30px;
+}
+
+.height-short .track-list header button,
+.height-tiny .track-list header button {
+  min-height: 28px;
+  padding: 3px 10px 4px;
+}
+
+.height-short .track-cell,
+.height-tiny .track-cell {
+  padding: 5px 10px 4px;
+}
+
+.height-short .bottom-bar,
+.height-tiny .bottom-bar {
+  min-height: 32px;
+  padding: 0 12px;
+}
 "#;
 
 pub fn load() {

@@ -145,6 +145,10 @@ pub(crate) fn track_table(state: Rc<RefCell<UiState>>) -> gtk::Box {
         if column.sort_column == current_sort {
             active_sort_column = Some(view_column.clone());
         }
+        state
+            .borrow_mut()
+            .track_columns
+            .push((column.sort_column, view_column.clone()));
         list.append_column(&view_column);
     }
     if let Some(sorter) = list.sorter() {
@@ -244,7 +248,7 @@ pub(crate) fn track_column_view(
             return;
         };
         let position = list_item.position() as usize;
-        let (track, is_now_playing) = {
+        let (track, is_now_playing, show_artist) = {
             let ui = state_bind.borrow();
             let Some(track) = ui.tracks.get(position).cloned() else {
                 return;
@@ -252,11 +256,17 @@ pub(crate) fn track_column_view(
             let key = track_key(&track);
             let is_now_playing =
                 ui.playback_session.now_playing_key.as_deref() == Some(key.as_str());
-            (track, is_now_playing)
+            (track, is_now_playing, ui.layout.shows_artist_in_row())
         };
 
         if column.sort_column == SortColumn::Title {
-            bind_title_cell(list_item, &track.title, is_now_playing);
+            bind_title_cell(
+                list_item,
+                &track.title,
+                is_now_playing,
+                &track.artist,
+                show_artist,
+            );
             if let Some(indicator) = get_indicator_image(list_item) {
                 let key = track_key(&track);
                 let mut ui = state_bind.borrow_mut();
@@ -334,10 +344,30 @@ pub(crate) fn track_title_cell(is_now_playing: bool) -> (gtk::Box, gtk::Image) {
     title.set_hexpand(true);
     cell.append(&title);
 
+    // Shown only when the Artist column is gone: the artist rides on the right
+    // of the title row instead of disappearing with the column.
+    let artist = label("", "track-artist-inline");
+    artist.set_single_line_mode(true);
+    artist.set_lines(1);
+    artist.set_halign(Align::End);
+    artist.set_xalign(1.0);
+    artist.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    // GTK CSS has no max-width, so the cap lives here: the artist never takes
+    // more than this many characters, and the title keeps the rest of the row.
+    artist.set_max_width_chars(28);
+    artist.set_visible(false);
+    cell.append(&artist);
+
     (cell, indicator)
 }
 
-pub(crate) fn bind_title_cell(list_item: &gtk::ListItem, title: &str, is_now_playing: bool) {
+pub(crate) fn bind_title_cell(
+    list_item: &gtk::ListItem,
+    title: &str,
+    is_now_playing: bool,
+    artist: &str,
+    show_artist: bool,
+) {
     let Some(cell) = list_item
         .child()
         .and_then(|child| child.downcast::<gtk::Box>().ok())
@@ -358,6 +388,16 @@ pub(crate) fn bind_title_cell(list_item: &gtk::ListItem, title: &str, is_now_pla
         .and_then(|child| child.downcast::<gtk::Label>().ok());
     if let Some(label) = label {
         label.set_text(title);
+    }
+
+    let artist_label = cell
+        .first_child()
+        .and_then(|child| child.next_sibling())
+        .and_then(|child| child.next_sibling())
+        .and_then(|child| child.downcast::<gtk::Label>().ok());
+    if let Some(artist_label) = artist_label {
+        artist_label.set_text(artist);
+        artist_label.set_visible(show_artist && !artist.is_empty());
     }
 }
 
