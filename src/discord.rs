@@ -87,7 +87,9 @@ impl DiscordPresence {
         let worker_sender = sender.clone();
         std::thread::Builder::new()
             .name("gtunes-discord-rpc".to_string())
-            .spawn(move || run_presence_worker(config, receiver, worker_sender))
+            .spawn(move || {
+                run_presence_worker(config, receiver, worker_sender, PRESENCE_RECONCILE_INTERVAL)
+            })
             .ok()?;
 
         Some(Self { sender })
@@ -126,14 +128,19 @@ fn run_presence_worker(
     config: PresenceConfig,
     receiver: mpsc::Receiver<PresenceCommand>,
     sender: mpsc::Sender<PresenceCommand>,
+    reconcile_interval: Duration,
 ) {
-    let mut worker = PresenceWorker::new(config, sender);
+    let mut worker = PresenceWorker::new(config, sender, reconcile_interval);
 
     loop {
-        match receiver.recv_timeout(PRESENCE_RECONCILE_INTERVAL) {
+        match receiver.recv_timeout(reconcile_interval) {
             Ok(PresenceCommand::Shutdown) => break,
             Ok(command) => worker.handle(command),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            // The timeout is the reconcile tick, and it has to reconcile rather than
+            // just wake up. The cleared state is re-asserted from here and nowhere
+            // else, so an empty arm means a dropped clear is never retried and the
+            // stale track stays on the profile until the app is closed.
+            Err(mpsc::RecvTimeoutError::Timeout) => worker.reconcile(),
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
@@ -145,6 +152,7 @@ fn run_presence_worker(
 /// the playback state the UI last reported.
 struct PresenceWorker {
     config: PresenceConfig,
+    reconcile_interval: Duration,
     client: DiscordIpcClient,
     connected: bool,
     next_connect_attempt: Instant,
@@ -157,18 +165,29 @@ struct PresenceWorker {
 }
 
 impl PresenceWorker {
-    fn new(config: PresenceConfig, sender: mpsc::Sender<PresenceCommand>) -> Self {
-        Self::with_artwork_cache(config, sender, load_persisted_artwork_cache())
+    fn new(
+        config: PresenceConfig,
+        sender: mpsc::Sender<PresenceCommand>,
+        reconcile_interval: Duration,
+    ) -> Self {
+        Self::with_artwork_cache(
+            config,
+            sender,
+            load_persisted_artwork_cache(),
+            reconcile_interval,
+        )
     }
 
     fn with_artwork_cache(
         config: PresenceConfig,
         sender: mpsc::Sender<PresenceCommand>,
         artwork_cache: HashMap<String, String>,
+        reconcile_interval: Duration,
     ) -> Self {
         Self {
             client: DiscordIpcClient::new(&config.client_id),
             config,
+            reconcile_interval,
             connected: false,
             next_connect_attempt: Instant::now(),
             next_clear_assert: Instant::now(),
@@ -239,7 +258,7 @@ impl PresenceWorker {
         match self.publish(published.as_ref()) {
             Ok(true) => {
                 if published.is_none() {
-                    self.next_clear_assert = now + PRESENCE_RECONCILE_INTERVAL;
+                    self.next_clear_assert = now + self.reconcile_interval;
                 }
                 self.applied = published;
             }
@@ -752,6 +771,16 @@ mod tests {
         assert!(!path.to_string_lossy().contains("secret"));
     }
 
+    /// Both tests below start a worker that resolves the Discord socket from
+    /// XDG_RUNTIME_DIR, which is process-global, so they cannot run at once.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Binds a fake Discord IPC socket and answers commands the way the real
     /// server does: a READY frame for the handshake, and one reply per command.
     /// Queued replies are used in order, so a test can reject a specific update.
@@ -826,6 +855,7 @@ mod tests {
 
     #[test]
     fn presence_worker_publishes_retries_and_clears() {
+        let _guard = env_lock();
         let dir = std::env::temp_dir().join(format!("gtunes-discord-ipc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create fake IPC directory");
@@ -843,6 +873,7 @@ mod tests {
             },
             sender,
             HashMap::new(),
+            PRESENCE_RECONCILE_INTERVAL,
         );
 
         let activity = PresenceActivity {
@@ -903,6 +934,80 @@ mod tests {
         );
 
         worker.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The loop's reconcile tick is the only thing that retries a dropped clear, so
+    /// drive the real loop with a short interval and assert the clear comes again.
+    /// Calling `reconcile()` by hand, as the test above does, cannot catch the tick
+    /// being a no-op.
+    #[test]
+    fn presence_worker_loop_reasserts_a_clear_on_the_tick() {
+        let _guard = env_lock();
+        let dir =
+            std::env::temp_dir().join(format!("gtunes-discord-ipc-loop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create fake IPC directory");
+        // SAFETY: the worker started below resolves the Discord socket path from
+        // this variable, and the tests that read it are serialized by ENV_LOCK.
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", &dir) };
+
+        let (frames, _replies) = fake_ipc_server(&dir);
+        let (sender, receiver) = mpsc::channel();
+        let worker_sender = sender.clone();
+        let interval = Duration::from_millis(80);
+        let loop_thread = std::thread::spawn(move || {
+            run_presence_worker(
+                PresenceConfig {
+                    client_id: "test".to_string(),
+                    large_image_key: None,
+                    small_image_key: None,
+                },
+                receiver,
+                worker_sender,
+                interval,
+            );
+        });
+
+        // The worker connects on the first reconcile, so the presence command has
+        // to be queued before a handshake frame can be expected on the wire.
+        let activity = PresenceActivity {
+            title: "Song".to_string(),
+            artist: "Artist".to_string(),
+            album: Some("Album".to_string()),
+            artwork_source_url: None,
+            playback_state: PresencePlaybackState::Playing,
+            position: Some(Duration::from_secs(1)),
+            duration: Some(Duration::from_secs(60)),
+        };
+        sender
+            .send(PresenceCommand::Set(activity))
+            .expect("queue a presence");
+
+        let handshake = frames
+            .recv_timeout(Duration::from_secs(5))
+            .expect("handshake frame");
+        assert_eq!(handshake["v"], 1);
+
+        let published = frames
+            .recv_timeout(Duration::from_secs(5))
+            .expect("presence frame");
+        assert_eq!(published["args"]["activity"]["details"], "Song");
+
+        sender.send(PresenceCommand::Clear).expect("queue a clear");
+        let cleared = frames
+            .recv_timeout(Duration::from_secs(5))
+            .expect("clear frame");
+        assert!(cleared["args"]["activity"].is_null());
+
+        // Nothing else is sent, so only the reconcile tick can produce this frame.
+        let reasserted = frames
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the loop should re-assert the clear once the interval elapses");
+        assert!(reasserted["args"]["activity"].is_null());
+
+        let _ = sender.send(PresenceCommand::Shutdown);
+        let _ = loop_thread.join();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
