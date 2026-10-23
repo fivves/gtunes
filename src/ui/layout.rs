@@ -158,9 +158,11 @@ impl LayoutClass {
     }
 
     /// The cover art is a 220px square, so it is the first thing to go when the
-    /// window is short.
+    /// window is short. It also never belongs in the icon rail: the rail is a
+    /// single column, so the art squeezes the navigation into a lopsided sidebar
+    /// instead of sitting under it.
     pub(crate) fn shows_cover_art(self) -> bool {
-        self.height == HeightClass::Tall && self.width != WidthClass::Tiny
+        self.height == HeightClass::Tall && !self.uses_icon_rail()
     }
 
     /// Search plus the shuffle/cast/settings row.
@@ -645,6 +647,27 @@ mod tests {
             let class = classify(width, height);
             assert!(class.shows_sidebar_card(), "pill {width}x{height}");
             assert!(!class.shows_next_up_nav_row(), "row {width}x{height}");
+        }
+    }
+
+    #[test]
+    fn the_icon_rail_never_shows_cover_art() {
+        // 637x1056 is the size he caught: narrow (icon rail) but tall, so the
+        // 220px art was squeezed into a one-column sidebar and pushed the nav out
+        // of shape. The rail tiers therefore drop the art, and the widest tile
+        // that still has a real sidebar (862x1056, compact) keeps it.
+        for width in [519, 637, 779] {
+            let class = classify(width, 1056);
+            assert!(class.uses_icon_rail(), "{width} should use the rail");
+            assert!(!class.shows_cover_art(), "{width}x1056 must not show art");
+        }
+        for width in [780, 862, 899] {
+            let class = classify(width, 1056);
+            assert!(
+                !class.uses_icon_rail(),
+                "{width} should keep the real sidebar"
+            );
+            assert!(class.shows_cover_art(), "{width}x1056 should keep art");
         }
     }
 
