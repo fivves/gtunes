@@ -1,11 +1,11 @@
 //! Window layout tiers.
 //!
 //! The window grew around fixed minimums: a 240px sidebar plus a track table
-//! whose four columns are pinned at 260 + 160 + 220 + 66 = 706px, so the body
-//! needs 946px before anything fits. Under that the app clipped instead of
-//! reflowing, and because the sidebar also stacks a five-row nav list, the
-//! "Next Up" card and a 220px square cover art, short windows chopped its
-//! bottom off as well. Those are two different problems, so the class has two
+//! whose four columns need 236 + 136 + 196 + 66 = 634px, so the body wants about
+//! 874px before the table shows all four without squeezing them. Under that the
+//! app clipped instead of reflowing, and because the sidebar also stacks a
+//! five-row nav list, the "Next Up" card and a 220px square cover art, short
+//! windows chopped its bottom off as well. Those are two different problems, so the class has two
 //! independent axes: width decides density (columns, nav labels, player bar
 //! furniture) and height decides the sidebar's vertical stack.
 //!
@@ -27,11 +27,14 @@ use super::prelude::*;
 /// half 941, quarter 941-961, eighth 466.
 ///
 /// Half is his reference for "looks right", and the quarter still has room for
-/// all four columns (961 - 240 sidebar leaves 721 for a 706 table), so the first
-/// width tier has to start *below* half. Setting it to the body's 946 minimum
+/// all four columns (961 - 240 sidebar leaves 721 for a 634 table), so the first
+/// width tier has to start *below* half. Setting it to the table's old 946 total
 /// put half and quarter in the compact tier, which is the mistake that left the
 /// quarter clipping instead of reflowing: width was never its problem, height
-/// was.
+/// was. That 946 was never a hard minimum either, since the table sits inside a
+/// scrolled window: a narrower window scrolled its last few pixels sideways
+/// instead of clipping, which is the horizontal scrollbar half size used to have.
+/// Prefer reflowing the columns over raising this back up.
 pub(crate) const WIDTH_COMPACT_BELOW: i32 = 900;
 /// Below this the sidebar collapses to an icon rail and the artist column is
 /// replaced by the inline artist.
@@ -269,6 +272,13 @@ pub(crate) fn install_layout_watcher(root: &gtk::Box, state: Rc<RefCell<UiState>
         // tier owns. Doing it once, on the tier change, leaves the tier undone and
         // the window half-converted.
         apply(&root, &state, class);
+
+        if debug_layout()
+            && (size_changed || class_changed)
+            && let Some(report) = super::tracklist::track_table_width_report(&state)
+        {
+            eprintln!("layout: {report}");
+        }
 
         if class_changed {
             last.set(Some(class));

@@ -43,6 +43,29 @@ pub(crate) fn scroll_track_list_to_top(state: &Rc<RefCell<UiState>>) {
     }
 }
 
+/// Diagnostics: what the track table needs versus what the window gives it.
+///
+/// A `ScrolledWindow` may hand its child less than the child's minimum, so the
+/// root's own minimum never shows this: the table simply grows a horizontal
+/// scrollbar and scrolls by the few pixels it is short, which on screen is a
+/// scrollbar that only reveals blank edges.
+pub(crate) fn track_table_width_report(state: &Rc<RefCell<UiState>>) -> Option<String> {
+    let scroll = track_list_scroll(state)?;
+    let list = scroll
+        .child()
+        .and_then(|child| child.downcast::<gtk::ColumnView>().ok())?;
+    let (needs, _, _, _) = list.measure(gtk::Orientation::Horizontal, -1);
+    let gets = list.width();
+    let hadjustment = scroll.hadjustment();
+    let verdict = if needs > gets { "  <-- H-SCROLLS" } else { "" };
+    Some(format!(
+        "track table needs {needs}px, column view gets {gets}px, scroller {}px (h-adj {:.0}/{:.0}){verdict}",
+        scroll.width(),
+        hadjustment.upper(),
+        hadjustment.page_size()
+    ))
+}
+
 pub(crate) fn track_list_scroll(state: &Rc<RefCell<UiState>>) -> Option<gtk::ScrolledWindow> {
     state
         .borrow()
@@ -52,11 +75,31 @@ pub(crate) fn track_list_scroll(state: &Rc<RefCell<UiState>>) -> Option<gtk::Scr
         .and_then(|child| child.downcast::<gtk::ScrolledWindow>().ok())
 }
 
-pub(crate) const TITLE_WIDTH: i32 = 260;
+/// Column widths, in logical pixels.
+///
+/// `fixed_width` is a column's FLOOR, not its size: `ColumnView` hands every
+/// pixel above the total to the `expand` columns, so the table is at its
+/// narrowest here and grows from there. That makes the total the only thing
+/// deciding whether the list scrolls sideways, and a `ScrolledWindow` will hand
+/// the table less than it needs without complaining: it grows a horizontal
+/// scrollbar that travels the few pixels it is short, which on screen is a
+/// scrollbar whose only effect is blank ends.
+///
+/// So the total has to fit the narrowest window that shows all four columns,
+/// which is `WIDTH_COMPACT_BELOW` (Full starts there, and half size sits just
+/// inside it) minus the sidebar, and with room left for a vertical scrollbar.
+/// `the_full_table_fits_every_full_width_window` holds that line.
+///
+/// The old 260 + 160 + 220 + 66 = 706 needed 941 - 240 = 701 at half size and
+/// scrolled by 5px, which is the bar he reported. These land at 258/158/218/66
+/// at half size, because the surplus is still shared out evenly, and within a
+/// pixel or two of the old widths on a full screen, so the look is unchanged
+/// everywhere it was already right.
+pub(crate) const TITLE_WIDTH: i32 = 236;
 
-pub(crate) const ARTIST_WIDTH: i32 = 160;
+pub(crate) const ARTIST_WIDTH: i32 = 136;
 
-pub(crate) const ALBUM_WIDTH: i32 = 220;
+pub(crate) const ALBUM_WIDTH: i32 = 196;
 
 pub(crate) const DURATION_WIDTH: i32 = 66;
 
@@ -591,4 +634,33 @@ pub(crate) fn scroll_to_now_playing(state: &Rc<RefCell<UiState>>) {
     update_list_indicators(state);
 
     scroll_track_list_to_index(state, idx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::layout::WIDTH_COMPACT_BELOW;
+    use crate::ui::state::LEFT_SIDEBAR_WIDTH;
+
+    /// A vertical scrollbar reserves its width out of the table's too, and his own
+    /// screenshot of the bug has the rows ending about 14px short of the window
+    /// edge, so the four columns need that much room to spare as well.
+    const SCROLLBAR_GUTTER: i32 = 16;
+
+    /// The horizontal scrollbar at half size came from exactly this total, and
+    /// nothing else catches the overflow: the app does not clip and the root's own
+    /// minimum stays small, because a scrolled window is allowed to be narrower
+    /// than its child. The only symptom is a scrollbar with a near-full-width
+    /// thumb that moves a few pixels and reveals blank ends. Full is the one tier
+    /// that shows all four columns and it reaches down to `WIDTH_COMPACT_BELOW`,
+    /// so that is the window the total has to fit.
+    #[test]
+    fn the_full_table_fits_every_full_width_window() {
+        let table = TITLE_WIDTH + ARTIST_WIDTH + ALBUM_WIDTH + DURATION_WIDTH;
+        let available = WIDTH_COMPACT_BELOW - LEFT_SIDEBAR_WIDTH;
+        assert!(
+            table + SCROLLBAR_GUTTER <= available,
+            "the four columns need {table}px (+{SCROLLBAR_GUTTER}px for a scrollbar) but a {WIDTH_COMPACT_BELOW}px window gives the table {available}px"
+        );
+    }
 }
