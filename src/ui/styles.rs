@@ -133,6 +133,36 @@ window {
   font-size: 13px;
 }
 
+/* The settings menu is an in-window overlay panel, not a popover, so it gets
+   its own card treatment instead of the popover's speech bubble. */
+.settings-scrim {
+  background: alpha(#000000, 0.28);
+  opacity: 1;
+  transition: opacity 160ms ease-out;
+}
+
+.settings-scrim.settings-closed {
+  opacity: 0;
+}
+
+.settings-panel {
+  background: @card_bg_color;
+  color: @window_fg_color;
+  border: 1px solid @borders;
+  border-radius: 12px;
+  padding: 8px;
+  box-shadow: 0 10px 30px alpha(#000000, 0.35),
+              0 1px 3px alpha(#000000, 0.25);
+}
+
+.settings-panel-scroll {
+  background: transparent;
+}
+
+.settings-menu-box {
+  background: transparent;
+}
+
 .shortcuts-dialog {
   background: @window_bg_color;
 }

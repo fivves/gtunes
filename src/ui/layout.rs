@@ -284,6 +284,14 @@ pub(crate) fn install_layout_watcher(root: &gtk::Box, state: Rc<RefCell<UiState>
         // the window half-converted.
         apply(&root, &state, class);
 
+        // A menu that is up must stay inside the window, so it re-clamps while
+        // open: this is the "window got resized under it" case, and it is a
+        // position inside the window rather than the window's own placement, so
+        // it cannot fight the compositor.
+        if state.borrow().settings_panel_open {
+            sync_settings_panel(&state);
+        }
+
         if debug_layout()
             && (size_changed || class_changed)
             && let Some(report) = super::tracklist::track_table_width_report(&state)

@@ -79,6 +79,20 @@ pub(crate) struct UiState {
     pub(crate) player_search_box: Option<gtk::Box>,
     pub(crate) player_utility_row: Option<gtk::Box>,
     pub(crate) compact_actions_moved: bool,
+    /// The status line currently reads "Buffering ...", so the tick knows to put
+    /// the playing line back once the stream recovers.
+    pub(crate) buffering_status_shown: bool,
+    pub(crate) player_bar: Option<gtk::Box>,
+    /// The settings toolbar button, so the panel can anchor to it.
+    pub(crate) settings_anchor: Option<gtk::Widget>,
+    /// The window overlay the settings panel lives in. The panel is an overlay
+    /// child rather than a popover so the window clips it.
+    pub(crate) window_overlay: Option<gtk::Overlay>,
+    pub(crate) settings_scrim: Option<gtk::Box>,
+    pub(crate) settings_revealer: Option<gtk::Revealer>,
+    pub(crate) settings_panel: Option<gtk::Box>,
+    pub(crate) settings_scroll: Option<gtk::ScrolledWindow>,
+    pub(crate) settings_panel_open: bool,
     pub(crate) track_model: gtk::StringList,
     pub(crate) track_selection: Option<gtk::SingleSelection>,
     pub(crate) track_stack: Option<gtk::Stack>,

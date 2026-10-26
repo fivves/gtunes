@@ -45,6 +45,10 @@ pub(crate) fn connect_app_shortcuts(root: &gtk::Box, state: Rc<RefCell<UiState>>
 
         match key {
             gtk::gdk::Key::Escape => {
+                if settings_panel_open(&state) {
+                    close_settings_panel(&state);
+                    return gtk::glib::Propagation::Stop;
+                }
                 invisible_search.borrow_mut().query.clear();
                 if search_entry_has_focus(&state) {
                     clear_search_entry(&state);

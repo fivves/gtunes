@@ -12,6 +12,7 @@ pub(crate) mod player_bar;
 mod prelude;
 pub(crate) mod queue;
 pub(crate) mod radio;
+pub(crate) mod settings_panel;
 pub(crate) mod shortcuts;
 pub(crate) mod state;
 pub mod styles;

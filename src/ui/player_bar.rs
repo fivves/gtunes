@@ -212,13 +212,17 @@ pub(crate) fn build_player_bar(state: Rc<RefCell<UiState>>) -> gtk::Box {
         ui.player_utility_row = Some(utility_row.clone());
         ui.compact_menu = Some(compact_menu.clone());
         ui.compact_menu_content = Some(compact_content.clone());
+        ui.player_bar = Some(player.clone());
     }
 
     player
 }
 
-pub(crate) fn settings_menu_button(state: Rc<RefCell<UiState>>) -> gtk::MenuButton {
-    let settings = gtk::MenuButton::builder()
+/// The settings toggle. It opens the in-window settings panel (see
+/// `settings_panel.rs`) rather than a popover, so the menu cannot be drawn
+/// outside the app window.
+pub(crate) fn settings_menu_button(state: Rc<RefCell<UiState>>) -> gtk::ToggleButton {
+    let settings = gtk::ToggleButton::builder()
         .icon_name("emblem-system-symbolic")
         .tooltip_text("Settings")
         .build();
@@ -226,208 +230,18 @@ pub(crate) fn settings_menu_button(state: Rc<RefCell<UiState>>) -> gtk::MenuButt
     settings.add_css_class("toolbar-button");
     settings.add_css_class("settings-menu-button");
 
-    let popover = gtk::Popover::new();
-    popover.add_css_class("settings-popover");
-    let menu = gtk::Box::new(Orientation::Vertical, 4);
-    menu.add_css_class("settings-popover-menu");
-    menu.set_margin_top(10);
-    menu.set_margin_bottom(10);
-    menu.set_margin_start(10);
-    menu.set_margin_end(10);
-    menu.set_width_request(280);
-
-    let keep_row = gtk::Box::new(Orientation::Horizontal, 12);
-    keep_row.add_css_class("settings-switch-row");
-    keep_row.set_margin_top(2);
-    keep_row.set_margin_bottom(6);
-    keep_row.set_margin_start(6);
-    keep_row.set_margin_end(6);
-    let keep_label = label("Keep playing while closed", "settings-menu-label");
-    keep_label.set_hexpand(true);
-    keep_label.set_halign(Align::Start);
-    let keep_switch = gtk::Switch::builder()
-        .active(state.borrow().keep_playing_while_closed)
-        .valign(Align::Center)
-        .build();
     {
         let state = state.clone();
-        keep_switch.connect_active_notify(move |switch| {
-            set_keep_playing_while_closed(&state, switch.is_active());
-        });
-    }
-    keep_row.append(&keep_label);
-    keep_row.append(&keep_switch);
-    menu.append(&keep_row);
-
-    let anim_row = gtk::Box::new(Orientation::Horizontal, 12);
-    anim_row.add_css_class("settings-switch-row");
-    anim_row.set_margin_top(2);
-    anim_row.set_margin_bottom(6);
-    anim_row.set_margin_start(6);
-    anim_row.set_margin_end(6);
-    let anim_label = label("Animations", "settings-menu-label");
-    anim_label.set_hexpand(true);
-    anim_label.set_halign(Align::Start);
-    let anim_switch = gtk::Switch::builder()
-        .active(state.borrow().animations_enabled)
-        .valign(Align::Center)
-        .build();
-    {
-        let state = state.clone();
-        let settings = settings.clone();
-        anim_switch.connect_active_notify(move |switch| {
-            let enabled = switch.is_active();
-            set_animations_enabled(&state, enabled);
-            if let Some(window) = settings
-                .root()
-                .and_then(|r| r.downcast::<gtk::Window>().ok())
-            {
-                if enabled {
-                    window.remove_css_class("no-animations");
-                } else {
-                    window.add_css_class("no-animations");
-                }
+        settings.connect_toggled(move |button| {
+            if button.is_active() {
+                open_settings_panel(&state);
+            } else {
+                close_settings_panel(&state);
             }
         });
     }
-    anim_row.append(&anim_label);
-    anim_row.append(&anim_switch);
-    menu.append(&anim_row);
 
-    let font_row = gtk::Box::new(Orientation::Horizontal, 12);
-    font_row.add_css_class("settings-switch-row");
-    font_row.set_margin_top(2);
-    font_row.set_margin_bottom(6);
-    font_row.set_margin_start(6);
-    font_row.set_margin_end(6);
-    let font_label = label("Font Style", "settings-menu-label");
-    font_label.set_hexpand(true);
-    font_label.set_halign(Align::Start);
-    let font_btn_default = gtk::ToggleButton::builder()
-        .icon_name("font-x-generic-symbolic")
-        .tooltip_text("Default")
-        .active(!state.borrow().font_mono)
-        .build();
-    font_btn_default.add_css_class("font-style-toggle");
-    let font_btn_mono = gtk::ToggleButton::builder()
-        .icon_name("utilities-terminal-symbolic")
-        .tooltip_text("Monospace")
-        .active(state.borrow().font_mono)
-        .group(&font_btn_default)
-        .build();
-    font_btn_mono.add_css_class("font-style-toggle");
-    let font_toggle_box = gtk::Box::new(Orientation::Horizontal, 0);
-    font_toggle_box.add_css_class("linked");
-    font_toggle_box.append(&font_btn_default);
-    font_toggle_box.append(&font_btn_mono);
-    {
-        let state = state.clone();
-        let settings = settings.clone();
-        font_btn_mono.connect_toggled(move |btn| {
-            let mono = btn.is_active();
-            set_font_mono(&state, mono);
-            if let Some(window) = settings
-                .root()
-                .and_then(|r| r.downcast::<gtk::Window>().ok())
-            {
-                if mono {
-                    window.add_css_class("font-mono");
-                } else {
-                    window.remove_css_class("font-mono");
-                }
-            }
-        });
-    }
-    font_row.append(&font_label);
-    font_row.append(&font_toggle_box);
-    menu.append(&font_row);
-
-    menu.append(&gtk::Separator::new(Orientation::Horizontal));
-
-    let refresh = menu_item_button("view-refresh-symbolic", "Refresh library");
-    refresh.set_sensitive(false);
-    {
-        let state = state.clone();
-        let popover = popover.clone();
-        refresh.connect_clicked(move |button| {
-            popover.popdown();
-            refresh_jellyfin_library(state.clone(), button.clone());
-        });
-    }
-    state.borrow_mut().refresh_button = Some(refresh.clone());
-    menu.append(&refresh);
-
-    let shortcuts = menu_item_button(
-        "preferences-desktop-keyboard-shortcuts-symbolic",
-        "Keyboard shortcuts",
-    );
-    {
-        let popover = popover.clone();
-        let settings = settings.clone();
-        shortcuts.connect_clicked(move |_| {
-            popover.popdown();
-            if let Some(window) = settings
-                .root()
-                .and_then(|root| root.downcast::<gtk::Window>().ok())
-            {
-                show_keyboard_shortcuts(&window);
-            }
-        });
-    }
-    menu.append(&shortcuts);
-
-    let about = menu_item_button("help-about-symbolic", "About gTunes");
-    {
-        let popover = popover.clone();
-        let settings = settings.clone();
-        about.connect_clicked(move |_| {
-            popover.popdown();
-            if let Some(window) = settings
-                .root()
-                .and_then(|root| root.downcast::<gtk::Window>().ok())
-            {
-                show_about_window(&window);
-            }
-        });
-    }
-    menu.append(&about);
-
-    let reset = menu_item_button("edit-delete-symbolic", "Reset database and cache");
-    {
-        let state = state.clone();
-        let popover = popover.clone();
-        let settings = settings.clone();
-        reset.connect_clicked(move |_| {
-            popover.popdown();
-            if let Some(window) = settings
-                .root()
-                .and_then(|root| root.downcast::<gtk::Window>().ok())
-            {
-                confirm_database_reset(&window, state.clone());
-            }
-        });
-    }
-    menu.append(&reset);
-    menu.append(&gtk::Separator::new(Orientation::Horizontal));
-
-    let quit = menu_item_button("application-exit-symbolic", "Quit");
-    quit.add_css_class("destructive-action");
-    {
-        let state = state.clone();
-        let settings = settings.clone();
-        quit.connect_clicked(move |_| {
-            if let Some(window) = settings
-                .root()
-                .and_then(|root| root.downcast::<gtk::Window>().ok())
-            {
-                quit_application(&window, &state);
-            }
-        });
-    }
-    menu.append(&quit);
-
-    popover.set_child(Some(&menu));
-    settings.set_popover(Some(&popover));
+    state.borrow_mut().settings_anchor = Some(settings.clone().upcast::<gtk::Widget>());
     settings
 }
 

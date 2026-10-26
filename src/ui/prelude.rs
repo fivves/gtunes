@@ -46,6 +46,7 @@ pub(crate) use super::playback_controls::*;
 pub(crate) use super::player_bar::*;
 pub(crate) use super::queue::*;
 pub(crate) use super::radio::*;
+pub(crate) use super::settings_panel::*;
 pub(crate) use super::shortcuts::*;
 pub(crate) use super::state::*;
 pub(crate) use super::tracklist::*;

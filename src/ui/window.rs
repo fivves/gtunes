@@ -15,7 +15,14 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
 
     let root = gtk::Box::new(Orientation::Vertical, 0);
     root.add_css_class("app-root");
-    window.set_content(Some(&root));
+
+    // The app root lives in an overlay so the settings panel can be an in-window
+    // surface. A popover is its own Wayland surface and gets composited outside
+    // the window; an overlay child is clipped by the window it belongs to.
+    let overlay = gtk::Overlay::new();
+    overlay.add_css_class("app-overlay");
+    overlay.set_child(Some(&root));
+    window.set_content(Some(&overlay));
 
     let view_settings = load_library_view_settings();
     let keep_playing_while_closed = load_keep_playing_while_closed();
@@ -98,6 +105,15 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         player_search_box: None,
         player_utility_row: None,
         compact_actions_moved: false,
+        buffering_status_shown: false,
+        player_bar: None,
+        settings_anchor: None,
+        window_overlay: None,
+        settings_scrim: None,
+        settings_revealer: None,
+        settings_panel: None,
+        settings_scroll: None,
+        settings_panel_open: false,
         track_model: gtk::StringList::new(&[]),
         track_selection: None,
         track_stack: None,
@@ -160,6 +176,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
     root.append(&build_bottom_bar(state.clone()));
     connect_app_shortcuts(&root, state.clone());
     connect_window_close_request(&window, state.clone());
+    install_settings_panel(&overlay, state.clone());
     load_selected_waveform(&state);
     install_layout_watcher(&root, state.clone());
     start_playback_timer(&state);
