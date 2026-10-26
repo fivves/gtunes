@@ -154,6 +154,17 @@ impl LayoutClass {
         self.height == HeightClass::Tall && !self.uses_icon_rail()
     }
 
+    /// The same card with the page rule folded in, which is what both owners ask.
+    ///
+    /// It has two: this tier, which needs a tall window with a real sidebar, and
+    /// the page, because the Next Up and Radio pages show that same queue in the
+    /// content area and the card only duplicates them. `apply` enforces the tier
+    /// on every watcher tick, so a page-only decision is undone within 200ms: that
+    /// is how the card came back on the Next Up page in a full screen.
+    pub(crate) fn shows_sidebar_queue_card(self, page: LibraryPage) -> bool {
+        self.shows_sidebar_card() && !matches!(page, LibraryPage::NextUp | LibraryPage::Radio)
+    }
+
     /// The queue needs exactly one way in and never two: this row stands in for
     /// the sidebar's pill whenever the pill is not on screen.
     pub(crate) fn shows_next_up_nav_row(self) -> bool {
@@ -410,7 +421,7 @@ pub(crate) fn apply(root: &gtk::Box, state: &Rc<RefCell<UiState>>, class: Layout
     );
     set_visible(
         ui.sidebar_queue_card.as_ref(),
-        class.shows_sidebar_card(),
+        class.shows_sidebar_queue_card(ui.active_page),
         "next up card",
     );
     // Exactly complementary to the card, so the queue always has one way in and
@@ -642,6 +653,35 @@ mod tests {
         for height in [1000, 1020, 1056] {
             assert_eq!(classify(905, height).height, HeightClass::Tall);
         }
+    }
+
+    #[test]
+    fn the_queue_page_does_not_also_show_the_sidebar_card() {
+        // He caught this in a full screen: the Next Up page shows the queue in the
+        // content area, so the sidebar card has to go even in a window that could
+        // fit it, and Radio duplicates it the same way. Everything else keeps it.
+        let tall = classify(1896, 1056);
+        assert!(tall.shows_sidebar_card());
+        for page in [LibraryPage::NextUp, LibraryPage::Radio] {
+            assert!(
+                !tall.shows_sidebar_queue_card(page),
+                "{page:?} must not show the sidebar card"
+            );
+        }
+        for page in [
+            LibraryPage::Tracks,
+            LibraryPage::Albums,
+            LibraryPage::Artists,
+            LibraryPage::Playlists,
+        ] {
+            assert!(
+                tall.shows_sidebar_queue_card(page),
+                "{page:?} keeps the sidebar card"
+            );
+        }
+        // The tier still wins on its own axis, whatever the page.
+        let short = classify(941, 503);
+        assert!(!short.shows_sidebar_queue_card(LibraryPage::Tracks));
     }
 
     #[test]

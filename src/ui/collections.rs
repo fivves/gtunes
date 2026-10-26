@@ -1147,12 +1147,12 @@ pub(crate) fn update_content_view(state: &Rc<RefCell<UiState>>, direction: NavDi
             let ui = state.borrow();
             (
                 ui.sidebar_queue_card.clone(),
-                // The page rule and the layout rule both have to agree. The card
-                // is also dropped when the window is too short for the sidebar's
-                // stack, and then the queue button in the player bar opens the
-                // Next Up page instead.
-                !matches!(ui.active_page, LibraryPage::NextUp | LibraryPage::Radio)
-                    && ui.layout.shows_sidebar_card(),
+                // The page rule and the layout tier both own this card, so they
+                // share one decision: the tier re-asserts its half on every tick
+                // and would otherwise put the card back on the Next Up page. Where
+                // the card is gone because the window is too short, the queue
+                // button in the player bar opens the Next Up page instead.
+                ui.layout.shows_sidebar_queue_card(ui.active_page),
             )
         };
         if let Some(queue_card) = sidebar_queue_card.as_ref() {
