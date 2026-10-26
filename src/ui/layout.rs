@@ -385,6 +385,17 @@ fn set_visible<W: IsA<gtk::Widget>>(widget: Option<&W>, visible: bool, name: &st
     widget.set_visible(visible);
 }
 
+fn same_classes(current: &[gtk::glib::GString], wanted: &[&str]) -> bool {
+    // GTK hands the class list back in its own order, not the order it was given
+    // (`["app-root", "layout-full", "height-short"]` comes back as
+    // `["app-root", "height-short", "layout-full"]`), so an order-sensitive
+    // compare always looks like a change and re-styles the window every tick.
+    current.len() == wanted.len()
+        && wanted
+            .iter()
+            .all(|want| current.iter().any(|have| have.as_str() == *want))
+}
+
 /// Push one class at the widgets.
 ///
 /// Runs on EVERY watcher tick, not only on a tier change. Other modules own some
@@ -396,7 +407,16 @@ fn set_visible<W: IsA<gtk::Widget>>(widget: Option<&W>, visible: bool, name: &st
 /// neither (re-parenting widgets, rebuilding the track model) live in
 /// `restructure`.
 pub(crate) fn apply(root: &gtk::Box, state: &Rc<RefCell<UiState>>, class: LayoutClass) {
-    root.set_css_classes(&class.css_classes());
+    // Both of these are set on EVERY tick, and both invalidate work when they
+    // are set even to the value they already hold: changing the class list
+    // re-styles the tree, and `set_size_request` always queues a resize, which
+    // re-measures and re-lays out every child. With a few hundred collection
+    // tiles that is a ~50ms hole in the frame clock five times a second, which
+    // is exactly what made scrolling feel rough. Only write when it changes.
+    let classes = class.css_classes();
+    if !same_classes(&root.css_classes(), &classes) {
+        root.set_css_classes(&classes);
+    }
 
     {
         let mut ui = state.borrow_mut();
@@ -411,7 +431,9 @@ pub(crate) fn apply(root: &gtk::Box, state: &Rc<RefCell<UiState>>, class: Layout
         } else {
             LEFT_SIDEBAR_WIDTH
         };
-        sidebar.set_size_request(width, -1);
+        if sidebar.width_request() != width {
+            sidebar.set_size_request(width, -1);
+        }
     }
 
     set_visible(
@@ -750,6 +772,25 @@ mod tests {
             classify(900, HEIGHT_TINY_BELOW - 1).height,
             HeightClass::Tiny
         );
+    }
+
+    #[test]
+    fn class_comparison_ignores_the_order_gtk_reports() {
+        // GTK hands the list back sorted by its own rules, so an order-sensitive
+        // compare re-styles the window on every layout tick and stalls the frame.
+        let current = vec![
+            gtk::glib::GString::from("app-root"),
+            gtk::glib::GString::from("height-short"),
+            gtk::glib::GString::from("layout-full"),
+        ];
+        let wanted = vec!["app-root", "layout-full", "height-short"];
+
+        assert!(same_classes(&current, &wanted));
+        assert!(!same_classes(
+            &current,
+            &["app-root", "layout-full", "height-tall"]
+        ));
+        assert!(!same_classes(&current, &["app-root", "layout-full"]));
     }
 
     #[test]
