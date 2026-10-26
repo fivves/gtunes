@@ -41,6 +41,7 @@ pub(crate) use super::integrations::*;
 pub(crate) use super::layout::*;
 pub(crate) use super::library::*;
 pub(crate) use super::models::*;
+pub(crate) use super::perf::*;
 pub(crate) use super::persistence::*;
 pub(crate) use super::playback_controls::*;
 pub(crate) use super::player_bar::*;

@@ -106,6 +106,9 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         player_utility_row: None,
         compact_actions_moved: false,
         buffering_status_shown: false,
+        album_grid_signature: None,
+        artist_grid_signature: None,
+        playlist_grid_signature: None,
         player_bar: None,
         settings_anchor: None,
         window_overlay: None,
@@ -177,9 +180,14 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
     connect_app_shortcuts(&root, state.clone());
     connect_window_close_request(&window, state.clone());
     install_settings_panel(&overlay, state.clone());
+    install_perf_hooks(&root, state.clone());
     load_selected_waveform(&state);
-    install_layout_watcher(&root, state.clone());
-    start_playback_timer(&state);
+    if !perf_skip("layout") {
+        install_layout_watcher(&root, state.clone());
+    }
+    if !perf_skip("playback") {
+        start_playback_timer(&state);
+    }
 
     window
 }

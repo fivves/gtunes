@@ -19,6 +19,27 @@ impl fmt::Display for ImageFetchError {
     }
 }
 
+/// Main-thread decodes and the time they took. A texture decode blocks the GTK
+/// frame, so this is the number a scroll has to keep down.
+static ARTWORK_DECODE_COUNT: AtomicU64 = AtomicU64::new(0);
+static ARTWORK_DECODE_NANOS: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn artwork_decode_count() -> u64 {
+    ARTWORK_DECODE_COUNT.load(AtomicOrdering::Relaxed)
+}
+
+pub(crate) fn artwork_decode_millis() -> f64 {
+    ARTWORK_DECODE_NANOS.load(AtomicOrdering::Relaxed) as f64 / 1_000_000.0
+}
+
+fn decode_texture(file: &gtk::gio::File) -> Result<gtk::gdk::Texture, gtk::glib::Error> {
+    let started = Instant::now();
+    let result = gtk::gdk::Texture::from_file(file);
+    ARTWORK_DECODE_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
+    ARTWORK_DECODE_NANOS.fetch_add(started.elapsed().as_nanos() as u64, AtomicOrdering::Relaxed);
+    result
+}
+
 pub(crate) const COLLECTION_ARTWORK_INITIAL_DELAY_MS: u64 = 24;
 
 pub(crate) const COLLECTION_ARTWORK_STAGGER_MS: u64 = 8;
@@ -65,7 +86,7 @@ pub(crate) fn load_selected_cover_art(state: &Rc<RefCell<UiState>>) {
                     let mut ui = state.borrow_mut();
                     sync_external_playback_metadata(&mut ui);
                     let file = gtk::gio::File::for_path(path);
-                    match gtk::gdk::Texture::from_file(&file) {
+                    match decode_texture(&file) {
                         Ok(texture) => cover.set_paintable(Some(&texture)),
                         Err(error) => tracing::warn!(%error, "failed to decode album artwork"),
                     }
@@ -129,7 +150,7 @@ pub(crate) fn load_full_size_artwork(url: String, picture: gtk::Picture) {
         match receiver.try_recv() {
             Ok(Ok(path)) => {
                 let file = gtk::gio::File::for_path(path);
-                match gtk::gdk::Texture::from_file(&file) {
+                match decode_texture(&file) {
                     Ok(texture) => picture.set_paintable(Some(&texture)),
                     Err(error) => tracing::warn!(%error, "failed to decode full-size artwork"),
                 }
@@ -215,7 +236,7 @@ pub(crate) fn load_queue_art(
                     return gtk::glib::ControlFlow::Break;
                 }
                 let file = gtk::gio::File::for_path(path);
-                match gtk::gdk::Texture::from_file(&file) {
+                match decode_texture(&file) {
                     Ok(texture) => {
                         image.set_paintable(Some(&texture));
                         image.remove_css_class("artwork-loading");
@@ -273,7 +294,7 @@ pub(crate) fn load_picture_art(url: String, image: gtk::Image) {
         match receiver.try_recv() {
             Ok(Ok(path)) => {
                 let file = gtk::gio::File::for_path(path);
-                match gtk::gdk::Texture::from_file(&file) {
+                match decode_texture(&file) {
                     Ok(texture) => {
                         image.remove_css_class("artist-placeholder");
                         image.remove_css_class("artwork-loading");

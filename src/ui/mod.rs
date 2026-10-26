@@ -6,6 +6,7 @@ pub(crate) mod integrations;
 pub(crate) mod layout;
 pub(crate) mod library;
 pub(crate) mod models;
+pub(crate) mod perf;
 pub(crate) mod persistence;
 pub(crate) mod playback_controls;
 pub(crate) mod player_bar;

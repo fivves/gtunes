@@ -82,6 +82,12 @@ pub(crate) struct UiState {
     /// The status line currently reads "Buffering ...", so the tick knows to put
     /// the playing line back once the stream recovers.
     pub(crate) buffering_status_shown: bool,
+    /// Fingerprint of the tiles each collection grid is currently showing. A
+    /// visit that would render exactly the same tiles skips the rebuild instead
+    /// of throwing away and re-decoding a few hundred of them.
+    pub(crate) album_grid_signature: Option<u64>,
+    pub(crate) artist_grid_signature: Option<u64>,
+    pub(crate) playlist_grid_signature: Option<u64>,
     pub(crate) player_bar: Option<gtk::Box>,
     /// The settings toolbar button, so the panel can anchor to it.
     pub(crate) settings_anchor: Option<gtk::Widget>,

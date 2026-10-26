@@ -1,4 +1,53 @@
 use super::prelude::*;
+use std::hash::{Hash, Hasher};
+
+/// How many collection tiles have been built in this process. A grid that is
+/// rebuilt on every visit pays this again, and each tile is a widget plus an
+/// image decode.
+static COLLECTION_TILES_BUILT: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn collection_tiles_built() -> u64 {
+    COLLECTION_TILES_BUILT.load(AtomicOrdering::Relaxed)
+}
+
+fn album_grid_signature(albums: &[AlbumSummary]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    albums.len().hash(&mut hasher);
+    for album in albums {
+        album.key.hash(&mut hasher);
+        album.name.hash(&mut hasher);
+        album.artist.hash(&mut hasher);
+        album.song_count.hash(&mut hasher);
+        album.artwork_url.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn artist_grid_signature(artists: &[ArtistSummary]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    artists.len().hash(&mut hasher);
+    for artist in artists {
+        artist.key.hash(&mut hasher);
+        artist.name.hash(&mut hasher);
+        artist.image_url.hash(&mut hasher);
+        artist.album_count.hash(&mut hasher);
+        artist.song_count.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn playlist_grid_signature(playlists: &[UiPlaylist]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    playlists.len().hash(&mut hasher);
+    for playlist in playlists {
+        playlist.id.hash(&mut hasher);
+        playlist.name.hash(&mut hasher);
+        playlist.artwork_url.hash(&mut hasher);
+        playlist.thumbnail_artwork_url.hash(&mut hasher);
+        playlist.tracks.len().hash(&mut hasher);
+    }
+    hasher.finish()
+}
 
 pub(crate) const ALBUM_ART_SIZE: i32 = 168;
 
@@ -413,6 +462,14 @@ pub(crate) fn refresh_album_grid(state: &Rc<RefCell<UiState>>) {
     let Some(grid) = grid else {
         return;
     };
+    let signature = album_grid_signature(&albums);
+    {
+        let mut ui = state.borrow_mut();
+        if ui.album_grid_signature == Some(signature) {
+            return;
+        }
+        ui.album_grid_signature = Some(signature);
+    }
     next_collection_render_generation(state);
     clear_flow_box(&grid);
 
@@ -435,6 +492,14 @@ pub(crate) fn refresh_artist_grid(state: &Rc<RefCell<UiState>>) {
     let Some(grid) = grid else {
         return;
     };
+    let signature = artist_grid_signature(&artists);
+    {
+        let mut ui = state.borrow_mut();
+        if ui.artist_grid_signature == Some(signature) {
+            return;
+        }
+        ui.artist_grid_signature = Some(signature);
+    }
     next_collection_render_generation(state);
     clear_flow_box(&grid);
 
@@ -457,6 +522,14 @@ pub(crate) fn refresh_playlist_grid(state: &Rc<RefCell<UiState>>) {
     let Some(grid) = grid else {
         return;
     };
+    let signature = playlist_grid_signature(&playlists);
+    {
+        let mut ui = state.borrow_mut();
+        if ui.playlist_grid_signature == Some(signature) {
+            return;
+        }
+        ui.playlist_grid_signature = Some(signature);
+    }
     next_collection_render_generation(state);
     clear_flow_box(&grid);
 
@@ -608,6 +681,7 @@ pub(crate) fn album_tile(
     state: Rc<RefCell<UiState>>,
     tile_index: usize,
 ) -> gtk::Button {
+    COLLECTION_TILES_BUILT.fetch_add(1, AtomicOrdering::Relaxed);
     let button = collection_tile_button(&album.name);
     button.add_css_class("album-tile");
     button.set_halign(Align::Fill);
@@ -660,6 +734,7 @@ pub(crate) fn artist_tile(
     state: Rc<RefCell<UiState>>,
     tile_index: usize,
 ) -> gtk::Button {
+    COLLECTION_TILES_BUILT.fetch_add(1, AtomicOrdering::Relaxed);
     let button = collection_tile_button(&artist.name);
     button.add_css_class("artist-tile");
 
@@ -697,6 +772,7 @@ pub(crate) fn playlist_tile(
     state: Rc<RefCell<UiState>>,
     tile_index: usize,
 ) -> gtk::Button {
+    COLLECTION_TILES_BUILT.fetch_add(1, AtomicOrdering::Relaxed);
     let button = collection_tile_button(&playlist.name);
     button.add_css_class("playlist-tile");
     button.set_halign(Align::Fill);
@@ -1305,5 +1381,76 @@ pub(crate) fn update_page_summary(ui: &UiState) {
                 upcoming_track_count(ui)
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn album(key: &str, name: &str, songs: usize, art: Option<&str>) -> AlbumSummary {
+        AlbumSummary {
+            key: key.to_string(),
+            name: name.to_string(),
+            artist: "Lizzy McAlpine".to_string(),
+            artist_image_url: None,
+            artwork_url: art.map(str::to_string),
+            song_count: songs,
+        }
+    }
+
+    fn artist(key: &str, albums: usize, songs: usize, image: Option<&str>) -> ArtistSummary {
+        ArtistSummary {
+            key: key.to_string(),
+            name: key.to_string(),
+            image_url: image.map(str::to_string),
+            album_count: albums,
+            song_count: songs,
+        }
+    }
+
+    #[test]
+    fn album_grid_signature_tracks_what_the_tiles_show() {
+        let tiles = vec![album("a", "five seconds flat", 14, Some("art-a"))];
+        assert_eq!(
+            album_grid_signature(&tiles),
+            album_grid_signature(&tiles.clone())
+        );
+
+        // Same album, different artwork: the tile would draw something else.
+        let reart = vec![album("a", "five seconds flat", 14, Some("art-b"))];
+        assert_ne!(album_grid_signature(&tiles), album_grid_signature(&reart));
+
+        // A song count feeds the subtitle.
+        let recounted = vec![album("a", "five seconds flat", 15, Some("art-a"))];
+        assert_ne!(
+            album_grid_signature(&tiles),
+            album_grid_signature(&recounted)
+        );
+
+        // Order is what the grid shows, so a reordered list is a rebuild.
+        let two = vec![
+            album("a", "five seconds flat", 14, Some("art-a")),
+            album("b", "doomsday", 4, Some("art-b")),
+        ];
+        let flipped = vec![two[1].clone(), two[0].clone()];
+        assert_ne!(album_grid_signature(&two), album_grid_signature(&flipped));
+
+        // And an empty grid is its own signature.
+        assert_ne!(album_grid_signature(&[]), album_grid_signature(&tiles));
+    }
+
+    #[test]
+    fn artist_grid_signature_covers_the_counters() {
+        let tiles = vec![artist("lizzy", 3, 32, Some("img"))];
+        let recounted = vec![artist("lizzy", 3, 33, Some("img"))];
+        assert_eq!(
+            artist_grid_signature(&tiles),
+            artist_grid_signature(&tiles.clone())
+        );
+        assert_ne!(
+            artist_grid_signature(&tiles),
+            artist_grid_signature(&recounted)
+        );
     }
 }
