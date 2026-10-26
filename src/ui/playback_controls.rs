@@ -528,11 +528,21 @@ pub(crate) fn update_playback_position(state: &Rc<RefCell<UiState>>) {
         return;
     }
 
+    // Hold the playhead still while the source is dry. This is what stops a
+    // track from skipping ahead by the length of a wifi drop.
+    {
+        let mut ui = state.borrow_mut();
+        if let Some(playback) = ui.playback.as_mut() {
+            playback.poll_stall();
+        }
+    }
+
     // Keep the loading spinner in sync with buffering state changes that don't
     // produce a PlaybackEvent (e.g. buffering percent updates mid-stream).
     {
-        let ui = state.borrow();
+        let mut ui = state.borrow_mut();
         update_play_button(&ui);
+        update_buffering_status(&mut ui);
     }
 
     let (position, duration, area, elapsed, remaining) = {
@@ -584,6 +594,50 @@ pub(crate) fn update_playback_position(state: &Rc<RefCell<UiState>>) {
             }
         }
         save_playback_snapshot_if_due(&mut state.borrow_mut());
+    }
+}
+
+/// Say "buffering" in the status line while the stream is held, and put the
+/// playing line back when it recovers. Only the transitions are written, so this
+/// cannot fight the other status writers on every tick.
+pub(crate) fn update_buffering_status(ui: &mut UiState) {
+    let (buffering, stalled, percent, playing, position) = match ui.playback.as_ref() {
+        Some(playback) => (
+            playback.is_buffering(),
+            playback.is_stalled(),
+            playback.buffering_percent(),
+            matches!(playback.state(), PlaybackState::Playing),
+            playback.position(),
+        ),
+        None => return,
+    };
+
+    if buffering && stalled {
+        let text = match percent {
+            Some(percent) if percent > 0 => format!("Buffering | {percent}%"),
+            // A stream still at zero has not started yet; a stream that already
+            // played is waiting on the network.
+            _ if position.is_none_or(|position| position.is_zero()) => {
+                "Buffering | loading stream".to_string()
+            }
+            _ => "Buffering | waiting for network".to_string(),
+        };
+        ui.playback_status.set_text(&text);
+        ui.buffering_status_shown = true;
+    } else if ui.buffering_status_shown {
+        ui.buffering_status_shown = false;
+        if playing {
+            let quality = ui
+                .playback_session
+                .queue_index
+                .and_then(|index| ui.playback_session.queue_tracks.get(index))
+                .map(|track| track.quality.clone());
+            let text = match quality {
+                Some(quality) => format!("Playing | {quality}"),
+                None => "Playing".to_string(),
+            };
+            ui.playback_status.set_text(&text);
+        }
     }
 }
 
