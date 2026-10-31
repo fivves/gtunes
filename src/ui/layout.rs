@@ -466,11 +466,9 @@ pub(crate) fn apply(root: &gtk::Box, state: &Rc<RefCell<UiState>>, class: Layout
         class.shows_player_actions(),
         "player actions",
     );
-    set_visible(
-        ui.compact_menu.as_ref(),
-        !class.shows_player_actions(),
-        "compact menu",
-    );
+    // The search box and utility row are never moved into this popover, so the
+    // button that opens it must never be offered: it would open an empty menu.
+    set_visible(ui.compact_menu.as_ref(), false, "compact menu");
     set_visible(
         Some(&ui.playback_status),
         class.shows_playback_status(),
@@ -504,16 +502,19 @@ pub(crate) fn apply(root: &gtk::Box, state: &Rc<RefCell<UiState>>, class: Layout
 /// real search box and utility row between the player bar and the compact menu,
 /// and rebuilding the track model so the visible rows pick up the inline artist.
 fn restructure(state: &Rc<RefCell<UiState>>, previous: Option<LayoutClass>, class: LayoutClass) {
-    let actions_move = previous
-        .map(|previous| previous.shows_player_actions() != class.shows_player_actions())
-        .unwrap_or(true);
     let artist_changes = previous
         .map(|previous| previous.shows_artist_in_row() != class.shows_artist_in_row())
         .unwrap_or(true);
 
-    if actions_move {
+    {
+        // The search box and utility row stay in the player bar at every size.
+        // Moving them into the compact menu's popover stranded the search field:
+        // the menu button is hidden whenever the bar has room, so a field that had
+        // been folded away could not be reached again. Asking for the unfolded
+        // state every tick is free, because the helper returns early when the
+        // widgets are already where they belong.
         let mut ui = state.borrow_mut();
-        move_player_actions(&mut ui, !class.shows_player_actions());
+        move_player_actions(&mut ui, false);
     }
 
     if artist_changes {
@@ -537,9 +538,9 @@ fn restructure(state: &Rc<RefCell<UiState>>, previous: Option<LayoutClass>, clas
     }
 }
 
-/// Move the search box and the utility row between the player bar and the
-/// compact menu's popover. Moving the real widgets means there is one live copy
-/// of each rather than a second one that would immediately go stale.
+/// Put the search box and the utility row back in the player bar if anything ever
+/// moved them out. Moving the real widgets (rather than duplicating them) means
+/// there is one live copy of each, and this is the only place that re-parents them.
 fn move_player_actions(ui: &mut UiState, into_menu: bool) {
     if ui.compact_actions_moved == into_menu {
         return;
