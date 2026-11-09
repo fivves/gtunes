@@ -93,6 +93,7 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         nav_radio_count: None,
         layout: LayoutClass::default(),
         sidebar: None,
+        body: None,
         sidebar_header: None,
         sidebar_cover_frame: None,
         nav_row_text: Vec::new(),
@@ -234,6 +235,7 @@ pub(crate) fn build_body(state: Rc<RefCell<UiState>>) -> gtk::Box {
 
     let content = build_content(state.clone());
     outer.append(&content);
+    state.borrow_mut().body = Some(outer.clone());
     outer
 }
 

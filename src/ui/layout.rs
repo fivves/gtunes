@@ -66,6 +66,15 @@ pub(crate) const HEIGHT_TINY_BELOW: i32 = 480;
 /// How much horizontal space the collapsed nav keeps.
 pub(crate) const SIDEBAR_RAIL_WIDTH: i32 = 56;
 
+/// What the sidebar cover art costs the sidebar's vertical stack: the 220px
+/// square, the 12px top margin the frame carries in CSS, and the 4px spacing the
+/// sidebar box puts above it.
+///
+/// The fit test below needs this as a number because it has to compare the stack
+/// WITH the art against a body height, and the frame can only be measured in the
+/// state it is currently in.
+pub(crate) const COVER_ART_STACK_HEIGHT: i32 = 236;
+
 /// How often the window size is checked. Matches the interval the player bar
 /// used while it owned this job: fine enough to track a drag, cheap enough to
 /// leave the frame clock alone.
@@ -177,6 +186,16 @@ impl LayoutClass {
     /// instead of sitting under it.
     pub(crate) fn shows_cover_art(self) -> bool {
         self.height == HeightClass::Tall && !self.uses_icon_rail()
+    }
+
+    /// Whether the sidebar could host the art at all.
+    ///
+    /// A short window is not automatically out: `shows_cover_art` is the tier's
+    /// default, and `apply` overrides it with the measured fit test, which is how
+    /// a 763px-tall window keeps its art while a 503px quarter still drops it.
+    /// The rail is the one hard no, because the art needs the real sidebar.
+    pub(crate) fn may_show_cover_art(self) -> bool {
+        !self.uses_icon_rail()
     }
 
     /// Search plus the shuffle/cast/settings row.
@@ -292,6 +311,21 @@ pub(crate) fn install_layout_watcher(root: &gtk::Box, state: Rc<RefCell<UiState>
             sync_settings_panel(&state);
         }
 
+        if debug_layout() && (size_changed || class_changed) {
+            let ui = state.borrow();
+            if let Some((content, has)) = cover_art_inputs(&ui) {
+                let needs = content + COVER_ART_STACK_HEIGHT;
+                let shown = ui
+                    .sidebar_cover_frame
+                    .as_ref()
+                    .is_some_and(|frame| frame.is_visible());
+                eprintln!(
+                    "layout: cover art needs {needs}px, body has {has}px -> {}",
+                    if shown { "shown" } else { "hidden" }
+                );
+            }
+        }
+
         if debug_layout()
             && (size_changed || class_changed)
             && let Some(report) = super::tracklist::track_table_width_report(&state)
@@ -396,6 +430,51 @@ fn same_classes(current: &[gtk::glib::GString], wanted: &[&str]) -> bool {
             .all(|want| current.iter().any(|have| have.as_str() == *want))
 }
 
+/// Does the art fit in the sidebar, given what the rest of the stack needs?
+///
+/// `content_height` is the sidebar's minimum WITHOUT the art and `body_height` is
+/// what the body actually gives the sidebar. Pure so the arithmetic is testable;
+/// `cover_art_requirement` is the widget half.
+///
+/// A zero body height means the window has not been laid out yet, and the answer
+/// there is no.
+pub(crate) fn fits_with_cover_art(content_height: i32, body_height: i32) -> bool {
+    body_height > 0 && content_height + COVER_ART_STACK_HEIGHT <= body_height
+}
+
+/// The two numbers the fit test needs: what the sidebar's stack costs WITHOUT
+/// the art, and the height the body gives it. `None` until the widgets exist,
+/// which is only the first few ticks of a window.
+///
+/// The sidebar is measured WITH the art counted either way: the art's cost is
+/// added back when the frame is currently visible. Measuring the sidebar only
+/// as-it-is would make the answer depend on its own last result, because a
+/// visible art raises the box's minimum and the box is what the answer is
+/// measured against.
+///
+/// The height it is compared to is the BODY's, not the sidebar's: the sidebar is
+/// allocated at least its own minimum, so in the state where the art does not fit
+/// the sidebar would report the inflated number and the test would agree with
+/// itself. The body is the same box the sidebar sits in, allocated by the window.
+fn cover_art_inputs(ui: &UiState) -> Option<(i32, i32)> {
+    let sidebar = ui.sidebar.as_ref()?;
+    let frame = ui.sidebar_cover_frame.as_ref()?;
+    let body = ui.body.as_ref()?;
+
+    let width = sidebar.width().max(LEFT_SIDEBAR_WIDTH);
+    let (_, measured, _, _) = sidebar.measure(gtk::Orientation::Vertical, width);
+    let content = if frame.is_visible() {
+        measured - COVER_ART_STACK_HEIGHT
+    } else {
+        measured
+    };
+    Some((content, body.height()))
+}
+
+fn cover_art_fits(ui: &UiState) -> bool {
+    cover_art_inputs(ui).is_some_and(|(content, body)| fits_with_cover_art(content, body))
+}
+
 /// Push one class at the widgets.
 ///
 /// Runs on EVERY watcher tick, not only on a tier change. Other modules own some
@@ -444,11 +523,11 @@ pub(crate) fn apply(root: &gtk::Box, state: &Rc<RefCell<UiState>>, class: Layout
     for label in &ui.nav_row_text {
         set_visible(Some(label), !class.uses_icon_rail(), "nav label");
     }
-    set_visible(
-        ui.sidebar_cover_frame.as_ref(),
-        class.shows_cover_art(),
-        "cover art",
-    );
+    // The art comes back below the Tall boundary when the stack has room for it,
+    // so the tier's answer is only the default: a Short window is judged by
+    // measurement, because "short" covers 480-999px and the art is 236px of it.
+    let cover_art = class.shows_cover_art() || (class.may_show_cover_art() && cover_art_fits(&ui));
+    set_visible(ui.sidebar_cover_frame.as_ref(), cover_art, "cover art");
     set_visible(
         ui.sidebar_queue_card.as_ref(),
         class.shows_sidebar_queue_card(ui.active_page),
@@ -792,6 +871,41 @@ mod tests {
             &["app-root", "layout-full", "height-tall"]
         ));
         assert!(!same_classes(&current, &["app-root", "layout-full"]));
+    }
+
+    #[test]
+    fn a_short_window_still_hosts_the_art_but_not_always() {
+        // The art stopped being a Tall-only luxury: the tier drops it because the
+        // FULL stack needs ~951px, and that left an empty corner in a 763px tall
+        // window that had room for a 236px square. The tier still says no, which
+        // is the default `apply` measures against.
+        let short = classify(922, 763);
+        assert_eq!(short.height, HeightClass::Short);
+        assert!(!short.shows_cover_art());
+        assert!(short.may_show_cover_art());
+
+        // The rail is the one hard no, at any height.
+        assert!(classify(1896, 1056).may_show_cover_art());
+        for width in [519, 637, 779] {
+            let class = classify(width, 1056);
+            assert!(class.uses_icon_rail());
+            assert!(!class.may_show_cover_art(), "{width}x1056");
+        }
+    }
+
+    #[test]
+    fn the_art_fits_only_when_the_body_can_give_it_its_height() {
+        // content + 236 <= body, and a body that has not been laid out yet is a no.
+        assert!(fits_with_cover_art(400, 636));
+        assert!(!fits_with_cover_art(400, 635));
+        assert!(!fits_with_cover_art(0, 235));
+        assert!(fits_with_cover_art(0, 236));
+        assert!(!fits_with_cover_art(400, 0));
+        // 442 is the Short tier's whole-window content minimum, so the stack it
+        // measures without the art is well under that: the boundary arithmetic is
+        // just the art's 236px.
+        assert!(!fits_with_cover_art(442, 677));
+        assert!(fits_with_cover_art(442, 678));
     }
 
     #[test]

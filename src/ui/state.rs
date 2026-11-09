@@ -67,6 +67,11 @@ pub(crate) struct UiState {
     pub(crate) nav_radio_count: Option<gtk::Label>,
     pub(crate) layout: LayoutClass,
     pub(crate) sidebar: Option<gtk::Box>,
+    /// The box the sidebar and the content sit in. Its height is the space the
+    /// sidebar's stack actually has, which is what the cover art's fit test asks:
+    /// the sidebar itself is allocated at least its own minimum, so measuring it
+    /// cannot tell "fits" from "clipped".
+    pub(crate) body: Option<gtk::Box>,
     pub(crate) sidebar_header: Option<gtk::Label>,
     pub(crate) sidebar_cover_frame: Option<gtk::Box>,
     pub(crate) nav_row_text: Vec<gtk::Label>,
